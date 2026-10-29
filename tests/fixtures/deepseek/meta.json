@@ -1,0 +1,11 @@
+{
+  "platform": "deepseek",
+  "recorded_at": "2026-10-29",
+  "source": "chat.deepseek.com/a/chat/s/1d7f0898 实测页面（bind --new 后的真实会话）",
+  "note": "composer.html = 输入区容器（textarea + ds-button 发送键）；messages.html = div.ds-virtual-list 全量（虚拟列表实测只渲染视口附近消息）",
+  "expected": {
+    "assistant": 2,
+    "all_messages": 4,
+    "user": 2
+  }
+}

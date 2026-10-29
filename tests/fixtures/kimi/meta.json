@@ -1,0 +1,11 @@
+{
+  "platform": "kimi",
+  "recorded_at": "2026-10-29",
+  "source": "www.kimi.com/chat/1a185c66 实测页面",
+  "note": "只取前 8 条 div.chat-content-item（虚拟化长列表全量太大），用 chat-detail-main 包一层",
+  "expected": {
+    "items": 8,
+    "assistant": 4,
+    "user": 4
+  }
+}

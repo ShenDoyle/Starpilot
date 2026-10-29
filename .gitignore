@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 凭证与密钥（星舵的自我约束：凭证不进仓库）
+*.env
+runtime/secrets/
+secrets/
+*.key
+*.pem
+*.secret
+
+# 运行产物（编排 run / 绑定 state / 侦察快照一律不进仓库）
+runtime/
+runs/
+state/
+stage/
+.wa-state.json
+*.bak
+conv-check*.png
+
+# 过程垃圾
+.workbuddy/tmp/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,13 @@
+{
+  "platform": "gemini",
+  "recorded_at": "2026-10-29",
+  "source": "gemini.google.com/app/a8b8143806a8b296 实测页面（10 轮历史，绑定后录制）",
+  "note": "composer.html = input-container 全量（Quill 编辑器 ql-blank 空态 + 条件渲染的发送键此时不存在，故 send 选择器命中 0）；messages.html = 最后 3 个 div.conversation-container 的真实 outerHTML（整页 10 个，为控体积只留尾部 3 个）",
+  "expected": {
+    "turns": 3,
+    "assistant": 3,
+    "user": 3,
+    "send_button_when_blank": 0,
+    "contenteditable": 2
+  }
+}
