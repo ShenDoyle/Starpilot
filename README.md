@@ -264,4 +264,4 @@ The full gap list lives in `SKILL.md` §8 (in Chinese).
 
 ## License
 
-[MIT](LICENSE) © 2026 ShenDoyle
+[MIT](LICENSE) © 2026 TOPcbm
