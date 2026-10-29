@@ -273,3 +273,9 @@ python scripts/wa.py bind "<对话地址>" --platform claude
 - **改指标口径**（`reply_count` / `msg_count` / `resend_attempts` / 通过线）必须同步
   `docs/orchestrator-contract.md` §2.4——指标定义不许只活在代码里。
 - 凭证不进仓库、不进对话、不进日志。星舵的自我约束同样适用于它自己。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 左立方（TOPcbm）
