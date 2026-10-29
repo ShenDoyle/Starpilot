@@ -106,7 +106,7 @@ python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 tests, stdl
 
 ### Use it two ways
 
-**A. As an agent skill** — Starpilot follows the de-facto `SKILL.md` convention (a folder whose front-matter declares `name` / `description`). If your AI agent harness loads skills this way, copy or symlink this folder into that harness's skills directory; the agent picks it up from the `description` and the trigger phrases inside (web-ai-loop, Starpilot, AI loop development, ...).
+**A. As an agent skill** — Starpilot follows the de-facto `SKILL.md` convention (a folder whose front-matter declares `name` / `description`). If your AI agent harness loads skills this way, copy or symlink this folder into that harness's skills directory. The agent activates on the `description`'s trigger phrases — English: **starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI**; Chinese triggers (网页版AI、AI循环开发、星舵…) are kept for habit compatibility.
 
 **B. Standalone CLIs** — everything under `scripts/` is plain stdlib Python 3.9+. Skip the skill layer entirely and drive the loop yourself with the commands below; `SKILL.md` then serves as the operating manual.
 
