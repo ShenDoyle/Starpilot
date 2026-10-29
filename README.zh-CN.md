@@ -101,6 +101,9 @@ cd Starpilot
 python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 个单测，纯标准库
 ```
 
+> **前置**：请先安装 **`bsk`** 浏览器驱动 CLI——本循环当前基于它构建并全链路实测
+> （见「六、外部依赖」；等价 CLI 可用 `BSK_BIN` 接入）。
+
 ### 两种用法
 
 **A. 装成 agent skill** —— 星舵遵循事实上的 `SKILL.md` 约定（一个文件夹，front-matter 声明
@@ -187,14 +190,19 @@ python scripts/lessons_audit.py --strict      # 知识库体检（blocking open 
 
 `scripts/platforms.py` 是平台差异的**唯一来源**，主流程 `wa.py` 不含任何平台专属选择器。
 
+> **推荐顺序：Kimi → ChatGPT → DeepSeek。**
+> Kimi 的单对话长记忆连贯性最好——这是本系统唯一的硬选型判据（全程只用一个对话）；
+> ChatGPT 选择器最精确、完成信号最全；DeepSeek 是国内首选（虚拟列表要求按消息 ID 做增量，工具层已处理）。
+> Gemini 与豆包已实测可用，但不在推荐集内；Claude 未实测。
+
 | key | 平台 | 状态 | 备注 |
 |---|---|---|---|
-| `chatgpt` | ChatGPT | **已实测** | 选择器精确、信号最完整，默认平台 |
-| `claude` | Claude | 待实测 | 推荐配合 Claude Projects（持久知识库对抗上下文压缩） |
-| `deepseek` | DeepSeek | **已实测** | 2026-10-29 全链路跑通；编辑器是 `textarea`（读 `value`，不是 `innerText`）、发送键带 BEM `--disabled`、消息容器是**虚拟列表**（增量必须靠消息 ID） |
+| `kimi` | Kimi | **已实测** · 推荐 | 长对话连贯性口碑最好的一档；写侧已跑通（2026-10-29 实测，编辑器是 Lexical，发送按钮是 `div` 不是 `button`） |
+| `chatgpt` | ChatGPT | **已实测** · 推荐 | 选择器精确、信号最完整，最稳的全能选手 |
+| `deepseek` | DeepSeek | **已实测** · 推荐 | 2026-10-29 全链路跑通；编辑器是 `textarea`（读 `value`，不是 `innerText`）、发送键带 BEM `--disabled`、消息容器是**虚拟列表**（增量必须靠消息 ID） |
 | `gemini` | Gemini | **已实测** | 2026-10-29 全链路跑通；编辑器是 **Quill**（`ql-editor`）——**exec 写入会静默失败**（字进 DOM 不进 model），必须走 `native` 真实键盘；发送键**条件渲染**（空输入时不存在）；轮次容器 `div.conversation-container` 的十六进制 `id` 是锚点 |
-| `kimi` | Kimi | **已实测** | 长对话连贯性口碑最好的一档；写侧已跑通（2026-10-29 实测，编辑器是 Lexical，发送按钮是 `div` 不是 `button`） |
 | `doubao` | 豆包 | **已实测** | 2026-10-29 全链路跑通；编辑器是 **Tiptap ProseMirror**——`bsk fill` 键盘模拟无效、`exec` 写入有效；**发送不能点按钮**（点击无反应且移走焦点），唯一路径 = exec 写入 + 焦点不丢 + Enter（`send_method=enter`）；「推荐提问」渲染在回复节点内部，读时剔除（`read_ignore`）；完成标志 = `message_action_regenerate` 出现（纯 icon 按钮，需 `regen_selector`） |
+| `claude` | Claude | 待实测 | 可配合 Claude Projects（持久知识库对抗上下文压缩） |
 
 **纪律提醒**：硬规则 1「全程只用一个对话地址」意味着**未绑定的平台不能探测**——
 矩阵里 `skipped_not_bound` = 没探测过（不是失败），`deferred_rule1` = 纪律搁置（不是技术失败）。
@@ -259,7 +267,7 @@ python scripts/wa.py bind "<对话地址>" --platform claude
 
 | 项 | 说明 |
 |---|---|
-| 浏览器驱动 CLI | 任何能「起浏览器会话 + navigate / evaluate / click / press / fill」的本地 CLI。缺省按 `bsk` 查找，用 `BSK_BIN` 指向你自己的二进制。一切 DOM 判定走 `evaluate`（JS 返回事实），不靠截图 |
+| 浏览器驱动 CLI | **本循环当前基于 `bsk` 构建并全链路实测——建议先安装 bsk。** `wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 查找；任何暴露同款命令（`session` / `navigate` / `evaluate` / `click` / `press` / `fill`）的本地 CLI 都可用 `BSK_BIN` 接入。一切 DOM 判定走 `evaluate`（JS 返回事实），不靠截图 |
 | Python 3.9+ | 标准库即可，无第三方依赖 |
 | 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 

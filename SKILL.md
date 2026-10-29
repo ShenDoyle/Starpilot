@@ -107,7 +107,9 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 python scripts/wa.py platforms        # 看支持哪些平台、哪些已实测
 ```
 
-已实测：**ChatGPT**、**Kimi**（2026-10-29 跑通完整一轮）。候选：Claude（持久工作区对抗压缩）、Gemini、DeepSeek（国内记忆强，需落盘兜底）、豆包。
+已实测（全链路）：**Kimi、ChatGPT、DeepSeek、Gemini、豆包**。
+**推荐顺序：Kimi → ChatGPT → DeepSeek**（Kimi 长记忆连贯性最好；ChatGPT 信号最全最稳；DeepSeek 国内首选）。
+候选：Claude（持久工作区对抗压缩）。
 **换平台前跑一遍 `templates/web-ai-eval.md`**（20 分钟，自测比评测准）。
 选定后写进 `.wa-state.json` 的 `platform`，后续命令自动沿用。
 
@@ -271,8 +273,9 @@ python scripts/wa.py wait --timeout 900 --platform chatgpt
 
 ### 5.1 依赖
 
-- **浏览器驱动 CLI**：任何能「起浏览器会话 + navigate / evaluate / click / press / fill」
-  的本地 CLI（缺省按 `bsk` 查找，用 `BSK_BIN` 环境变量指向你的二进制；不在 PATH 时必须设）
+- **浏览器驱动 CLI**：本 skill 当前**基于 `bsk` 构建并全链路实测——建议先安装 bsk**。
+  `wa.py` 依次在 `BSK_BIN` 环境变量、`PATH`、`~/.local/bin` 查找；不在 PATH 时必须设。
+  也可用 `BSK_BIN` 指向任何暴露同款命令（session / navigate / evaluate / click / press / fill）的本地 CLI
 - Python 3.9+（**仅标准库，无第三方依赖**；任何标准 Python 安装即可）
 
 ### 5.2 目录约定

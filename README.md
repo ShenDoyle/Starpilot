@@ -104,6 +104,8 @@ cd Starpilot
 python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 tests, stdlib only
 ```
 
+> **Prerequisite**: install the **`bsk`** browser-driving CLI first — the loop is currently built and live-tested against it (see §6; a `BSK_BIN` override exists for equivalent CLIs).
+
 ### Use it two ways
 
 **A. As an agent skill** — Starpilot follows the de-facto `SKILL.md` convention (a folder whose front-matter declares `name` / `description`). If your AI agent harness loads skills this way, copy or symlink this folder into that harness's skills directory. The agent activates on the `description`'s trigger phrases — English: **starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI**; Chinese triggers (网页版AI、AI循环开发、星舵…) are kept for habit compatibility.
@@ -184,14 +186,17 @@ python scripts/lessons_audit.py --strict      # knowledge-base health check (blo
 
 `scripts/platforms.py` is the **single source** of platform differences; the main flow `wa.py` contains no platform-specific selectors.
 
+> **Recommended, in order: Kimi → ChatGPT → DeepSeek.**
+> Kimi leads on single-conversation long-memory coherence — the one hard selection criterion in this system (one conversation for the whole project life). ChatGPT has the most precise selectors and the richest completion signals. DeepSeek is the strongest domestic option (its virtual list demands ID-based deltas, which the tooling already handles). Gemini and Doubao are live-tested and usable, but sit outside the recommended set; Claude is untested.
+
 | key | Platform | Status | Notes |
 |---|---|---|---|
-| `chatgpt` | ChatGPT | **Live-tested** | Precise selectors, richest signals; the default platform |
-| `claude` | Claude | Not tested | Pairs well with Claude Projects (persistent knowledge against context compression) |
-| `deepseek` | DeepSeek | **Live-tested** | Full chain 2026-10-29; editor is a `textarea` (read `value`, not `innerText`), send button uses BEM `--disabled`, messages live in a **virtual list** (deltas must use message IDs) |
+| `kimi` | Kimi | **Live-tested** · recommended | Top tier for long-context coherence; write path live (2026-10-29; Lexical editor, send control is a `div`, not a `button`) |
+| `chatgpt` | ChatGPT | **Live-tested** · recommended | Precise selectors, richest signals; the safest all-rounder |
+| `deepseek` | DeepSeek | **Live-tested** · recommended | Full chain 2026-10-29; editor is a `textarea` (read `value`, not `innerText`), send button uses BEM `--disabled`, messages live in a **virtual list** (deltas must use message IDs) |
 | `gemini` | Gemini | **Live-tested** | Full chain 2026-10-29; editor is **Quill** (`ql-editor`) — **exec writes silently fail** (text enters DOM, not model), must use `native` real keystrokes; send button is conditionally rendered (absent on empty input); `div.conversation-container`'s hex `id` is the anchor |
-| `kimi` | Kimi | **Live-tested** | Top tier for long-context coherence; write path live (2026-10-29; Lexical editor, send control is a `div`, not a `button`) |
 | `doubao` | Doubao (豆包) | **Live-tested** | Full chain 2026-10-29; editor is **Tiptap ProseMirror** — `bsk fill` keystroke simulation fails, `exec` works; **the send button must not be clicked** (no reaction and it steals focus); the only working path is exec write + keep focus + Enter (`send_method=enter`); "suggested questions" render inside the reply node and are stripped on read (`read_ignore`); completion signal = `message_action_regenerate` appearing (icon-only button, needs `regen_selector`) |
+| `claude` | Claude | Not tested | Pairs well with Claude Projects (persistent knowledge against context compression) |
 
 **Discipline reminder**: hard rule 1 ("one conversation for the whole life") means **a platform cannot be probed without binding it** — in the matrix, `skipped_not_bound` means never probed (not a failure) and `deferred_rule1` means shelved by discipline (not a technical failure). Live-testing another platform requires a **human rebinding decision** — that is an architect-level call.
 
@@ -254,7 +259,7 @@ The full gap list lives in `SKILL.md` §8 (in Chinese).
 
 | Item | Notes |
 |---|---|
-| Browser-driving CLI | Any local CLI that can start a browser session and run `navigate` / `evaluate` / `click` / `press` / `fill` commands. Default lookup name is `bsk`; point `BSK_BIN` at your own binary. All DOM decisions go through `evaluate` (JS returns facts), never screenshots |
+| Browser-driving CLI | **The loop is currently built and live-tested against `bsk` — install it first.** `wa.py` looks it up on `PATH` and `~/.local/bin`, or honors a `BSK_BIN` override. Any local CLI exposing the same commands (`session` / `navigate` / `evaluate` / `click` / `press` / `fill`) can be wired in via `BSK_BIN`; all DOM decisions go through `evaluate` (JS returns facts), never screenshots |
 | Python 3.9+ | Stdlib only, zero third-party dependencies |
 | Web AI | One logged-in conversation URL + one browser instance |
 
