@@ -174,7 +174,7 @@ python scripts/lessons_audit.py --strict      # knowledge-base health check (blo
 ### The six hard rules (violating any = failure)
 
 1. **One conversation** — the project uses exactly one web-AI conversation URL for its entire life; never open another.
-2. **No guessing intent** — unclear requirements produce questions, not solutions.
+2. **No guessing intent** — unclear requirements produce questions, not solutions; **raw requirements pass through unmodified**: the user's original wording reaches the web AI verbatim, anything the agent adds must be factual and explicitly labeled, and clarifying questions come from the **web AI** (the agent only relays).
 3. **No screenshots for judgment** — state is always determined from DOM / element attributes.
 4. **Stop after two failures** — two consecutive failures on the same goal means package-and-hand-off; no third workaround attempt.
 5. **Report truthfully** — failure is reported as failure; every number must have a source.

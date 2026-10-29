@@ -25,7 +25,8 @@ import sys
 
 # 允许出现在表格里的占位符（模板原样带来的空值）
 PLACEHOLDERS = {"", "-", "—", "（不超过 30 字，说清「谁、在什么场景下、要什么结果」）",
-                "待确认 / 已确认 / 部分确认（不算通过）"}
+                "待确认 / 已确认 / 部分确认（不算通过）",
+                "（transcript 相对路径，如 `docs/requirements/<需求名>-transcript.md`）"}
 
 SECTION_HEADINGS = {
     "已明确": r"^##+\s*一、已明确",
@@ -99,7 +100,8 @@ def _basic_fields(text: str) -> dict:
     out = {}
     for line in text.splitlines():
         cells = _cells(line)
-        if len(cells) >= 2 and cells[0] in ("项目名", "提出人", "提出日期", "一句话目标"):
+        if len(cells) >= 2 and cells[0] in ("项目名", "提出人", "提出日期", "一句话目标",
+                                            "原始往来记录"):
             out[cells[0]] = cells[1]
     return out
 
@@ -130,6 +132,13 @@ def validate(text: str) -> dict:
         if not val or val in PLACEHOLDERS:
             v.append({"code": "BASIC_EMPTY", "section": "基本信息",
                       "detail": "「%s」为空" % key})
+
+    raw_brief = (basic.get("原始往来记录") or "").strip()
+    if not raw_brief or raw_brief in PLACEHOLDERS:
+        v.append({"code": "RAW_BRIEF_MISSING", "section": "基本信息",
+                  "detail": "「原始往来记录」为空：需求分析由网页版 AI 主导，卡片必须是"
+                            " agent↔网页版 AI↔用户 往来的**摘录**——先把 transcript 落盘再填卡"
+                            "（硬规则 2 · 原始需求零加工转交）"})
 
     if not secs["已明确"]:
         v.append({"code": "CLARIFIED_EMPTY", "section": "一、已明确",
@@ -170,6 +179,7 @@ def validate(text: str) -> dict:
         "ok": not v,
         "violations": v,
         "stats": {
+            "raw_brief": 1 if raw_brief and raw_brief not in PLACEHOLDERS else 0,
             "clarified": len(secs["已明确"]),
             "pending": len(secs["未明确"]),
             "conflicts": len(secs["有冲突"]),
