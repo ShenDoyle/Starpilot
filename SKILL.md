@@ -65,7 +65,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 激活后**不要立刻提问**，先把这些读完：
 
 - 本次会话里用户发过的**全部消息**（含截图、附件、粘贴的报错）
-- 工作区里已有的 `readme.md` / `docs/` / `AGENTS.md` / `.workbuddy/memory/` 近几日日志
+- 工作区里已有的 `readme.md` / `docs/` / `AGENTS.md` / 记忆与日志目录（若存在）近几日内容
 - 项目当前状态（已完成的、进行中的、明确不做的）
 
 读不完就说明读不完，不要跳过。
@@ -271,10 +271,9 @@ python scripts/wa.py wait --timeout 900 --platform chatgpt
 
 ### 5.1 依赖
 
-- **浏览器驱动 CLI**（默认 `bsk`，可用 `BSK_BIN` 环境变量替换）：
-  `C:\Users\Administrator\.local\bin\bsk.exe`（**不在 PATH，用全路径或设 BSK_BIN**）
-- Python 3.9+（仅标准库；WorkBuddy 自带：`~/.workbuddy/binaries/python/envs/default/Scripts/python.exe`）
-- 参考 `browser-skill` skill 了解 bsk 全量命令
+- **浏览器驱动 CLI**：任何能「起浏览器会话 + navigate / evaluate / click / press / fill」
+  的本地 CLI（缺省按 `bsk` 查找，用 `BSK_BIN` 环境变量指向你的二进制；不在 PATH 时必须设）
+- Python 3.9+（**仅标准库，无第三方依赖**；任何标准 Python 安装即可）
 
 ### 5.2 目录约定
 

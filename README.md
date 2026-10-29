@@ -96,13 +96,21 @@ Starpilot/
 
 ## 3. How to use
 
-### Install as a skill
+### Get it
 
-```powershell
-Copy-Item -Recurse -Force D:\Project\Starpilot "$env:USERPROFILE\.workbuddy\skills\starpilot"
+```bash
+git clone https://github.com/ShenDoyle/Starpilot.git
+cd Starpilot
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 tests, stdlib only
 ```
 
-After installation it is triggered by the `description` in `SKILL.md`. Legacy trigger phrases kept for habit compatibility: **web-ai-loop, Starpilot, 网页版AI, 挂chatgpt, AI循环开发, 外脑开发, 星舵**.
+### Use it two ways
+
+**A. As an agent skill** — Starpilot follows the de-facto `SKILL.md` convention (a folder whose front-matter declares `name` / `description`). If your AI agent harness loads skills this way, copy or symlink this folder into that harness's skills directory; the agent picks it up from the `description` and the trigger phrases inside (web-ai-loop, Starpilot, AI loop development, ...).
+
+**B. Standalone CLIs** — everything under `scripts/` is plain stdlib Python 3.9+. Skip the skill layer entirely and drive the loop yourself with the commands below; `SKILL.md` then serves as the operating manual.
+
+> Starpilot is **host-agnostic**: it does not depend on any particular agent product, OS, or machine. The only external dependency is a local browser-driving CLI (see §6).
 
 ### Run one loop manually
 
@@ -246,7 +254,7 @@ The full gap list lives in `SKILL.md` §8 (in Chinese).
 
 | Item | Notes |
 |---|---|
-| Browser-driving CLI | Default `bsk` (`~/.local/bin/bsk.exe`) + the `browser-skill` skill; `wa.py` honors `BSK_BIN` override |
+| Browser-driving CLI | Any local CLI that can start a browser session and run `navigate` / `evaluate` / `click` / `press` / `fill` commands. Default lookup name is `bsk`; point `BSK_BIN` at your own binary. All DOM decisions go through `evaluate` (JS returns facts), never screenshots |
 | Python 3.9+ | Stdlib only, zero third-party dependencies |
 | Web AI | One logged-in conversation URL + one browser instance |
 

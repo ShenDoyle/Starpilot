@@ -43,7 +43,6 @@ _CANDIDATES = [
     shutil.which("bsk") or "",
     os.path.expanduser("~/.local/bin/bsk.exe"),
     os.path.expanduser("~/.local/bin/bsk"),
-    r"C:\Users\Administrator\.local\bin\bsk.exe",
 ]
 
 

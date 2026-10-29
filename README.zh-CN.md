@@ -93,14 +93,25 @@ Starpilot/
 
 ## 三、怎么用
 
-### 装成 skill
+### 获取
 
-```powershell
-Copy-Item -Recurse -Force d:\Project\Starpilot "$env:USERPROFILE\.workbuddy\skills\starpilot"
+```bash
+git clone https://github.com/ShenDoyle/Starpilot.git
+cd Starpilot
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 个单测，纯标准库
 ```
 
-装好后由 `SKILL.md` 的 `description` 触发。保留的历史触发词（便于沿用习惯）：
-**网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、web-ai-loop、星舵、Starpilot**。
+### 两种用法
+
+**A. 装成 agent skill** —— 星舵遵循事实上的 `SKILL.md` 约定（一个文件夹，front-matter 声明
+`name` / `description`）。如果你的 AI agent 宿主按此约定加载 skill，把本文件夹复制或软链进
+它的 skills 目录即可；宿主会凭 `description` 与触发词（网页版AI、AI循环开发、web-ai-loop、星舵…）激活。
+
+**B. 独立 CLI** —— `scripts/` 全部是 Python 3.9+ 纯标准库脚本，不装 skill 也能直接按下面的
+命令驱动循环；此时 `SKILL.md` 当操作手册读。
+
+> 星舵是**宿主无关**的：不依赖任何特定 agent 产品、操作系统或某台机器。唯一外部依赖是
+> 一个本地浏览器驱动 CLI（见「六、外部依赖」）。
 
 ### 起一轮循环
 
@@ -248,7 +259,7 @@ python scripts/wa.py bind "<对话地址>" --platform claude
 
 | 项 | 说明 |
 |---|---|
-| 浏览器驱动 CLI | 默认 `bsk`（`~/.local/bin/bsk.exe`）+ `browser-skill` skill；`wa.py` 支持 `BSK_BIN` 覆盖 |
+| 浏览器驱动 CLI | 任何能「起浏览器会话 + navigate / evaluate / click / press / fill」的本地 CLI。缺省按 `bsk` 查找，用 `BSK_BIN` 指向你自己的二进制。一切 DOM 判定走 `evaluate`（JS 返回事实），不靠截图 |
 | Python 3.9+ | 标准库即可，无第三方依赖 |
 | 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
