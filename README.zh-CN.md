@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/Tencent/BrowserSkill"><img alt="核心依赖 bsk" src="https://img.shields.io/badge/%E6%A0%B8%E5%BF%83%E4%BE%9D%E8%B5%96-bsk-2f75f0"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-0.1.0%20preview-6b7280">
+  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-0.1.1%20preview-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -202,7 +202,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 268 条，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 292 条，纯标准库
 python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```

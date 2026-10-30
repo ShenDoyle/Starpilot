@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.0"
+version: "0.1.1"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.0）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.1）。版本只从 `SKILL.md` 读，不从别处猜。
 - **编号沿革**：开发期内部迭代到 `2.3.4`，2026-10-30 首次对外发布时归零为 `0.1.0`（预览版，不是正式版）。升级判据是「远端 > 本地」，所以从 2.3.4 迁过来要用 `upgrade.py --to-latest --force` 重装一次。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
@@ -470,6 +470,16 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 §2.5 那三条不是「停下来找人」，是**按固定策略自愈**。共同要求：动作可查（journal 有记录）、
 结果要说（交付或人回来时逐条讲），但**不等人点头**。
 
+**先分清两件事**，处置完全不同：
+
+| | 判据 | 处置 |
+|---|---|---|
+| **窗口被回收** | `conv_id` 没变，地址还能打开；`wa.py wait/read` 报连续探测失败或 `session_lost` | **在同一个 url 上续窗**。`wait` 内置 `--max-recover 1` 会自动续一次；回复在平台侧，不会丢 |
+| **对话真没了 / 被换掉** | `conv_id` 变了、地址变首页、提示对话不存在 | 走 4.9.1 `rebind`（开新对话 + 上下文摘要） |
+
+bsk 默认空闲 5 分钟就回收 Agent Window，所以「窗口没了」是常态、不是故障。
+**别把续窗写成 rebind**：新对话没有上文，拿它接着干等于让 AI 失忆重来。
+
 #### 4.9.1 对话漂移 / 对话消失 → `rebind`
 
 | 现象 | 判定 |
@@ -611,6 +621,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `orchestrator.py lesson --blocking` | 登记一条「不闭合就不许收口」的 lesson |
 | `wa.py unlock` | 清残留的 state 写锁（O_EXCL 锁 + 死进程接管） |
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
+| `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
 | `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk（§5.1） |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
@@ -620,6 +631,14 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 - 用 `--no-focus` 起窗口，**不抢用户焦点**，不干扰用户正常用电脑。
 - 任务结束才 `session stop`；中途停止会丢 Agent Window 状态。
 - 同一时刻只允许一个 session 操作该对话，避免双写。
+- **一个浏览器只留一份 BrowserSkill 扩展**。同一个 Chrome 里装了两份以上，bsk 会报多个
+  实例：发送落在实例 A、读回却查实例 B，表现就是「发得出去、永远读不到回复」，每次重试
+  再开一个新窗口。开窗前跑一次 `wa.py doctor`，`duplicates` 非空就先让人清
+  （`chrome://extensions` 里删到只剩一个），**不要带着重复实例硬跑**。
+- **开窗频率有上限**：10 分钟内第 4 次 `session start` 直接拒（rc≠0），并打印现场。
+  短时间反复开窗不是「重试」，是环境在反复失效——那时该看 doctor，不是再开一个。
+- 续窗**必须复用同一个 `url`**（`ensure_session` 已按 state 里的 `url` 重放），
+  绝不 `bind --new`：上下文和回复都在原对话里。
 
 ### 5.3.1 并发纪律（多任务共用同一个网页 AI 时）
 
@@ -652,9 +671,10 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 6 | 幂等（同 prompt+URL hash 拒重发） | 崩溃恢复后重复提问 | `write_gate._already_sent` | `loop --resume` 实测零重发 |
 | 7 | 两次失败停 + fail_streak 唯一写入口 | 无限重试把「指令错误」变成废墟 | SKILL §4.4；`orchestrator.VERDICT_EFFECT` | `tests.test_orchestrator_gaps`；源码守卫禁裸写 |
 | 8 | state 写锁 | 两个 run 同时写互相覆盖（=「同一对话」被无声破坏） | `statelock.py`（O_EXCL + 死进程接管） | `tests.test_statelock` |
-| 9 | 弹窗/遮罩不硬发 | modal 挡住点击 → 点空气白耗一轮 | `wa.py send` 前置 modal 检查 | Kimi 限流弹窗实测 |
+| 9 | 弹窗/遮罩不硬发 | modal 挡住点击 → 点空气白耗一轮；**反向**：0×0 隐形容器把正常页面判成弹窗、永远发不出去 | `wa.py send` 前置 modal 检查（可见 + 面积 ≥24px，报 `modal_rect`） | Kimi 限流弹窗实测；`tests.test_wa_session` |
 | 10 | 空输入不点空气 | 「看着写好了、其实没写」（工具自证≠事实） | `platforms.fill_check` 三见证 | `tests.test_fill_guard` |
-| 11 | 单窗口纪律 | 窗口堆积、双写同一对话 | `ensure_session` 收同实例旁支会话 | `orchestrator.py windows` 运行时断言 |
+| 11 | 单窗口纪律 | 窗口堆积、双写同一对话 | `ensure_session` 收同实例旁支会话（按 `browser_instance_id` 对账）；10 分钟内开窗 ≥4 次直接拒 | `orchestrator.py windows` 运行时断言；`tests.test_wa_session` |
+| 11.1 | 实例唯一性 | 同一浏览器装多份扩展 → 发送在 A、读回在 B（「永远读不到回复」） | `instance_report` 按 label 判重复，开窗前拦下并给修复路径；`wa.py doctor` 可随时体检 | `tests.test_wa_session` |
 | 12 | 登录不代填凭证 | 凭证进对话/日志 | SKILL §3.1 | 人工纪律 |
 | 13 | 敏感数据不进正文 | 密钥/客户数据进平台服务器 | SKILL §3.1（本轮新增） | 发送前自查正文 |
 | 14 | 审计 journal + evidence + lessons blocking | 事后无法追溯、带病收口 | `runs/*/journal.jsonl`；`lessons_audit.py` | `audit --trace`；blocking open 拒绝 close |
@@ -687,6 +707,10 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 输入框内容删不掉、重写变追加 | 受控编辑器忽略 `execCommand('delete')`／`paste` 是追加 | 用 Range 圈定内容 + `execCommand('insertText')` 覆盖；Kimi 已按此配置 |
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
 | 某任务回复加载不出 / 对话被跳到别处 | **另一任务在同一平台抢会话**（多任务并发打架） | 双方都停：`wa.py plock` 看谁在用；错开平台或浏览器 profile（`STARPILOT_LOCK_KEY`）后再继续；被抢的任务按 URL 漂移守卫停下，**不要自动跳转、不要自动重绑** |
+| 总是读不到回复，且开了一堆标签页 | **同一浏览器装了多份 BrowserSkill**（bsk 报多个实例）：发送在 A、读回在 B | `wa.py doctor` 看 `duplicates`；`chrome://extensions` 里删到只留一份，再跑一次 doctor 确认 `ok: true` |
+| 读不到回复，但 `probe` 一切正常 | 窗口被 bsk 按空闲回收了（默认 5 分钟），state 里的 session 已不存在 | `wa.py wait` / `read` 会自动续窗一次；仍失败就 `wa.py doctor` 看会话，再 `bind <同一个 url>` 接上，**不要 `--new`** |
+| 反复开窗、10 分钟内被拒（rc≠0） | 会话在反复失效或实例在切换，重试掩盖了真实原因 | 停下来看 doctor + 最近一次 `wait` 输出的 `stage`（`session_lost` / `timeout`），按 §4.4 把现场报回去 |
+| 弹窗检测把正常页面判成弹窗 | 平台有 0×0 的隐形 `[role="dialog"]` 容器（ChatGPT 实测） | 判据已改为「可见 + 面积 ≥24px」；报错里带 `modal_rect`，尺寸异常就说明是配置问题，不是页面挡路 |
 | send / bind 被拒（rc=9） | 平台占用锁被另一任务持有 | 等对方任务收口后重试；确认是残留锁才 `wa.py plock --release --platform <key>` |
 | 跑到一半开始反复要批准 | 授权单到期或条数用完（`expire_time` / `max_writes`） | 这是设计行为，不是 bug；重新 `approve --scope task` 续一张，或确认用户就是想收权 |
 | 写入被拒 `WRITE_BLOCKED_*` 且带 `risk` 字段 | 越界请求被分级拦下 | 看 `risk.level`：medium 直接按 `risk.alternative` 换方案继续；high 才转人工 |
@@ -710,7 +734,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v0.1.0 现状，别假装有）
+## 8. 已知缺口（v0.1.1 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|

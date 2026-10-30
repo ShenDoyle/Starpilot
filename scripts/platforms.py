@@ -748,8 +748,30 @@ def js_probe(p):
 
   // 弹窗 / 遮罩：有它在，真实点击会被挡死（实测 Kimi 限流提示）。
   // 不报出来 = 「点击没反应」会被误判成选择器坏了。
-  const modal = document.querySelector('div.modal-mask, [role="dialog"], [aria-modal="true"]');
-  const modalText = modal ? (modal.innerText || '').trim().slice(0, 120) : '';
+  //
+  // 2026-10-30 实测（ChatGPT）：页面里常驻一个 **0×0 的隐形 [role="dialog"]**
+  // （编辑器附件菜单的容器）。老判据只看「节点存在」，于是每次发送前都被当成
+  // 弹窗拒发 —— 任务卡在第一句「先打招呼」上，永远发不出去。
+  // 「节点存在」是事实，「挡住点击」才是要判的东西：只有几何尺寸 + 计算样式能回答。
+  const visibleModal = (() => {
+    let best = null, bestArea = 0;
+    for (const el of document.querySelectorAll('div.modal-mask, [role="dialog"], [aria-modal="true"]')) {
+      if (el.getAttribute('aria-hidden') === 'true') { continue; }
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 24) { continue; }
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') { continue; }
+      if (parseFloat(cs.opacity || '1') < 0.1) { continue; }
+      const area = r.width * r.height;
+      if (area > bestArea) { bestArea = area; best = el; }
+    }
+    return best;
+  })();
+  const modalText = visibleModal ? (visibleModal.innerText || '').trim().slice(0, 120) : '';
+  const modalRect = visibleModal ? (() => {
+    const r = visibleModal.getBoundingClientRect();
+    return Math.round(r.width) + 'x' + Math.round(r.height);
+  })() : '';
 
   // ---- 锚点指纹（计数用，见 §2.4）----
   const asstFps = asst.map(fpT).filter(Boolean);
@@ -833,8 +855,9 @@ def js_probe(p):
     last_role: lastText ? 'assistant' : null,
     last_len: lastText.length,
     last_tail: lastText.slice(-300),
-    modal: !!modal,
+    modal: !!visibleModal,
     modal_text: modalText,
+    modal_rect: modalRect,
     error: errs
   });
 })()

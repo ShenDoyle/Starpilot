@@ -1,4 +1,4 @@
-# orchestrator 契约（O0 基线冻结）· **v1.6**
+# orchestrator 契约（O0 基线冻结）· **v1.7**
 
 > 本文件是**实现规格**，不是愿望清单。`scripts/orchestrator.py` / `scripts/write_gate.py` 必须逐条对上。
 > 冻结日期：2026-10-29　·　来源：网页 AI（Kimi）第 1 轮规划回复 `runtime/wa/turn-001-reply.md`
@@ -9,7 +9,7 @@
 
 ## 0.0 契约版本与冻结规则
 
-**契约版本：v1.6（升级于 2026-10-30，依据用户「无人值守不该被打断」裁定）**
+**契约版本：v1.7（升级于 2026-10-30，依据豆包机实测「读不到回复 + 窗口堆积」）**
 
 **冻结范围**：§2.4 的指标定义与单写通过线（`reply_count` / `msg_count` /
 `resend_attempts` / `effective_delta == 1`）、§2.4.1 锚点优先级、§2.5 的
@@ -42,6 +42,7 @@ ChatGPT 按硬规则 1 纪律搁置（`deferred_rule1`）——这些是**平台
 
 | **v1.5** | **2026-10-30** | ① **§2.9 授权范围与 `expire_time`**：`scope=single|count|stage|task`（默认上限 1/5/50/200），授权单落 `writes/_grants/`，含人话 `scope_human`；过期或用完回落到需批准，不静默降级；② **§2.10 越界风险分级**：`risk.py` low 放行留痕 / medium 换替代方案继续 / high 停下转人工，拦截输出带人话；③ **§2.11 mid-loop 模式切换**：`orchestrator.py mode --set step|auto --reason`，下一轮生效、不重开 run、journal 留痕；④ **§2.12 步骤回执与完成度判定权**：每轮反馈必带「它让我做的/我实际做的/一致？/差异原因」四列，完成度由网页 AI 判定，auto≠不问架构师，无回执不进下一轮；⑤ **§2.13 读正文剔除思考过程**：`READ_IGNORE_COMMON` + 平台 `sel.read_ignore`，克隆节点剔除，probe 与 read 同口径；⑥ INIT 出口改为「预期完整性」而非轮次硬约束（信息一次给足即不必再往返） | 用户六条规划反馈：不反复打扰、一次授权、越界先保完成、中途可改、每步由 webAI 判完成度、弱引导（confirm-gate 人话确认单）|
 | **v1.6** | **2026-10-30** | ① **§2.14 三种可自愈情况**：连续失败 2 次 → `replan` 回网页 AI 换方案（唯一入口 `REPLAN`，计数清零 + 回 READY，不找人）；对话漂移/消失 → `rebind` 收旧窗 + 开独立对话 + 置 `needs_context_digest`，下一轮先贴项目现状摘要；新歧义且预案未覆盖 → 让网页 AI 按「符合项目要求的最优解」裁定后 `decide` 留痕；② **禁止悄悄决定/悄悄交付**：`close` 汇总 `autonomy_decisions`，交付或人介入时逐条告知；③ 真·停收窄为四种（物理动作 / high 风险越界 / 环境彻底不可用 / 预算烧完）；④ §2.7 第 3 条、§2.11 第 3 条、§2.12 第 4 条同步改为「默认自愈」 | 用户裁定：失败两次是回去找 AI 换思路，不是停下来找人；漂移多半是抢对话或人动了窗口，回收旧窗开新对话继续；新歧义让 webAI 按项目要求判最优解，但必须留痕告知 |
+| **v1.7** | **2026-10-30** | ① **§2.15 实例唯一性与窗口回收**：`instance_report` 按 label 判重复，开窗前拦下重复安装并给修复路径（`WA_ALLOW_DUPLICATE_EXT=1` 可绕过）；`_norm_session` 折 `browser_instance_id`（旧实现过滤条件恒真 → 旧窗口一个都收不掉）；实例选择只用 `browsers --json`，无法唯一确定就报错不就近挑；窗口回收 → 原地址续窗（`--max-recover`，默认 1），`conv_id` 变了才 `rebind`；10 分钟内第 4 次开窗直接拒；② 弹窗判据改「可见 + 面积 ≥24px」并报 `modal_rect`（ChatGPT 的 0×0 隐形 `[role=dialog]` 会让每次发送都被判成弹窗）；③ §5 新增 `wa.py doctor` / `wa.py wait --max-recover` | 豆包工作机实测：同一 Chrome 装 4 份扩展 → 发送与读回落在不同实例，永远读不到回复且窗口堆积 |
 
 ### v1.0 冻结证据（历史，保留备查）
 
@@ -488,6 +489,35 @@ decide 缺字段拒绝、close 汇总自主决定）；`SKILL.md` §4.9。
 
 ---
 
+## 2.15 实例唯一性与窗口回收（v1.7 新增）
+
+**背景**：豆包工作机的 Chrome 里装了 4 份 BrowserSkill，bsk 报 4 个实例。现象是「发送成功但
+永远读不到回复」，且一次任务开出一堆标签页。两个机制都没兜住：
+
+1. 会话绑在实例 A，读回按 `session list` 取任意一条去查 → 可能落到实例 B 的窗口上，读到空页面；
+2. `list_sessions` 没把 `browser_instance_id` 折进 `browser` → `enforce_single_session` 的
+   `s["browser"] != browser` 永远成立 → **一个旧窗口都收不掉**，每次重绑多一个窗口。
+
+**规则**：
+
+1. **实例唯一性**：`instance_report` 按 `label` 判重复（同 label 多实例 = 同一浏览器装了多份）。
+   `ensure_session` 开窗前必须拦下并打印修复路径（`chrome://extensions` 删到只留一份）；
+   环境变量 `WA_ALLOW_DUPLICATE_EXT=1` 可临时绕过，但读回错乱自负。`label` 为空的多个实例
+   只算「无法区分」，不当重复（多 profile 是合法配置）。
+2. **实例选择必须确定**：只用 `browsers --json`；`WA_BROWSER_PREFER` 匹配 `label` / 浏览器名 /
+   实例 id，命中必须唯一；多个实例且无法唯一确定 → 返回空并由调用方报错，**绝不就近挑一个**。
+3. **窗口回收 ≠ 对话消失**：`conv_id` 没变 → **续窗**（`ensure_session(renew=True)` 按 state 里的
+   `url` 重放，不新开对话）；`conv_id` 变了 / 地址变首页 / 提示不存在 → 才走 §2.14 第 2 条 `rebind`。
+   `wa.py wait` 连续 3 次探测失败且 `session_alive=false` 时报 `stage=session_lost`，并按
+   `--max-recover`（默认 1）在原地址续窗一次；`read` 同逻辑。**禁止**把续窗写成 `bind --new`。
+4. **开窗限速**：10 分钟内第 4 次 `session start` 直接拒（rc≠0）并打印现场。反复开窗不是重试，
+   是环境在反复失效——先 `wa.py doctor`，再决定。
+
+**验收**：`tests.test_wa_session`（24 条：字段折算 / 重复判定 / 挑实例 / 开窗限速 / 弹窗几何判据）；
+`wa.py doctor` 在真机上输出 `ok:true`、`duplicates:[]`；`SKILL.md` §4.9、§5.3、§5.4 #11/#11.1。
+
+---
+
 ## 3. 恢复、预算、人工卡点、幂等
 
 ### 3.1 预算（默认值，可被 `state/current_goal.md` 覆盖）
@@ -615,6 +645,8 @@ python scripts/orchestrator.py decide --question <问题> --choice <选择> --wh
 python scripts/orchestrator.py card --file <需求卡片>   # 否定式校验（只拒绝，不生成）
 python scripts/wa.py unlock --state <.wa-state.json>    # 清残留的 state 写锁（崩溃恢复）
 python scripts/wa.py clear --state <.wa-state.json>     # 清空输入框（不发送）：给「写完未发」的恢复态
+python scripts/wa.py wait --timeout 900 [--max-recover 1]  # 会话被回收时在原地址续窗一次（§2.15）
+python scripts/wa.py doctor [--state <.wa-state.json>]  # 体检：实例（含重复安装）/ 会话 / state 指向
 python scripts/lessons_audit.py [--strict] [--max-age-days 14]  # 知识库体检
 ```
 

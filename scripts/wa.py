@@ -199,6 +199,19 @@ def save_state(path: str, st: dict, timeout: float = 10.0) -> None:
 _SID_RE = re.compile(r"\b([a-z0-9]{4})\b")
 
 
+def _norm_session(s: dict) -> dict:
+    """bsk 的会话记录 → 本文件统一口径（id / window / browser）。"""
+    s = dict(s)
+    # bsk 0.3.x 的键是 session_id / agent_window_id，统一别名
+    s.setdefault("id", s.get("session_id") or s.get("session") or "")
+    s.setdefault("window", s.get("agent_window_id") or "")
+    # 实例 id 的键是 browser_instance_id。少了这一行，enforce_single_session
+    # 的 `s["browser"] != browser` 永远成立 → **一个旧会话都收不掉**，
+    # 每次重绑都留一个窗口（2026-10-30 豆包机上「开很多 tab」的直接原因）。
+    s["browser"] = s.get("browser") or s.get("browser_instance_id") or ""
+    return s
+
+
 def list_sessions() -> list:
     rc, out, _ = bsk(["session", "list", "--json"])
     if rc != 0:
@@ -209,15 +222,7 @@ def list_sessions() -> list:
         return []
     if isinstance(data, dict):
         data = data.get("sessions") or data.get("value") or []
-    norm = []
-    for s in data:
-        if isinstance(s, dict):
-            s = dict(s)
-            # bsk 0.3.x 的键是 session_id / agent_window_id，统一别名
-            s.setdefault("id", s.get("session_id") or s.get("session") or "")
-            s.setdefault("window", s.get("agent_window_id") or "")
-            norm.append(s)
-    return norm
+    return [_norm_session(s) for s in data if isinstance(s, dict)]
 
 
 # Agent Window 默认落点：副屏左上角（主屏 2560 宽，副屏在右侧）。
@@ -237,30 +242,123 @@ def place_window(sid: str) -> None:
         pass
 
 
-def _first_browser_instance() -> str:
+def list_browsers() -> list:
+    """`bsk browsers --json` → 规范化的实例列表（拿不到就是空列表）。
+
+    只用 JSON：`browsers` 的表格列宽是按标签长度对齐的，靠 split 解析会把
+    「0.3.3 京东老浦家」整段当成标签，`WA_BROWSER_PREFER` 就永远匹配不上。
+    """
+    rc, out, _ = bsk(["browsers", "--json"], timeout=30)
+    if rc != 0:
+        return []
+    try:
+        data = json.loads(out.strip())
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("browsers") or []
+    res = []
+    for b in data:
+        if not isinstance(b, dict):
+            continue
+        res.append({
+            "id": b.get("instance_id") or b.get("id") or "",
+            "name": b.get("browser_name") or b.get("browser") or "",
+            "label": (b.get("label") or "").strip(),
+            "ext": b.get("extension_version") or "",
+            "sessions": int(b.get("session_count") or 0),
+            "unresponsive": bool(b.get("unresponsive")),
+            "skew": bool(b.get("version_skew")),
+        })
+    return [b for b in res if b["id"]]
+
+
+def instance_report(browsers: list | None = None) -> dict:
+    """在线实例体检：有没有重复安装、失联、能不能唯一确定目标。
+
+    为什么必须有：同一个 Chrome 里装 4 份 BrowserSkill（工具栏并排 4 个图标），
+    bsk 就报 4 个实例。会话跟着某个实例走，读回却可能落到另一个实例的窗口上 ——
+    表现正是「发得出去、永远读不到回复」，而每次重试又开一个新窗口。
+    这种事不能「就近挑一个」：挑错等于拿 A 窗口的页面去等 B 窗口的回复。
+
+    判据是实例自报的 `label` + 浏览器名（都是 bsk 自己的事实，不靠猜）：
+    同 label 出现多次 = 同一浏览器装了多份。label 为空的多个实例只算「无法区分」，
+    不当成重复 —— 那可能只是两个没起名字的 profile。
+    """
+    bs = list_browsers() if browsers is None else browsers
+    groups = {}
+    for b in bs:
+        groups.setdefault((b.get("name") or "", b.get("label") or ""), []).append(b)
+    duplicates = [
+        {"browser": k[0], "label": k[1], "ids": [x["id"] for x in v], "count": len(v)}
+        for k, v in groups.items() if len(v) > 1 and k[1]
+    ]
+    return {
+        "count": len(bs),
+        "instances": bs,
+        "duplicates": duplicates,
+        "unresponsive": [b["id"] for b in bs if b.get("unresponsive")],
+        "unique": len(bs) == 1,
+        "healthy": not duplicates,
+    }
+
+
+def duplicate_hint(rep: dict) -> str:
+    lines = ["  · %s「%s」在线 %d 次：%s"
+             % (d["browser"] or "浏览器", d["label"], d["count"], " ".join(d["ids"]))
+             for d in rep.get("duplicates") or []]
+    return (
+        "检测到同一个浏览器里装了多份 BrowserSkill 扩展：\n%s\n"
+        "后果：会话落在实例 A，读回却去查实例 B —— 「发得出去但永远读不到回复」，"
+        "重试还会不断开新窗口。\n"
+        "处理：打开 chrome://extensions（Edge 是 edge://extensions），把重复的 "
+        "BrowserSkill 全部移除，只留一个；再跑 `python scripts/wa.py doctor` 确认只剩一行。\n"
+        "确实需要多份共存（多 profile 各装一份）就给每个实例起不同标签；"
+        "临时绕过可设 WA_ALLOW_DUPLICATE_EXT=1，但读回错乱要自己承担。"
+        % "\n".join(lines))
+
+
+def _first_browser_instance(browsers: list | None = None) -> str:
     """多浏览器在线时猜一个实例 id。
 
-    偏好标签用环境变量 `WA_BROWSER_PREFER` 指定（逗号分隔的片段，按顺序匹配）。
-    只有一个实例时直接用它；**多个实例且无法判断时返回空**——由调用方报错让人选，
-    绝不「就近替代」（那等于拿 A 账号的登录态去操作 B 账号）。
+    偏好标签用环境变量 `WA_BROWSER_PREFER` 指定（逗号分隔的片段，按顺序匹配标签、
+    浏览器名或实例 id）。只有一个实例时直接用它；**多个实例且无法判断时返回空**——
+    由调用方报错让人选，绝不「就近替代」（那等于拿 A 账号的登录态去操作 B 账号）。
     """
-    rc, out, _ = bsk(["browsers"], timeout=30)
-    if rc != 0:
+    bs = list_browsers() if browsers is None else browsers
+    bs = [b for b in bs if not b.get("unresponsive")]
+    if not bs:
         return ""
     prefer = [s.strip() for s in os.environ.get("WA_BROWSER_PREFER", "").split(",") if s.strip()]
-    ids, labels = [], []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] != "INSTANCE" and not line.startswith(" "):
-            ids.append(parts[0])
-            labels.append(" ".join(parts[2:]))
-    if not ids:
-        return ""
     for want in prefer:
-        for inst, lab in zip(ids, labels):
-            if want and want in lab:
-                return inst
-    return ids[0] if len(ids) == 1 else ""
+        hits = [b["id"] for b in bs
+                if want == b["id"] or want in (b.get("label") or "") or want in (b.get("name") or "")]
+        if len(hits) == 1:
+            return hits[0]
+    return bs[0]["id"] if len(bs) == 1 else ""
+
+
+def session_alive(sid: str) -> bool:
+    return bool(sid) and any((s.get("id") or "") == sid for s in list_sessions())
+
+
+# 开窗纪律：一次任务里短时间反复 `session start` 不是「重试」，是环境在反复失效。
+# 超过这个密度就停下来报现场，而不是继续堆窗口。
+WA_START_WINDOW_S = 600
+WA_START_MAX = 4
+
+
+def _note_session_start(st: dict) -> None:
+    now = time.time()
+    hist = [t for t in (st.get("session_start_at") or []) if now - float(t) < WA_START_WINDOW_S]
+    hist.append(now)
+    st["session_start_at"] = hist
+
+
+def _too_many_starts(st: dict) -> bool:
+    now = time.time()
+    hist = [t for t in (st.get("session_start_at") or []) if now - float(t) < WA_START_WINDOW_S]
+    return len(hist) >= WA_START_MAX
 
 
 def enforce_single_session(keep: str = "", browser: str = "") -> None:
@@ -308,6 +406,11 @@ def navigate_soft(sid: str, url: str, timeout: int = 180):
 def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     sid = st.get("session") or ""
     browser = st.get("browser") or os.environ.get("WA_BROWSER", "")
+    # 开窗前先体检。重复安装的扩展会让「发送」和「读回」落在不同实例上，
+    # 那种状态下继续跑只会制造更多窗口和更多「读不到回复」，必须先让人把环境修干净。
+    rep = instance_report()
+    if rep["duplicates"] and not os.environ.get("WA_ALLOW_DUPLICATE_EXT"):
+        raise SystemExit(duplicate_hint(rep))
     if sid and not renew:
         ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
         if sid in ids:
@@ -316,6 +419,14 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
                 st["browser"] = browser  # env 给的实例也记下来，下次不必再传
                 save_state(path, st)
             return sid
+    if _too_many_starts(st):
+        raise SystemExit(
+            "10 分钟内已经开了 %d 次窗口（每次重绑都会新开一个）。这不是正常的重试节奏，"
+            "说明会话在反复失效或实例在反复切换。\n"
+            "先跑 `python scripts/wa.py doctor` 看：实例是否重复安装、是否失联、state 里的 "
+            "session/browser 是否还存在。\n"
+            "确认环境没问题要强行继续，就删掉 state 里的 session_start_at 再试一次。"
+            % len(st.get("session_start_at") or []))
     # 开新会话前：先收掉目标实例上的旧会话/旧窗口（其他实例的会话不动）
     enforce_single_session("", browser)
     # 多浏览器（用户可能同时开多个 Edge profile）：state.browser 优先，其次 WA_BROWSER env
@@ -324,7 +435,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
         args += ["--browser", browser]
     rc, out, err = bsk(args, timeout=120)
     if rc != 0 and "multiple browsers" in (out + err).lower():
-        inst = _first_browser_instance()
+        inst = _first_browser_instance(rep["instances"])
         if inst:
             st["browser"] = inst
             save_state(path, st)
@@ -339,6 +450,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     if not sid:
         raise SystemExit("拿不到 session id。原始输出：%s" % out[:400])
     enforce_single_session(sid, browser)  # 双保险：新会话留下，同实例其余全收
+    _note_session_start(st)               # 记下开窗时间：短时间反复开窗要能被拦住
     st["session"] = sid
     if browser:
         # 把实例记进 state：下次不用再靠 WA_BROWSER 环境变量，
@@ -806,9 +918,10 @@ def cmd_send(a) -> int:
     if cur.get("modal"):
         # 平台弹窗/遮罩会挡住真实点击（实测 Kimi 限流提示）。
         # 这里不硬发——先让上层关掉弹窗（关不掉就如实报平台侧阻塞）。
-        print("页面上有弹窗/遮罩，拒绝发送：%s\n"
+        print("页面上有弹窗/遮罩，拒绝发送：%s（%s）\n"
               "先关掉弹窗再重试（Kimi: bsk click --selector \"[data-testid='confirm-dialog-cancel']\"）。"
-              % (cur.get("modal_text") or "（无文案）"), file=sys.stderr)
+              % (cur.get("modal_text") or "（无文案）", cur.get("modal_rect") or "尺寸未知"),
+              file=sys.stderr)
         return 3
     if cur.get("editor_len", 0) > 0 and not a.force:
         print("输入框里已有 %d 字未清空，先确认那不是上一条残留。" % cur["editor_len"], file=sys.stderr)
@@ -936,10 +1049,37 @@ def cmd_wait(a) -> int:
     prev_len = -1
     prev_msgs = -1
     started = False
+    recovered = 0
+    max_recover = int(getattr(a, "max_recover", 1) or 0)
+    notes = []
 
     while time.time() < deadline:
         ok, cur = read_state(p, sid)
         if not ok:
+            # 判「会话没了」不该等三次：read_state 一次就要 4 秒（滚动 + 三轮探测），
+            # 累计三次近 20 秒，长任务里这 20 秒会白等；`session list` 一次只要几十毫秒。
+            # 「死」是硬事实（session list 里没有），立刻处理；「活着但抖动」才等下轮再试。
+            if not session_alive(sid):
+                if recovered < max_recover:
+                    # bsk 会按空闲（默认 5 分钟）回收窗口。窗口没了不等于对话没了：
+                    # 回复在平台侧已持久化，判据是「同一个 url 还能重新绑定」，
+                    # 不是「距上次操作不到 5 分钟」这种被动时间。
+                    sid2 = ensure_session(st, path, renew=True)
+                    notes.append("第 %d 次续窗：会话已被回收，在原对话地址重开（%s → %s）"
+                                 % (recovered + 1, sid, sid2))
+                    sid = sid2
+                    recovered += 1
+                    started = False
+                    prev_len = -1
+                    continue
+                print(json.dumps({"ok": False, "stage": "session_lost",
+                                  "session": sid, "recovered": recovered,
+                                  "notes": notes,
+                                  "hint": "窗口已不存在且续窗次数用尽：先 wa.py doctor 看实例与会话，"
+                                          "再用 bind <同一个 url> 接上；不要 --new，"
+                                          "回复和上下文都在原对话里。"},
+                                 ensure_ascii=False, indent=2), file=sys.stderr)
+                return 6
             time.sleep(a.interval)
             continue
 
@@ -964,6 +1104,7 @@ def cmd_wait(a) -> int:
                         print(json.dumps({"ok": True, "chars": cur["last_len"],
                                           "msg_count": cur.get("msg_count"),
                                           "signal": "regen",
+                                          "recovered": recovered, "notes": notes,
                                           "tail": cur.get("last_tail", "")},
                                          ensure_ascii=False, indent=2))
                         return 0
@@ -978,6 +1119,7 @@ def cmd_wait(a) -> int:
                     print(json.dumps({"ok": True, "chars": cur["last_len"],
                                       "msg_count": cur.get("msg_count"),
                                       "signal": "text_stable",
+                                      "recovered": recovered, "notes": notes,
                                       "tail": cur.get("last_tail", "")},
                                      ensure_ascii=False, indent=2))
                     return 0
@@ -990,6 +1132,7 @@ def cmd_wait(a) -> int:
         time.sleep(a.interval)
 
     print(json.dumps({"ok": False, "stage": "timeout", "waited_s": a.timeout,
+                      "recovered": recovered, "notes": notes,
                       "hint": "超时不等于失败：再跑一次 wait，或先 probe 看 generating/last_len"},
                      ensure_ascii=False, indent=2))
     return 5
@@ -1000,19 +1143,27 @@ def cmd_read(a) -> int:
     st = load_state(path)
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
-    text = ""
-    for attempt, ms in enumerate((600, 1200, 2500)):
-        evaluate(platforms.js_scroll(p), sid)
-        time.sleep(ms / 1000.0)
-        ok, data = evaluate(js_read_last(p), sid)
-        if ok and data.get("text"):
-            text = data["text"]
-            break
-        if not ok:
-            print("读取失败：%s" % data, file=sys.stderr)
-            return 4
+
+    def read_once(s: str):
+        last_err = ""
+        for ms in (600, 1200, 2500):
+            evaluate(platforms.js_scroll(p), s)
+            time.sleep(ms / 1000.0)
+            ok, data = evaluate(js_read_last(p), s)
+            if ok and data.get("text"):
+                return data["text"], ""
+            last_err = str(data)
+        return "", last_err
+
+    text, err = read_once(sid)
+    if not text and not session_alive(sid):
+        # 窗口被回收后 reply 仍在平台侧：重开同一对话再读，比「读取失败」诚实得多
+        sid = ensure_session(st, path, renew=True)
+        text, err = read_once(sid)
+        if text:
+            print("会话已被回收，在原对话地址重开后读回。", file=sys.stderr)
     if not text:
-        print("读取失败：重试 3 次仍未取到回复文本（线程可能未渲染）", file=sys.stderr)
+        print("读取失败：重试 3 次仍未取到回复文本（%s）" % (err or "")[:200], file=sys.stderr)
         return 5
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -1022,6 +1173,31 @@ def cmd_read(a) -> int:
     else:
         print(text)
     return 0
+
+
+def cmd_doctor(a) -> int:
+    """环境体检：实例、重复扩展、会话、state 摘要。
+
+    存在的意义：所有「读不到回复」最后都落在四件事上 —— 实例重了、实例掉线了、
+    会话没了、state 指向别的地址。做成一条命令，是为了让 agent 在重试之前先看一眼，
+    而不是再开一个窗口去赌。
+    """
+    rep = instance_report()
+    sessions = [{k: s.get(k) for k in ("id", "browser", "window")} for s in list_sessions()]
+    path = state_path(getattr(a, "state", None))
+    st = load_state(path)
+    out = {
+        "ok": rep["healthy"],
+        "browsers": rep,
+        "sessions": sessions,
+        "state": {k: st.get(k) for k in ("platform", "url", "conv_id", "session",
+                                         "browser", "awaiting_reply", "turn")},
+        "state_path": path,
+    }
+    if rep["duplicates"]:
+        out["hint"] = duplicate_hint(rep)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if out["ok"] else 6
 
 
 def cmd_state(a) -> int:
@@ -1151,11 +1327,16 @@ def main() -> int:
     p = add_pl(sub.add_parser("wait", help="等待回复完成"))
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--interval", type=float, default=3.0)
+    p.add_argument("--max-recover", type=int, default=1, dest="max_recover",
+                   help="会话被回收后自动续窗的次数（默认 1；续窗＝在原对话地址重开窗口）")
     p.set_defaults(func=cmd_wait)
 
     p = add_pl(sub.add_parser("read", help="读取末条回复"))
     p.add_argument("--out")
     p.set_defaults(func=cmd_read)
+
+    p = add_pl(sub.add_parser("doctor", help="体检：浏览器实例 / 重复扩展 / 会话 / state"))
+    p.set_defaults(func=cmd_doctor)
 
     p = add_pl(sub.add_parser("state", help="查看 state（含锁持有者）"))
     p.set_defaults(func=cmd_state)
