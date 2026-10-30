@@ -262,8 +262,6 @@ WorkBuddy / CodeBuddy 这类宿主会把命令子进程一并回收，`bsk docto
 | 让 Agent 避开前人踩过的坑 | `references/lessons.md` |
 | 填需求卡片、确认单、反馈、阶段报告 | `templates/` |
 
-维护约定：改硬规则留修订记录；改 `platforms.py` 的选择器同步更新 `verified` 与实测日期；改指标口径同步契约 §2.4；凭证不进仓库、不进对话、不进日志。
-
 ## 许可证
 
 [MIT](LICENSE) © 2026 左立方（TOPcbm）

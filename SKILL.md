@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "2.3.3"
+version: "2.3.4"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.3）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.4）。版本只从 `SKILL.md` 读，不从别处猜。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
 用户说「升级星舵 / 星舵升到最新版 / 检查有没有新版 / update starpilot」时，**直接执行**，不必先问「要不要升」——这就是用户要的动作：
@@ -91,6 +91,8 @@ python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份
 6. **单窗口纪律**。**同一浏览器实例内**只允许存在一个浏览器会话 / Agent Window。绑定、续期、巡检共用这一个；用完即收（session stop）。开新会话前必须先收掉**同实例**的旧会话。**禁止重复开新窗口**——窗口堆积 = 违反本条。wa.py 已内置强制：`ensure_session` 每次都会收掉同实例内 keep 之外的会话，**其他实例的会话绝不误杀**。
 
    **多实例场景**：一个用户常有多个浏览器资料（不同账号/不同环境）。绑定会话固定用**一个**实例，不随巡检目标漂移；巡检别处时用别的实例的会话，**用完立即 stop**；目标实例未连接时停下让用户重连，**不换实例、不省略 `--browser`**。
+
+> **改这六条 = 契约级变更**：bump 契约版本 + 写进 `docs/orchestrator-contract.md` §0 变更记录，并把引用面一次 grep 干净（SKILL 小节号 / 契约条目 / `templates/` / 闸门报错文案 / 两份 README / 代码注释）。只改一处，文档之间必然自相矛盾。
 
 ---
 
@@ -707,7 +709,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v2.3.3 现状，别假装有）
+## 8. 已知缺口（v2.3.4 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|

@@ -263,8 +263,6 @@ When something goes wrong, look here first: `journal.jsonl` is the single source
 | Keep the agent away from pitfalls others already hit | `references/lessons.md` |
 | Requirement card, confirmation sheet, feedback, stage report | `templates/` |
 
-Maintenance conventions: hard-rule changes need a revision record; selector changes in `platforms.py` update `verified` and the live-test date together; metric changes update contract §2.4; credentials never enter the repo, the conversation, or the logs.
-
 > The working documents (`SKILL.md`, `references/`, `docs/`) are maintained in Chinese. The 13-field lesson format in `references/lessons.md` is machine-parsed by `scripts/lessons_audit.py` and is deliberately not translated.
 
 ## License
