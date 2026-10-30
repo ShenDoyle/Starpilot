@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -70,6 +71,74 @@ def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, 
 # ---------------------------------------------------------------- state
 
 STATE_NAME = ".wa-state.json"
+
+# ---------------- 平台占用锁（跨项目 / 跨任务互斥） ----------------
+# 场景：多个任务同时用星舵、且都打同一个网页 AI 平台（同账号同浏览器）→
+# 抢同一个 tab、对话互相打架、触发平台风控（2026-10-29 实测：ChatGPT 回复
+# 加载不出，另一任务误判「对话出问题」自动跳转）。
+# 解法：**同一平台同一浏览器环境上的写操作（bind/send/clear）必须先拿到
+# 平台占用锁**；拿不到立即退出并报持有者，不排队死等。锁文件放在用户级
+# 目录（跨项目可见），按 <平台>-<隔离键> 区分。
+LOCK_DIR_ENV = "STARPILOT_LOCK_DIR"    # 锁目录（默认 ~/.starpilot/locks）
+LOCK_KEY_ENV = "STARPILOT_LOCK_KEY"    # 隔离键：不同浏览器 profile/账号用不同 key
+LOCK_WAIT_ENV = "STARPILOT_LOCK_WAIT"  # 等锁秒数，默认 0（立即失败，不排队）
+PLATFORM_LOCK_STALE = 1800.0           # 持有超 30 分钟视为残留锁，可接管
+
+
+def platform_lock_path(platform: str) -> str:
+    d = os.environ.get(LOCK_DIR_ENV) or os.path.join(
+        os.path.expanduser("~"), ".starpilot", "locks")
+    key = os.environ.get(LOCK_KEY_ENV) or "default"
+    return os.path.join(d, "lock-%s-%s.json" % (platform, key))
+
+
+def lock_platform(platform: str) -> dict:
+    """取平台占用锁；拿不到抛 statelock.LockBusy（异常里带持有者信息）。"""
+    return statelock.acquire_named(
+        platform_lock_path(platform), owner="wa",
+        run_id=os.path.basename(os.getcwd()) or "wa",
+        timeout=float(os.environ.get(LOCK_WAIT_ENV) or 0),
+        stale_after=PLATFORM_LOCK_STALE,
+        resource=platform_lock_path(platform))
+
+
+def _resolve_platform_key(a) -> str:
+    """从命令行参数或 state 解析平台 key；解析不了抛异常（让原命令自己报错）。"""
+    key = getattr(a, "platform", None)
+    if key:
+        return platforms.get(key)["key"]
+    st = load_state(state_path(getattr(a, "state", None)))
+    return platforms.get(st.get("platform"))["key"]
+
+
+def with_platform_lock(fn):
+    """装饰器：bind/send/clear 这类「要动浏览器」的命令先拿平台锁。
+
+    平台解析失败不拦（让原命令自己给出准确的报错）；拿到锁后无论命令
+    返回什么、抛不抛异常都在 finally 释放。wait/read/probe 只读不导航，
+    不需要锁——读别的对话不会打架。
+    """
+    @functools.wraps(fn)
+    def wrapper(a):
+        try:
+            key = _resolve_platform_key(a)
+        except Exception:
+            return fn(a)
+        try:
+            lock = lock_platform(key)
+        except statelock.LockBusy as e:
+            print("平台 %s 正被另一任务占用，已拒绝执行（不排队死等）。\n"
+                  "锁文件：%s\n持有者：%s\n"
+                  "处理：等对方任务收口后再跑；并行任务错开平台或浏览器 profile"
+                  "（设 STARPILOT_LOCK_KEY）；确认是残留锁强拆用 wa.py plock --release。"
+                  % (key, e.path, json.dumps(e.holder, ensure_ascii=False)),
+                  file=sys.stderr)
+            return 9
+        try:
+            return fn(a)
+        finally:
+            statelock.release_named(platform_lock_path(key), lock)
+    return wrapper
 
 
 def state_path(explicit: str | None = None) -> str:
@@ -550,6 +619,7 @@ def settle_msg_count(p: dict, sid: str, tries: int = 8, gap: float = 2.0) -> tup
     return ok, data, waited
 
 
+@with_platform_lock
 def cmd_bind(a) -> int:
     p = platforms.get(a.platform)
     url = a.url.strip()
@@ -627,6 +697,7 @@ def cmd_bind(a) -> int:
     return 0
 
 
+@with_platform_lock
 def cmd_clear(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
@@ -663,6 +734,7 @@ def cmd_platforms(a) -> int:
     return 0
 
 
+@with_platform_lock
 def cmd_send(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
@@ -930,6 +1002,15 @@ def cmd_state(a) -> int:
     holder = statelock.read_holder(path)
     st["_lock"] = holder or None
     st["_lock_free"] = not bool(holder)
+    # 平台占用锁：这个平台当前是否被别的任务占着（多任务并发排查用）
+    try:
+        key = st.get("platform") or platforms.DEFAULT_PLATFORM
+        ph = statelock.read_holder_named(platform_lock_path(key))
+        st["_platform_lock"] = ph or None
+        st["_platform_lock_free"] = not bool(ph)
+    except Exception as e:
+        st["_platform_lock"] = {"error": str(e)}
+        st["_platform_lock_free"] = None
     print(json.dumps(st, ensure_ascii=False, indent=2))
     return 0
 
@@ -945,6 +1026,42 @@ def cmd_unlock(a) -> int:
         return 0
     statelock.release(path, None)
     print(json.dumps({"ok": True, "unlocked": True, "was_holder": holder},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_plock(a) -> int:
+    """平台占用锁：查看（缺省）/ 强拆（--release）。给「多任务并发」场景用。"""
+    d = os.environ.get(LOCK_DIR_ENV) or os.path.join(
+        os.path.expanduser("~"), ".starpilot", "locks")
+    if a.release:
+        if not a.pplatform:
+            print("--release 必须配合 --platform 指明要拆哪把锁", file=sys.stderr)
+            return 2
+        lp = platform_lock_path(a.pplatform)
+        holder = statelock.read_holder_named(lp)
+        statelock.release_named(lp, None)  # pid 校验对不上时不会误删
+        still = os.path.exists(lp)
+        print(json.dumps({"ok": not still, "lock": lp, "was_holder": holder or None,
+                          "released": not still}, ensure_ascii=False, indent=2))
+        return 0 if not still else 3
+    # 查看模式：列锁目录里全部锁（或 --platform 指定的一把）
+    if not os.path.isdir(d):
+        print(json.dumps({"ok": True, "dir": d, "locks": []},
+                         ensure_ascii=False, indent=2))
+        return 0
+    locks = []
+    for name in sorted(os.listdir(d)):
+        if a.pplatform and not name.startswith("lock-%s-" % a.pplatform):
+            continue
+        if not name.startswith("lock-") or not name.endswith(".json"):
+            continue
+        lp = os.path.join(d, name)
+        h = statelock.read_holder_named(lp)
+        h["alive"] = statelock._pid_alive(int(h.get("pid") or 0))
+        h["lock_file"] = lp
+        locks.append(h)
+    print(json.dumps({"ok": True, "dir": d, "locks": locks},
                      ensure_ascii=False, indent=2))
     return 0
 
@@ -1017,6 +1134,13 @@ def main() -> int:
 
     p = add_pl(sub.add_parser("unlock", help="强制清掉残留的 state 锁（崩溃恢复）"))
     p.set_defaults(func=cmd_unlock)
+
+    p = sub.add_parser("plock", help="平台占用锁：查看跨任务锁 / 强拆残留锁（--release）")
+    p.add_argument("--release", action="store_true",
+                   help="强拆指定平台的锁（--platform 必填；持锁进程还活着时拆不动）")
+    p.add_argument("--platform", dest="pplatform", default="",
+                   help="平台 key（release 时必填；查看时可只看这一个平台）")
+    p.set_defaults(func=cmd_plock)
 
     p = add_pl(sub.add_parser("stop", help="停止 session"))
     p.set_defaults(func=cmd_stop)

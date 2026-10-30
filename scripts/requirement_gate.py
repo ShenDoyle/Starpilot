@@ -26,7 +26,8 @@ import sys
 # 允许出现在表格里的占位符（模板原样带来的空值）
 PLACEHOLDERS = {"", "-", "—", "（不超过 30 字，说清「谁、在什么场景下、要什么结果」）",
                 "待确认 / 已确认 / 部分确认（不算通过）",
-                "（transcript 相对路径，如 `docs/requirements/<需求名>-transcript.md`）"}
+                "（transcript 相对路径，如 `docs/requirements/<需求名>-transcript.md`）",
+                "（逐步确认 / 直接执行——记用户原话，二选一；「首次人工确认门」的裁定结果，未确认不许进 LOOP）"}
 
 SECTION_HEADINGS = {
     "已明确": r"^##+\s*一、已明确",
@@ -96,14 +97,23 @@ def parse_sections(text: str) -> dict:
 
 
 def _basic_fields(text: str) -> dict:
-    """基本信息表的键值对（项目名 / 一句话目标）。"""
+    """基本信息表的键值对（项目名 / 一句话目标 / 执行模式）。"""
     out = {}
     for line in text.splitlines():
         cells = _cells(line)
         if len(cells) >= 2 and cells[0] in ("项目名", "提出人", "提出日期", "一句话目标",
-                                            "原始往来记录"):
+                                            "原始往来记录", "执行模式"):
             out[cells[0]] = cells[1]
     return out
+
+
+# 执行模式是固定二选一词表（SKILL §2.5 首次人工确认门）：
+# 只认这两个词根，其余写法一律不认（fail-closed）。
+EXEC_MODE_WORDS = ("逐步确认", "直接执行")
+
+
+def _exec_mode_ok(val: str) -> bool:
+    return any(w in (val or "") for w in EXEC_MODE_WORDS)
 
 
 CONFIRM_WORDS = ("已确认", "待确认", "部分确认", "未确认", "已授权", "授权")
@@ -139,6 +149,17 @@ def validate(text: str) -> dict:
                   "detail": "「原始往来记录」为空：需求分析由网页版 AI 主导，卡片必须是"
                             " agent↔网页版 AI↔用户 往来的**摘录**——先把 transcript 落盘再填卡"
                             "（硬规则 2 · 原始需求零加工转交）"})
+
+    mode = (basic.get("执行模式") or "").strip()
+    if not mode or mode in PLACEHOLDERS:
+        v.append({"code": "EXEC_MODE_MISSING", "section": "基本信息",
+                  "detail": "「执行模式」为空：首次人工确认门没走完——必须问清后续是"
+                            "「逐步确认」（每轮网页 AI 出方案后等人工拍板）还是「直接执行」"
+                            "（按既定规划连续执行到交付），并记用户原话（SKILL §2.5）"})
+    elif not _exec_mode_ok(mode):
+        v.append({"code": "EXEC_MODE_INVALID", "section": "基本信息",
+                  "detail": "「执行模式」=%r 不在固定二选一（逐步确认 / 直接执行）词表里："
+                            "不认其他写法" % mode})
 
     if not secs["已明确"]:
         v.append({"code": "CLARIFIED_EMPTY", "section": "一、已明确",
@@ -180,6 +201,7 @@ def validate(text: str) -> dict:
         "violations": v,
         "stats": {
             "raw_brief": 1 if raw_brief and raw_brief not in PLACEHOLDERS else 0,
+            "exec_mode": 1 if mode and mode not in PLACEHOLDERS and _exec_mode_ok(mode) else 0,
             "clarified": len(secs["已明确"]),
             "pending": len(secs["未明确"]),
             "conflicts": len(secs["有冲突"]),

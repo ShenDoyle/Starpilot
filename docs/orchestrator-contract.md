@@ -1,4 +1,4 @@
-# orchestrator 契约（O0 基线冻结）· **v1.3**
+# orchestrator 契约（O0 基线冻结）· **v1.4**
 
 > 本文件是**实现规格**，不是愿望清单。`scripts/orchestrator.py` / `scripts/write_gate.py` 必须逐条对上。
 > 冻结日期：2026-10-29　·　来源：网页 AI（Kimi）第 1 轮规划回复 `runtime/wa/turn-001-reply.md`
@@ -37,6 +37,8 @@ ChatGPT 按硬规则 1 纪律搁置（`deferred_rule1`）——这些是**平台
 | **v1.2** | **2026-10-29** | ① §4.4 新增 **Gemini** 与 `native` 写入路径（Quill 拒绝 exec）；② §4.3 新增 `fill_not_accepted` 与「空态类优先于文本长度」（`editor_len` 口径归零规则）；③ §2.4.1 锚点级别 1 前置 `anchor_box`（平台声明），泛化兜底改为**组合约束**；④ §2.4.1 新增等待侧第三条见证 **`growth`**（同容器流式补全），`witness` 必记；⑤ §5 新增 `wa.py clear`；⑥ 写权限同源（CLI 也查 `write_allowed`） | Gemini 实测（`runtime/g1`）+ Gemini 第 3/5 条裁定 |
 
 | **v1.3** | **2026-10-29** | ① **§2.6 对话归属门禁**：bind 判「这条对话归谁」（`conv_id` + `msg_count` + `conv_origin` 三元），首次绑到非空对话默认拒绝（`foreign_conv`），`--reuse-existing` 显式豁免；② bind 前置**读数稳定等待**（懒加载平台的 `msg_count=0` 可能是「加载中的假空」，连续 3 次相同才判）；③ `new_chat` 落点必须「无会话 id + 0 条消息」，入口被重定向回已有对话直接拒绑；④ 发送首轮跳转后落盘 `conv_id` + `conv_origin=new_chat`；⑤ `bind --reuse` 校验 conv_id 与 conv_origin 齐全，缺一即拒；⑥ gemini 补 `new_chat_url=/app`（home 会重定向回最近对话） | 用户实测反馈：项目被绑到用户正在聊的 Gemini 对话（`L-GEMINI-FOREIGN-CONV-ff592c`） |
+
+| **v1.4** | **2026-10-30** | ① **§2.7 首次人工确认门与执行模式**：INIT 出口扩为三条件（+执行模式），卡片「执行模式」字段机器校验（`EXEC_MODE_MISSING` / `EXEC_MODE_INVALID`，词根二选一 fail-closed）；直接执行模式下仍必须停的三条例外；**三轮审查法则**（同性质审查第 3 轮必须当面问网页 AI 是否继续）；② **§2.8 平台占用锁**：`wa.py with_platform_lock` 装饰 bind/send/clear，锁文件 `~/.starpilot/locks/lock-<平台>-<key>.json`（跨项目可见），被占 rc=9 报持有者、不排队死等，语义与 state 单写锁同源（死进程/超时/坏锁接管），`wa.py plock` 查看/强拆，`STARPILOT_LOCK_KEY` 按浏览器 profile 隔离 | 用户实测反馈：① agent 每步强等人工确认（未裁定过执行模式）；② 两任务共用 ChatGPT 抢同一 tab、触发风控（回复加载不出、误判对话异常自动跳转） |
 
 ### v1.0 冻结证据（历史，保留备查）
 
@@ -287,6 +289,55 @@ probe 读到的 `msg_count=0` 是「加载中的假空」（「工具自证≠�
 
 **验收**：`python -m unittest tests.test_bind_guard`；真机链
 `bind --new → msg_count=0 → send → conv_origin=new_chat → 回复确认全新上下文`。
+
+---
+
+## 2.7 首次人工确认门与执行模式（v1.4 新增）
+
+**背景**：部分 agent 与网页 AI 沟通结束后「强行等人工确认」——既不是用户要求的，
+也没问过用户该不该等。「何时找人工」必须是用户的一次性裁定，不是 agent 的习惯。
+
+**规则**（文档纪律 + 机器校验双层）：
+
+1. INIT 往返出口从两条件扩为**三条件**：网页 AI 说信息足够 + 用户拍板方向 +
+   **执行模式已确认**（逐步确认 / 直接执行，二选一，记用户原话）。
+2. 机器校验：需求卡片基本信息表「执行模式」字段必填，且只认词根
+   `逐步确认` / `直接执行`（`requirement_gate.py`，code=`EXEC_MODE_MISSING` /
+   `EXEC_MODE_INVALID`）。缺失或写法不认 → 拒进 LOOP（fail-closed）。
+3. **直接执行**模式下 agent 仍必须停的三条例外（阻塞，非确认）：连续失败 2 次
+   （硬规则 4）；URL/conv 漂移（硬规则 1）；新歧义或冲突需用户取舍（硬规则 2）。
+4. 定了模式后 agent 不得反向违规：直接执行模式不得擅自加确认点；逐步确认模式
+   不得跳过确认。
+5. **三轮审查法则**（SKILL §4.7）：连续 3 轮同性质审查指令（目标/判据同、无新增
+   发现），agent 执行第 3 轮后必须在反馈里直接问网页 AI「是否有必要继续」，不得
+   无限陪跑；继续则新判据清零重算。
+
+---
+
+## 2.8 平台占用锁（v1.4 新增）
+
+**背景**：两个任务同时用星舵、且都打同一个平台（同账号同浏览器）→ 抢同一个
+tab、对话打架、触发平台风控（2026-10-29 实测：ChatGPT 回复加载不出，另一任务
+误判对话异常自动跳转）。state 单写锁（§ statelock）只防「同一项目两个 run」，
+防不了「两个项目共抢一个平台」。
+
+**规则**（唯一实现在 `wa.py with_platform_lock`，装饰 `bind`/`send`/`clear`）：
+
+1. 锁文件：`~/.starpilot/locks/lock-<platform>-<key>.json`（用户级目录，跨项目可见；
+   `STARPILOT_LOCK_DIR` 可改位置）。`key` 默认 `default`，不同浏览器 profile/账号
+   设 `STARPILOT_LOCK_KEY` 隔离。
+2. 拿不到锁 → 命令立即退出 rc=9，stderr 打印持有者（pid / run_id / 持有时长）。
+   **不排队死等**（`STARPILOT_LOCK_WAIT` 可改为等待 N 秒，默认 0）。
+3. 锁语义与 state 单写锁同源（`statelock.acquire_named`）：O_EXCL 创建 +
+   死进程接管 + 超 30 分钟（`PLATFORM_LOCK_STALE`）接管 + 坏锁文件接管。
+4. 只读命令（probe / wait / read / state）不取锁：读不产生导航，不打架。
+5. 查看与强拆：`wa.py plock`（全量/按平台）、`wa.py plock --release --platform <key>`
+   （pid 校验保护，别人的活锁拆不动；死锁可直接拆）。
+6. 平台解析失败的命令不拦（让原命令自己报「未绑定/平台名错」），锁只在
+   平台可解析后才生效。
+
+**验收**：`python -m unittest tests.test_platformlock`；并发实测：
+任务 A 持锁期间任务 B `send` → rc=9 且 stderr 含 A 的 run_id。
 
 ---
 

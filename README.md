@@ -44,7 +44,7 @@ Starpilot/
 ├── README.zh-CN.md               Chinese README
 │
 ├── docs/
-│   ├── orchestrator-contract.md    ★ Orchestrator contract v1.3 (O0–O5 exit criteria + §2.4 metrics / §2.5 three-valued semantics / §2.6 conversation-ownership gate)
+│   ├── orchestrator-contract.md    ★ Orchestrator contract v1.4 (O0–O5 exit criteria + §2.4 metrics / §2.5 three-valued semantics / §2.6 conversation-ownership gate / §2.7 human-gate & exec mode / §2.8 platform occupancy lock)
 │   └── requirements/               Requirement cards (must pass the negative-form gate before planning)
 │
 ├── references/                   Knowledge layer (read-only, consult as needed; in Chinese)
@@ -56,7 +56,7 @@ Starpilot/
 │
 ├── scripts/
 │   ├── platforms.py                 ★ Platform adapter layer: the single source of selectors & binding shapes
-│   ├── wa.py                        Loop bridge CLI: bind/probe/send/wait/read/state/unlock/stop
+│   ├── wa.py                        Loop bridge CLI: bind/probe/send/wait/read/state/unlock/plock/stop (bind/send/clear take a cross-task platform occupancy lock)
 │   ├── write_gate.py                 ★ Write gate: dry-run by default → approve → single real write → verify
 │   ├── orchestrator.py               ★ Orchestrator: 14-state machine + guards + budget + recovery + close-out reflow
 │   ├── confirm.py                    ★ The only implementation of send/wait verdicts (anchor-based, shared by both layers)

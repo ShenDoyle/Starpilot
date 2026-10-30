@@ -345,3 +345,13 @@
 > 用户要求：从一开始就不深加工，agent 与网页版 AI 协作完成项目，规划主要由网页版 AI 做。
 
 - [L-INIT-RAW-PASSTHROUGH-a77530][2026-10-29][O1][用户分镜任务实测反馈][chatgpt][agent 把用户原始需求深加工成结构化提示词后才转交网页版 AI——需求分析被 agent 单方面做完，网页版 AI 只能基于 agent 的理解出方案，结果天然受限于 agent 的局限性][根因是设计缺陷不是执行失误：旧 SKILL.md §2.4 与需求卡片模板明文规定「不要在需求没定型时去问网页版 AI——那等于让它替你猜用户要什么」，INIT 全程把需求分析压在 agent 身上，与「网页版 AI 当架构师」的根本理念相反][权属翻转：① SKILL.md §2.2 重写为「需求分析由网页版 AI 主导，agent 只做原样转交/原样传话/留档」三件事；② 硬规则 2 补「原始需求零加工转交」（agent 补充仅限事实并显式标注）；③ 需求卡片改为往来摘录、新增「原始往来记录」必填字段；④ requirement_gate 新增 RAW_BRIEF_MISSING——无 transcript 不建 run；⑤ 出口条件双确认：网页版 AI 说信息已足够 + 用户拍板，缺一不可][python -m unittest tests.test_orchestrator_gaps；真机复跑时首条消息必须是用户原话+固定导语][任何 INIT / 需求阶段；识别特征：agent 在发网页版 AI 之前自行产出结构化需求、自拟提问、预设输出格式][回退即回到「agent 先加工再转交」旧流程，用户已明确否决][false][merged]
+
+
+## 附录：人工确认门与平台占用锁回流（2026-10-30）
+
+> 来源：用户多任务实测反馈——① agent 在 INIT 后强行等人工确认（执行模式从未裁定）；
+> ② 两任务共用 ChatGPT 抢同一 tab、触发风控（回复加载不出、对话被自动跳转）。
+> 对应契约 v1.4 §2.7（首次人工确认门与执行模式）与 §2.8（平台占用锁）。
+
+- [L-EXEC-MODE-HUMAN-GATE-e59c31][2026-10-30][O1][用户多任务实测反馈][—][agent 与网页版 AI 沟通结束后强行停下来等人工确认才走下一步——既不是用户要求的，也没问过用户该不该等；「何时找人工」被 agent 默默接管，既出现每步强等确认的过度保守，也存在从头到尾不确认的反面风险][根因是流程缺一个显式裁定环节：执行模式（逐步确认/直接执行）从来没人问过用户，agent 只能凭习惯默认][首次人工确认门（SKILL 2.5）：网页版 AI 说信息已足够后，agent 一次问清两件事——必须信息（歧义点+双向取舍点，原样照搬）与执行模式（逐步确认/直接执行二选一，记用户原话）；卡片加「执行模式」必填字段，requirement_gate 校验词根二选一（EXEC_MODE_MISSING / EXEC_MODE_INVALID，fail-closed）；直接执行模式下仍必须停的三条例外=连续失败2次/URL漂移/新歧义冲突；并加三轮审查法则（SKILL 4.7）：同性质审查第 3 轮必须当面问网页版 AI 是否继续，不无限陪跑][python -m unittest tests.test_platformlock.TestExecModeGate；卡片缺「执行模式」应被拒进 LOOP][任何 agent 接手星舵项目时的 INIT 与 LOOP 节奏][回退即回到「agent 凭习惯决定何时找人工」，两种错法都会复发][false][merged]
+- [L-PLATFORM-CONCURRENCY-CLASH-8a14d6][2026-10-30][O5][用户多任务实测反馈][chatgpt][两个任务同时用星舵、且都打同一个网页 AI 平台（同账号同浏览器）：GPT 回复频繁加载不出、两个任务抢同一个 tab，一方导航导致另一方页面被顶掉，后者误判「对话出问题」自动跳转，触发平台风控][state 单写锁只防「同一项目两个 run」，防不了「两个项目共抢一个平台」；平台侧的并发上限与风控不认本地任务边界][平台占用锁（契约 2.8）：wa.py with_platform_lock 装饰 bind/send/clear，锁文件 ~/.starpilot/locks/lock-<平台>-<key>.json（用户级目录跨项目可见）；被占立即 rc=9 并打印持有者（run_id/pid/时长），不排队死等；锁语义与 state 单写锁同源（statelock.acquire_named：死进程/超30分钟/坏锁接管）；wa.py plock 查看、plock --release 强拆；STARPILOT_LOCK_KEY 按浏览器 profile/账号隔离；要并行就错开平台或错开 profile；只读命令（probe/wait/read）不取锁][python -m unittest tests.test_platformlock；并发实测：A 持锁期间 B send 应 rc=9 且 stderr 含 A 的 run_id][多任务并行场景；识别特征：回复加载不出、URL 被顶掉、对话「自己」跳走][去锁即回到抢 tab 与风控状态，用户已实测事故，不许回退][false][merged]

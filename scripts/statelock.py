@@ -40,13 +40,12 @@ def lock_path_for(state_path: str) -> str:
     return state_path + ".lock"
 
 
-def read_holder(state_path: str) -> dict:
-    """读锁文件内容（不存在则返回 {}）。给 `wa.py state` 报告用。"""
-    p = lock_path_for(state_path)
-    if not os.path.exists(p):
+def read_holder_named(lock_path: str) -> dict:
+    """读任意锁文件内容（不存在则返回 {}）。"""
+    if not os.path.exists(lock_path):
         return {}
     try:
-        with open(p, encoding="utf-8") as f:
+        with open(lock_path, encoding="utf-8") as f:
             d = json.load(f)
     except Exception:
         return {"broken": True}
@@ -55,6 +54,11 @@ def read_holder(state_path: str) -> dict:
     except Exception:
         d["age_s"] = -1
     return d
+
+
+def read_holder(state_path: str) -> dict:
+    """读锁文件内容（不存在则返回 {}）。给 `wa.py state` 报告用。"""
+    return read_holder_named(lock_path_for(state_path))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -106,21 +110,26 @@ def _try_create(path: str, payload: dict) -> bool:
     return True
 
 
-def acquire(state_path: str, owner: str = "", run_id: str = "",
-            timeout: float = 10.0, stale_after: float = 300.0) -> dict:
-    """拿锁。返回持有者记录；拿不到抛 LockBusy。"""
-    p = lock_path_for(state_path)
+def acquire_named(lock_path: str, owner: str = "", run_id: str = "",
+                  timeout: float = 10.0, stale_after: float = 300.0,
+                  resource: str = "") -> dict:
+    """对任意锁路径拿锁。返回持有者记录；拿不到抛 LockBusy。
+
+    这是 acquire() 的泛化底座：state 单写锁、跨项目平台占用锁共用同一套
+    O_EXCL + 死进程/超时接管逻辑，不维护两份。
+    """
+    p = lock_path
     os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
     payload = {
         "pid": os.getpid(), "owner": owner or "wa", "run_id": run_id,
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "state": os.path.abspath(state_path),
+        "resource": resource or os.path.abspath(p),
     }
     deadline = time.time() + max(0.0, timeout)
     while True:
         if _try_create(p, payload):
             return payload
-        holder = read_holder(state_path)
+        holder = read_holder_named(p)
         age = holder.get("age_s") or 0
         dead = not _pid_alive(int(holder.get("pid") or 0))
         stale_flag = holder.get("stale")
@@ -136,12 +145,19 @@ def acquire(state_path: str, owner: str = "", run_id: str = "",
                 return payload
             continue
         if time.time() >= deadline:
-            raise LockBusy(holder, state_path)
+            raise LockBusy(holder, p)
         time.sleep(0.15)
 
 
-def release(state_path: str, payload: dict = None) -> None:
-    p = lock_path_for(state_path)
+def acquire(state_path: str, owner: str = "", run_id: str = "",
+            timeout: float = 10.0, stale_after: float = 300.0) -> dict:
+    """拿锁。返回持有者记录；拿不到抛 LockBusy。"""
+    return acquire_named(lock_path_for(state_path), owner, run_id,
+                         timeout, stale_after, resource=os.path.abspath(state_path))
+
+
+def release_named(lock_path: str, payload: dict = None) -> None:
+    p = lock_path
     if not os.path.exists(p):
         return
     # 只释放自己的锁：pid 对不上就不动（防误删别人的锁）
@@ -156,6 +172,10 @@ def release(state_path: str, payload: dict = None) -> None:
         os.remove(p)
     except OSError:
         pass
+
+
+def release(state_path: str, payload: dict = None) -> None:
+    release_named(lock_path_for(state_path), payload)
 
 
 class state_lock(object):

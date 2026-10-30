@@ -42,7 +42,7 @@ Starpilot/
 ├── README.md                     本文件
 │
 ├── docs/
-│   ├── orchestrator-contract.md    ★ 编排契约 v1.3（O0~O5 准出 + §2.4 指标/§2.5 三值语义/§2.6 对话归属门禁）
+│   ├── orchestrator-contract.md    ★ 编排契约 v1.4（O0~O5 准出 + §2.4 指标/§2.5 三值语义/§2.6 对话归属门禁/§2.7 人工确认门与执行模式/§2.8 平台占用锁）
 │   └── requirements/               需求卡片（进规划前必须先过否定式闸门）
 │
 ├── references/                   知识层（只读，随用随查）
@@ -54,7 +54,7 @@ Starpilot/
 │
 ├── scripts/
 │   ├── platforms.py                 ★ 平台适配层：选择器与绑定形态的唯一来源
-│   ├── wa.py                        循环桥接 CLI：bind/probe/send/wait/read/state/unlock/stop
+│   ├── wa.py                        循环桥接 CLI：bind/probe/send/wait/read/state/unlock/plock/stop（bind/send/clear 先取跨任务平台占用锁）
 │   ├── write_gate.py                 ★ 写闸门：缺省 dry-run → 批准 → 单条真实写 → 核验
 │   ├── orchestrator.py               ★ 编排器：14 态状态机 + 守卫 + 预算 + 恢复 + 收口回流
 │   ├── confirm.py                    ★ 发送/等待判定的唯一实现（锚点口径，两层共用）
