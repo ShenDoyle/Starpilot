@@ -202,7 +202,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 292 条，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 294 条，纯标准库
 python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```

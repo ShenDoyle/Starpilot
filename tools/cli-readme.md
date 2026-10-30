@@ -46,7 +46,7 @@ scripts/         11 个纯标准库脚本（编排、桥接、闸门、风险分
 references/      平台接入、DOM 探针、经验库、流程章程
 templates/       需求卡片、确认单、反馈、阶段报告
 docs/            状态机契约（orchestrator-contract.md）——改行为先改它
-tests/           292 条单测，纯标准库
+tests/           294 条单测，纯标准库
 ```
 
 ## 自测

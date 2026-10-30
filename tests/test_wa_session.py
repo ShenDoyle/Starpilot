@@ -169,5 +169,51 @@ class TestModalMustBeVisible(unittest.TestCase):
         self.assertNotIn("const modal = document.querySelector", self.js)
 
 
+class TestEnsureSessionGuard(unittest.TestCase):
+    """开窗之前必须体检：重复安装的扩展会在「发送」和「读回」之间劈叉。"""
+
+    def setUp(self):
+        import json
+        import shutil
+        import tempfile
+        self.json = json
+        self._orig = wa.bsk
+        wa.bsk = self._fake
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "state.json")
+        self._rm = shutil.rmtree
+
+    def tearDown(self):
+        wa.bsk = self._orig
+        self._rm(self.tmp, ignore_errors=True)
+        os.environ.pop("WA_ALLOW_DUPLICATE_EXT", None)
+
+    def _fake(self, args, timeout=120, check=False):
+        if args[:2] == ["browsers", "--json"]:
+            dup = [{"instance_id": "a1", "browser_name": "chrome", "label": "Chrome",
+                    "extension_version": "0.3.3", "session_count": 0},
+                   {"instance_id": "a2", "browser_name": "chrome", "label": "Chrome",
+                    "extension_version": "0.3.3", "session_count": 0}]
+            return 0, self.json.dumps(dup), ""
+        if args[:3] == ["session", "list", "--json"]:
+            return 0, "[]", ""
+        return 1, "", "unexpected call: %s" % " ".join(args[:3])
+
+    def test_refuses_to_open_window_when_extension_is_duplicated(self):
+        with self.assertRaises(SystemExit) as cm:
+            wa.ensure_session({"browser": "a1"}, self.path)
+        msg = str(cm.exception)
+        self.assertIn("chrome://extensions", msg)
+        self.assertIn("a1", msg)
+
+    def test_bypass_lets_it_through_to_the_next_failure(self):
+        # 绕过体检后应卡在「开窗」本身，而不是卡在体检提示上（证明拦的是体检那一步）
+        os.environ["WA_ALLOW_DUPLICATE_EXT"] = "1"
+        with self.assertRaises(SystemExit) as cm:
+            wa.ensure_session({"browser": "a1"}, self.path)
+        self.assertIn("session start 失败", str(cm.exception))
+        self.assertNotIn("chrome://extensions", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

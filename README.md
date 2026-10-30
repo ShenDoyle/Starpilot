@@ -203,7 +203,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 292 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 294 tests, stdlib only
 python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```

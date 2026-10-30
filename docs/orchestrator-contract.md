@@ -513,7 +513,7 @@ decide 缺字段拒绝、close 汇总自主决定）；`SKILL.md` §4.9。
 4. **开窗限速**：10 分钟内第 4 次 `session start` 直接拒（rc≠0）并打印现场。反复开窗不是重试，
    是环境在反复失效——先 `wa.py doctor`，再决定。
 
-**验收**：`tests.test_wa_session`（24 条：字段折算 / 重复判定 / 挑实例 / 开窗限速 / 弹窗几何判据）；
+**验收**：`tests.test_wa_session`（26 条：字段折算 / 重复判定 / 挑实例 / 开窗限速 / 弹窗几何判据）；
 `wa.py doctor` 在真机上输出 `ok:true`、`duplicates:[]`；`SKILL.md` §4.9、§5.3、§5.4 #11/#11.1。
 
 ---
