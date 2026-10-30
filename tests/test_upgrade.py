@@ -38,6 +38,21 @@ class TestVersion(unittest.TestCase):
 
     def test_fmt(self):
         self.assertEqual(ug.fmt((2, 2, 0)), "2.2.0")
+
+    def test_local_version_falls_back_to_version_file(self):
+        """CLI 包没有 SKILL.md，只有打包时生成的 VERSION。"""
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "VERSION"), "0.1.0\n")
+        self.assertEqual(ug.local_version(d), (0, 1, 0))
+
+    def test_local_version_prefers_skill_md(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "SKILL.md"), '---\nversion: "0.2.0"\n---\n')
+        _write(os.path.join(d, "VERSION"), "0.1.0\n")
+        self.assertEqual(ug.local_version(d), (0, 2, 0))
+
+    def test_local_version_unknown_when_nothing_present(self):
+        self.assertEqual(ug.local_version(tempfile.mkdtemp()), ())
         self.assertEqual(ug.fmt(()), "(未知)")
 
     def test_local_version_reads_skill_md(self):

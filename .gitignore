@@ -23,6 +23,7 @@ stage/
 conv-check*.png
 
 # 过程垃圾
+dist/
 .workbuddy/tmp/
 
 # 编辑器 / 系统

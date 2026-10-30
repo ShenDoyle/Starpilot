@@ -9,6 +9,7 @@
 <p align="center">
   <a href="https://github.com/Tencent/BrowserSkill"><img alt="Core dependency: bsk" src="https://img.shields.io/badge/Core%20dependency-bsk-2f75f0"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0%20preview-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -202,12 +203,14 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 265 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 268 tests, stdlib only
 python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```
 
 Or just say **"update Starpilot to the latest"**. Direct GitHub access often times out from mainland China, so the upgrader probes direct access and a set of public accelerators in parallel and takes whichever is fastest; `runtime/ runs/ state/ stage/` are left alone, the tree is backed up before being replaced, and the test suite runs afterwards.
+
+No skill, CLI only? Take the `starpilot-cli` package: `scripts/` + `references/` + `templates/` + contract + tests, no `SKILL.md` — stdlib only, ready for cron or another agent to drive.
 
 <details>
 <summary><b>bsk connects then drops? (hosts that reap child processes)</b></summary>
@@ -240,6 +243,7 @@ When something goes wrong, look here first: `journal.jsonl` is the single source
 | Onboard a new platform, or a platform starts misbehaving | `references/web-ai-platforms.md` |
 | Keep the agent away from pitfalls others already hit | `references/lessons.md` |
 | Requirement card, confirmation sheet, feedback, stage report | `templates/` |
+| What shipped in this version | `CHANGELOG.md` |
 
 > The working documents (`SKILL.md`, `references/`, `docs/`) are in Chinese.
 

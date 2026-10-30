@@ -70,10 +70,17 @@ def parse_version(text: str) -> tuple:
 
 def local_version(root: str) -> tuple:
     p = os.path.join(root, "SKILL.md")
-    if not os.path.exists(p):
-        return ()
-    with open(p, encoding="utf-8") as f:
-        return parse_version(f.read(4096))
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            v = parse_version(f.read(4096))
+        if v:
+            return v
+    # CLI 包没有 SKILL.md，版本写在打包时生成的 VERSION 里（内容仍是 SKILL.md 的那一个版本号）
+    vf = os.path.join(root, "VERSION")
+    if os.path.exists(vf):
+        with open(vf, encoding="utf-8") as f:
+            return parse_version("version: %s" % f.read(64).strip())
+    return ()
 
 
 def fmt(v: tuple) -> str:

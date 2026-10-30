@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "2.3.4"
+version: "0.1.0"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,8 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.4）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.0）。版本只从 `SKILL.md` 读，不从别处猜。
+- **编号沿革**：开发期内部迭代到 `2.3.4`，2026-10-30 首次对外发布时归零为 `0.1.0`（预览版，不是正式版）。升级判据是「远端 > 本地」，所以从 2.3.4 迁过来要用 `upgrade.py --to-latest --force` 重装一次。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
 用户说「升级星舵 / 星舵升到最新版 / 检查有没有新版 / update starpilot」时，**直接执行**，不必先问「要不要升」——这就是用户要的动作：
@@ -709,7 +710,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v2.3.4 现状，别假装有）
+## 8. 已知缺口（v0.1.0 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|

@@ -9,6 +9,7 @@
 <p align="center">
   <a href="https://github.com/Tencent/BrowserSkill"><img alt="核心依赖 bsk" src="https://img.shields.io/badge/%E6%A0%B8%E5%BF%83%E4%BE%9D%E8%B5%96-bsk-2f75f0"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
+  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-0.1.0%20preview-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -201,12 +202,14 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 265 条，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 268 条，纯标准库
 python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```
 
 也可以直接说一句 **「升到最新版」**。国内直连 GitHub 常常超时，升级器会并发探测直连与一批公益加速镜像，谁的快用谁；`runtime/ runs/ state/ stage/` 不动，覆盖前整体备份，装完自动跑单测。
+
+不想装 skill、只要命令行？用 `starpilot-cli` 包：`scripts/` + `references/` + `templates/` + 契约 + 测试，不含 `SKILL.md`，纯标准库，cron 或别的 agent 都能直接调。
 
 <details>
 <summary><b>bsk 连上了又断？（会回收子进程的宿主）</b></summary>
@@ -239,6 +242,7 @@ WorkBuddy / CodeBuddy 这类宿主会把命令子进程一并回收，`bsk docto
 | 接新平台，或某平台开始出怪问题 | `references/web-ai-platforms.md` |
 | 让 Agent 避开前人踩过的坑 | `references/lessons.md` |
 | 填需求卡片、确认单、反馈、阶段报告 | `templates/` |
+| 看这版发了什么、改了什么 | `CHANGELOG.md` |
 
 ## 许可证
 
