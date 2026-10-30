@@ -51,7 +51,14 @@ def bsk_path() -> str:
     for c in _CANDIDATES:
         if c and os.path.exists(c):
             return c
-    raise SystemExit("找不到 bsk：请设 BSK_BIN 环境变量，或确认 bsk 已安装")
+    raise SystemExit(
+        "找不到 bsk（星舵的核心依赖）。别猜，按顺序做：\n"
+        "  1) python scripts/env.py --json    # 看 Python 版本、bsk 是否已装\n"
+        "  2) python scripts/env.py --install # 缺就用官方脚本装（用户级，不需要 root）\n"
+        "  3) 在浏览器启用 BrowserSkill 扩展，bsk doctor 显示 Connected 才算通\n"
+        "  4) 装到了非默认目录，设 BSK_BIN 指向可执行文件\n"
+        "都试过还不行，再回来找用户。"
+    )
 
 
 BSK = bsk_path()

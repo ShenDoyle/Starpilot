@@ -60,18 +60,34 @@
 
 ## 怎么装
 
-1. 装 **bsk**——星舵的核心依赖，[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 提供的浏览器 CLI，真正去点开网页、读写对话的就是它：
+**两件前置（bsk、Python）Agent 会自己装**，你只要把文件夹放进去、说一句要做什么——它开工前会先自检，缺 bsk 就自己跑官方装脚本（用户级，不要管理员），装完顺手验一遍。唯一必须你亲手做的是在浏览器里点一下扩展开关。
 
-   ```bash
-   # macOS / Linux
-   curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
-   # Windows（PowerShell）
-   irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
-   ```
+1. 把本项目整个文件夹放进 AI 客户端的 skills 目录（例如 `~/.workbuddy/skills/starpilot`），或 `git clone` 到那里。
+2. 说一句要做什么（见下一节）。剩下的它自己来。
 
-   再装浏览器扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），跑一下 `bsk doctor` 看到 Connected 就成了。装到了非默认目录，就设环境变量 `BSK_BIN` 指向它。
-2. 电脑上有 Python 3.9 或更高版本即可，不需要装任何第三方包。
-3. 把本项目整个文件夹放进你的 AI 客户端 skills 目录（例如 `~/.workbuddy/skills/starpilot`），或者直接 `git clone` 到那里。
+<details>
+<summary><b>🔧 想自己装，或者 Agent 装不上时</b></summary>
+
+**bsk** —— 星舵的核心依赖，[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 的浏览器 CLI，真正去点开网页、读写对话的就是它，默认装到 `~/.local/bin`：
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+```
+
+Windows 在 PowerShell 里跑：`irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex`
+
+装完在浏览器启用扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），`bsk doctor` 看到 Connected 才算通；装到非默认目录就设 `BSK_BIN` 指过去。
+
+**Python 3.9+** —— 不需要任何第三方包。嫌麻烦可以让 Agent 先跑一次自检，它会说清缺什么：
+
+```bash
+python scripts/env.py            # 人读：Python 版本、bsk 路径、扩展连没连
+python scripts/env.py --json     # 机器读：ok / python / bsk / actions
+python scripts/env.py --install  # 缺 bsk 时自动装（官方脚本，用户级）
+```
+
+</details>
 
 网页版 AI 用哪个都行：Kimi、ChatGPT、DeepSeek、Gemini、豆包都已实测开箱可用；别的对话界面没标定过也能接，写入前标定一次即可（见[支持哪些网页版 AI](#支持哪些网页版-ai)）。
 
@@ -134,6 +150,14 @@
 不装 skill 也能用：`scripts/` 全是纯标准库 Python 脚本，按下面的命令手动驱动即可，此时把 `SKILL.md` 当操作手册读。
 
 ## 常用命令
+
+**先看环境**（`env.py`，Agent 开工前会自己跑）
+
+```bash
+python scripts/env.py                 # Python 版本、bsk 路径与版本、扩展连没连
+python scripts/env.py --json          # 给 agent 读：ok / actions 里写着下一步
+python scripts/env.py --install       # 缺 bsk 时用官方脚本装（用户级，不要 root）
+```
 
 **桥接网页 AI**（`wa.py`）
 
@@ -222,8 +246,8 @@ python scripts/wa.py bind "<对话地址>" --platform <key>
 
 | 项 | 说明 |
 |---|---|
-| 🌐 **[bsk](https://github.com/Tencent/BrowserSkill)** | **星舵的核心依赖**（腾讯 BrowserSkill，MIT）：CLI + Chrome/Edge 扩展，让 agent 用你已登录的真实浏览器干活。星舵只调它六个子命令——`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`（点击动作在 `evaluate` 的 JS 里做）；`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 查找 |
-| 🐍 **Python 3.9+** | 仅标准库，无第三方依赖 |
+| 🌐 **[bsk](https://github.com/Tencent/BrowserSkill)** | **星舵的核心依赖**（腾讯 BrowserSkill，MIT）：CLI + Chrome/Edge 扩展，让 agent 用你已登录的真实浏览器干活。星舵只调它六个子命令——`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`（点击动作在 `evaluate` 的 JS 里做）；`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 查找；没装时 Agent 自己跑 `python scripts/env.py --install` 装上 |
+| 🐍 **Python 3.9+** | 仅标准库，无第三方依赖；缺了或版本太低时，Agent 会先找现成的解释器，再按平台装一个（`winget` / `brew` / `apt`） |
 | 🤖 **网页版 AI** | 一个已登录的对话地址 + 一个浏览器实例 |
 
 <details>

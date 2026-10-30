@@ -64,6 +64,7 @@ Starpilot/
 │   ├── statelock.py                  Single-writer state lock (O_EXCL + dead-process takeover, stdlib only)
 │   ├── requirement_gate.py           Negative-form requirement-card validation (rejects only, never generates)
 │   ├── lessons_audit.py              Knowledge-base health check (format / duplicates / stale open / blocking)
+│   ├── env.py                        ★ Environment check / bootstrap: Python version, bsk lookup + version, extension link; --install uses the official script
 │   └── upgrade.py                    ★ Upgrader: pull latest from GitHub, auto-fallback to public accelerators, back up, self-check
 │
 ├── templates/                    Artifact templates (fill them in; do not improvise)
@@ -74,7 +75,7 @@ Starpilot/
 │   ├── done-check.md                 Pre-close four-way consistency check
 │   └── web-ai-eval.md                ★ Web-AI memory self-test (used when choosing a platform)
 │
-├── tests/                            ★ 232 acceptance tests (stdlib unittest, zero third-party deps)
+├── tests/                            ★ 254 acceptance tests (stdlib unittest, zero third-party deps)
 │   ├── test_orchestrator.py          State machine / budget / recovery / close-out
 │   ├── test_orchestrator_gaps.py     Migration matrix actor gating / three-valued semantics / anchor wait / preconditions
 │   ├── test_confirm.py               Send-verdict criteria (incl. two incident replays)
@@ -88,6 +89,7 @@ Starpilot/
 │   ├── test_platforms_replay.py      Live DOM snapshot replay (a broken selector turns red offline)
 │   ├── test_lessons_audit.py         Knowledge-base health check (incl. blocking / staleness)
 │   ├── test_upgrade.py               Upgrader: version parsing / mirror fallback / install / prune
+│   ├── test_env.py                   Env check: interpreter version / bsk lookup order / install command / auto-install + recheck
 │   ├── domsel.py                     Mini selector engine (for replay, pure html.parser)
 │   └── fixtures/{deepseek,kimi,gemini}/  Live-recorded DOM snapshots
 │
@@ -127,10 +129,13 @@ python scripts/upgrade.py --to-latest    # pick source → download → back up 
   otherwise takes the fastest live mirror. Pin one with `--mirror <prefix>`, or force direct with `--mirror direct`.
 - **Never touches your data**: `runtime/` `runs/` `state/` `stage/` and `.wa-state.json` are excluded; the old
   tree is copied to `<dir>.bak-<timestamp>` first, and a failed self-check prints the rollback command.
-- **Self-check built in**: the full suite (232 tests) runs after install, so a broken upgrade goes red immediately.
+- **Self-check built in**: the full suite (254 tests) runs after install, so a broken upgrade goes red immediately.
 - In a `.git` checkout the script refuses to overwrite (use `git pull --ff-only`); `--force` overrides.
 
-> **Prerequisite**: install the **`bsk`** browser-driving CLI first — the loop is currently built and live-tested against it (see §6; a `BSK_BIN` override exists for equivalent CLIs).
+> **Prerequisites** (both handled by the agent — it checks before step 1 and installs what is missing):
+> `bsk`, the browser-driving CLI (see §6; a `BSK_BIN` override exists for equivalent CLIs), and Python 3.9+.
+> Run `python scripts/env.py --json` for a machine-readable status, `--install` to install bsk with the official script
+> (user-level, no root). The only manual step left is enabling the browser extension.
 
 ### Use it two ways
 
@@ -285,7 +290,7 @@ The full gap list lives in `SKILL.md` §8 (in Chinese).
 
 | Item | Notes |
 |---|---|
-| Browser-driving CLI | **The loop is currently built and live-tested against `bsk` — install it first.** `wa.py` looks it up on `PATH` and `~/.local/bin`, or honors a `BSK_BIN` override. Any local CLI exposing the same commands (`session` / `navigate` / `evaluate` / `click` / `press` / `fill`) can be wired in via `BSK_BIN`; all DOM decisions go through `evaluate` (JS returns facts), never screenshots |
+| Browser-driving CLI | **The loop is currently built and live-tested against `bsk`.** `wa.py` looks it up on `PATH` and `~/.local/bin`, or honors a `BSK_BIN` override; when it is missing, `python scripts/env.py --install` installs it with the official script (user-level, no root). Any local CLI exposing the same commands (`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`) can be wired in via `BSK_BIN`; all DOM decisions go through `evaluate` (JS returns facts), never screenshots |
 | Python 3.9+ | Stdlib only, zero third-party dependencies |
 | Web AI | One logged-in conversation URL + one browser instance |
 

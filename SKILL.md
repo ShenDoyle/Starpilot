@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "2.3.0"
+version: "2.3.1"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.0）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.1）。版本只从 `SKILL.md` 读，不从别处猜。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
 用户说「升级星舵 / 星舵升到最新版 / 检查有没有新版 / update starpilot」时，**直接执行**，不必先问「要不要升」——这就是用户要的动作：
@@ -226,6 +226,10 @@ transcript 里找到**原话出处**：
 ---
 
 ## 3. BIND：接入网页版 AI
+
+> **先自检环境，缺什么自己装**（细则见 §5.1）：
+> `python scripts/env.py --json` → rc=0 才往下走；rc=4 照 `actions` 修（缺 bsk 就 `--install`）；
+> rc=5 说明自动安装失败，把输出贴给用户，别带着坏环境硬跑。
 
 ### 3.0 先定平台（选型不是随手挑的）
 
@@ -442,28 +446,58 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 
 ## 5. 落地实现
 
-### 5.1 依赖
+### 5.1 依赖：缺什么自己装，别让用户先装
 
-- **浏览器驱动 CLI = `bsk`（核心依赖）**：[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（MIT）。
-  星舵全程靠它操作浏览器，只调六个子命令：`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`
-  （点击动作在 `evaluate` 的 JS 里做，不依赖 `click` 子命令）。
-  安装（官方脚本，默认落 `~/.local/bin`）：
+前置只有两个：**`bsk`（核心依赖）** 和 **Python 3.9+**。两个都由 **agent 自己装**，装不上才回来找用户。
+
+**开工前自检一次（第 1 轮之前，别每轮都跑）**
+
+```bash
+python scripts/env.py --json    # rc=0 就绪 / 4 缺东西（照 actions 修）/ 5 装完仍不可用
+```
+
+`actions` 是给你看的下一步，不是转给用户的说明书；`bsk.path` 可以直接拿去用，不必再 `which`。
+
+**缺 bsk：一条命令装**
+
+```bash
+python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/.local/bin，用户级、不要 root
+```
+
+- 装完自动复检并打印版本；`doctor.connected=false` 表示扩展没启用，这一步**只能让用户点一次扩展开关**，
+  属于「必须人做」的例外。
+- 手动等价命令（脚本下载被墙时）：
 
   ```bash
   # macOS / Linux
   curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
-  # Windows（PowerShell）
-  irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
   ```
 
-  还必须在目标浏览器里装扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) /
+  Windows 用 `irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex`（在 PowerShell 里跑）。
+
+- 装到非默认目录 → 设 `BSK_BIN` 指过去，之后每条命令都带上，不要每次重新找。
+- 星舵只调它的六个子命令：`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`
+  （点击在 `evaluate` 的 JS 里做，不依赖 `click`）。
+- 还必须在目标浏览器里启用扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) /
   [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），
   `bsk doctor` 显示 Connected 才算通；只装 CLI 不装扩展 = 一切页面操作都失败。
-  定位顺序：`BSK_BIN` → `PATH` → `~/.local/bin`；不在 PATH 时必须设 `BSK_BIN`。
-  **宿主会回收子进程时**（WorkBuddy / CodeBuddy 等）：让 daemon 以独立后台任务常驻
+- **宿主会回收子进程时**（WorkBuddy / CodeBuddy 等）：让 daemon 以独立后台任务常驻
   （`bsk daemon start --foreground`），再从另一个工具调用里验证，细节见官方
   [沙箱宿主指南](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)。
-- Python 3.9+（**仅标准库，无第三方依赖**；任何标准 Python 安装即可）
+
+**缺 Python 或版本低于 3.9**：我自己就跑在 Python 上，所以「装 Python」只能是换一个解释器跑我：
+
+1. 先看有没有现成的别的：`python3 --version`、`py -3 --version`；
+2. 都没有再装：Windows `winget install --id Python.Python.3.12 -e`、macOS `brew install python@3.12`、
+   Debian/Ubuntu `sudo apt install -y python3`；
+3. 装完用**新解释器**跑 `python scripts/env.py`，看到 3.9+ 才继续，之后所有命令都用它。
+
+**纪律**
+
+- 不许一上来就让用户「你先装个 bsk」——能自己装就自己装。用户的活是给需求和授权。
+- 装依赖属于改环境：先看确认门里用户对「能不能装东西」是怎么答的。没说不行就装（用户级、可逆、不碰项目文件），
+  命令和结果写进 journal；用户明确说过不许装，就不装，把现状和替代方案报回去。
+- 装完把 `bsk` 和解释器的**全路径**写进 journal，后面直接用，别再自检第二遍。
 
 ### 5.2 目录约定
 
@@ -493,6 +527,7 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 | `wa.py unlock` | 清残留的 state 写锁（O_EXCL 锁 + 死进程接管） |
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
+| `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk（§5.1） |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
 
 ### 5.3 会话纪律
@@ -562,7 +597,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论；换平台前先跑 `templates/web-ai-eval.md` |
 | 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI |
 | `msg_count=0` 但页面正常 | 手工 bsk session 顶掉了 state 里的 session | 重新 `wa.py bind <url>` 恢复 |
-| 找不到 bsk | 不在 PATH | 用全路径或设 `BSK_BIN` |
+| 找不到 bsk | 没装 / 不在 PATH / 扩展没开 | **自己装，别让用户装**：`python scripts/env.py --json` 看现状 → `--install`（官方脚本，用户级）；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
 | 发送后输入框空了、页面却没有新会话 | 平台侧限流/拒绝（Kimi 会弹「和Kimi聊天的人太多了」弹窗） | 先关弹窗、确认模型档位，再按 §4.1 的三重判据重发；仍不行按硬规则 4 停下转交 |
 | 输入框内容删不掉、重写变追加 | 受控编辑器忽略 `execCommand('delete')`／`paste` 是追加 | 用 Range 圈定内容 + `execCommand('insertText')` 覆盖；Kimi 已按此配置 |
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
@@ -608,6 +643,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | **升级包不校验签名/哈希** | 只按 HTTPS + 版本号判断，没有签名校验，也不比对内容哈希；镜像站是第三方公益服务，理论上可被投毒（脚本已限缩到固定仓库路径、提取时用 `filter="data"` 防穿越） | 需要时补：仓库内放 `SHA256SUMS`，升级后校验一遍再安装 |
 | **镜像可用性不由我们控制** | 公益加速站随时可能关停或变慢；脚本每次并发实测挑最快的，全挂了才报错 | 备用：`--mirror <自建前缀>`，或直连可用时自动走直连 |
 | **离线回放只覆盖 DOM 契约** | `tests/fixtures/` 是真机录制的 DOM 快照，`tests/domsel.py` 在 Python 里重放选择器；但它验的是**选择器命中**，不验「真页面渲染时序」 | 下一轮该做「真机 vs 回放偏差」对照（DeepSeek 第 2 轮裁定建议） |
+| **自检只到「bsk 能跑 + 扩展连上」** | `env.py` 验解释器版本、`bsk --version`、`doctor` 三项；**不验**每个子命令真能用（`session` 起得来、`evaluate` 能跑），也不验 Python 有没有装到新环境 | 真实不可用时靠 §6 故障表逐条排；`env.py --install` 只装 bsk，不碰 Python 解释器（装 Python 必须换解释器跑我，脚本自己做不到） |
 
 ---
 
@@ -620,6 +656,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `references/lessons.md` — 实战踩坑沉淀（跨项目复用）
 - `templates/` — 需求卡片 / **首次确认单（人话版）** / 反馈 / 阶段报告 / 完成判定 / 平台记忆自测
 - `scripts/wa.py` — bind / send / wait / read / state / plock 命令实现
+- `scripts/env.py` — 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展连接；`--install` 自动装 bsk
 - `scripts/platforms.py` — 平台适配层：选择器与绑定形态的唯一来源
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验
 - `scripts/risk.py` — 越界请求风险分级（low 放行 / medium 换方案 / high 停下）
