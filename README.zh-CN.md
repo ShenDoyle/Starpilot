@@ -72,7 +72,7 @@ Starpilot/
 │   ├── done-check.md                 收口前四方一致性核对
 │   └── web-ai-eval.md                ★ 网页 AI 记忆自测表（选平台时用）
 │
-├── tests/                            ★ 229 个验收单测（stdlib unittest，无第三方依赖）
+├── tests/                            ★ 232 个验收单测（stdlib unittest，无第三方依赖）
 │   ├── test_orchestrator.py          状态机 / 预算 / 恢复 / 收口
 │   ├── test_orchestrator_gaps.py     迁移矩阵 actor 门控 / 三值语义 / 锚点等待 / 前置断言
 │   ├── test_confirm.py               发送确认口径（含两个历史事故回放）
@@ -106,7 +106,7 @@ Starpilot/
 ```bash
 git clone https://github.com/ShenDoyle/Starpilot.git
 cd Starpilot
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 229 个单测，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 232 个单测，纯标准库
 ```
 
 仓库地址：**<https://github.com/ShenDoyle/Starpilot>**
@@ -123,7 +123,7 @@ python scripts/upgrade.py --to-latest    # 选源 → 下载 → 备份 → 覆�
   直连能用就直连，不能用就取最快的可用镜像；也可 `--mirror <前缀>` 指定、`--mirror direct` 强制直连。
 - **不动现场**：`runtime/` `runs/` `state/` `stage/` `.wa-state.json` 一律排除；
   覆盖前把旧目录整体备份成 `<目录>.bak-<时间戳>`，装完单测失败会打回滚命令。
-- **装完自检**：自动跑全量单测（229 条），装坏了当场就红，不会等你下次用才发现。
+- **装完自检**：自动跑全量单测（232 条），装坏了当场就红，不会等你下次用才发现。
 - 目录里有 `.git`（开发副本）时脚本拒绝覆盖，提示改用 `git pull --ff-only`；确要覆盖加 `--force`。
 
 > **前置**：请先安装 **`bsk`** 浏览器驱动 CLI——本循环当前基于它构建并全链路实测
@@ -263,7 +263,7 @@ python scripts/wa.py bind "<对话地址>" --platform claude
 | ② 网页 AI 规划 | 90% | 29 轮规划留档，产出总纲 + 契约 + 阶段报告；O0~O4 全部裁定完成 |
 | ③ 步骤拆解 | 90% | 阶段路线 + 每阶段准出标准与裁定（O4 收口口径已冻结进契约） |
 | ④ 取指令执行 | 88% | `wa.py` + `platforms.py` + `write_gate.py` + `orchestrator.py` 四件套就位；6 平台可路由，**ChatGPT + Kimi + DeepSeek + Gemini + 豆包 已实测** |
-| ⑤ 逐步执行 | 95% | 写闸门实测跑通（dry-run→批准→单条真发→核验，`effective_delta=1` 且 `delta_source=anchor`）；等待侧改为锚点口径；崩溃恢复实测零重发；**229 个验收单测全绿** |
+| ⑤ 逐步执行 | 95% | 写闸门实测跑通（dry-run→批准→单条真发→核验，`effective_delta=1` 且 `delta_source=anchor`）；等待侧改为锚点口径；崩溃恢复实测零重发；**232 个验收单测全绿** |
 | ⑥ 完成项目 | 60% | 知识回流已强制且有**体检**（`lessons_audit.py`：blocking open 阻塞收口、open 超 14 天告警）；缺口剩「多平台实测（需人改绑）」与「长连 soak」 |
 
 ### 已闭合的三个缺口（2026-10-29）
