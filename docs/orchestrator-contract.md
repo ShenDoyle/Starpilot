@@ -594,6 +594,7 @@ DOM 有字而 model 为空（见 `references/lessons.md` L-GEMINI-FILL-NOT-ACCEP
 
 ```
 python scripts/orchestrator.py init --goal <目标> [--stage <id>] [--max-rounds N] [--card <需求卡片>]
+python scripts/orchestrator.py mode [--set step|auto] [--reason <用户原话>]   # mid-loop 可切
 python scripts/orchestrator.py bind --url <对话地址> | --new | --reuse | --reuse-existing
 python scripts/orchestrator.py plan --file <规划产物>
 python scripts/orchestrator.py loop --once [--run <run_id>] [--file <正文>]
@@ -608,6 +609,9 @@ python scripts/orchestrator.py close --stage <id> --require-lessons
 python scripts/orchestrator.py lesson --symptom <症状> --fix <处置> --verify-cmd <命令> [--status open] [--blocking]
 python scripts/orchestrator.py windows            # 硬规则 6 运行时断言：同实例会话数
 python scripts/orchestrator.py unblock --to <状态> --reason <为什么能继续>
+python scripts/orchestrator.py replan [--reason <为什么换方案>]        # §2.14 失败两次 → 回网页 AI 换方案
+python scripts/orchestrator.py rebind [--reason drift|gone]           # §2.14 漂移/消失 → 收旧窗 + 开新对话
+python scripts/orchestrator.py decide --question <问题> --choice <选择> --why <依据> [--reversible <怎么回退>] [--scope <范围>] [--decided-by web_ai|agent|plan]   # §2.14 自主决定留痕
 python scripts/orchestrator.py card --file <需求卡片>   # 否定式校验（只拒绝，不生成）
 python scripts/wa.py unlock --state <.wa-state.json>    # 清残留的 state 写锁（崩溃恢复）
 python scripts/wa.py clear --state <.wa-state.json>     # 清空输入框（不发送）：给「写完未发」的恢复态
@@ -620,9 +624,6 @@ python scripts/lessons_audit.py [--strict] [--max-age-days 14]  # 知识库体�
 
 `init` 带 `--card` 时**先过需求闸门**（`requirement_gate.validate`）：卡片不通过就直接拒绝建 run——
 硬规则 2「不预估方向」的工具级落法。闸门只做否定式校验（拒绝），不生成、不补全、不建议。
-
-`bind --reuse`：复用 `wa` state 里**已绑定的对话**，不重新 bind、不新增地址——
-这是「同一对话」纪律在工具层的落法。
 
 ### 5.1 status 必须打印（缺一不可）
 

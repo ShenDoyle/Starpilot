@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "2.3.2"
+version: "2.3.3"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.2）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.3）。版本只从 `SKILL.md` 读，不从别处猜。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
 用户说「升级星舵 / 星舵升到最新版 / 检查有没有新版 / update starpilot」时，**直接执行**，不必先问「要不要升」——这就是用户要的动作：
@@ -707,19 +707,19 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v2.3 现状，别假装有）
+## 8. 已知缺口（v2.3.3 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|
 | ~~**无 orchestrator**~~ | **已补（2026-10-29）**：`scripts/orchestrator.py` 落地 14 态状态机 + 守卫迁移 + 轮次预算 + 崩溃恢复（`loop --resume` 只复核 DOM、绝不重发），实测证据见 `runs/20261029T042822-recovery2` | — |
 | ~~**写侧未落地**~~ | **已补（2026-10-29）**：`scripts/write_gate.py` 落地「缺省 dry_run + 必须批准 + 单条真实写 + 写后核验」，真实写在 Kimi 上跑通（`reply_count_delta=1`） | — |
 | ~~**知识回流靠自觉**~~ | **已补（2026-10-29）**：`orchestrator.py close --stage <id> --require-lessons` 强制把 lesson 候选并进 `references/lessons.md` 附录，验收看 `candidates=merged=appendix_added` 与 `lessons_pending=0` | — |
-| **只有 4 个平台实测过** | `platforms.py` 已抽象出适配层，**ChatGPT / Kimi / DeepSeek / Gemini / 豆包已实测**（DeepSeek、Gemini、豆包均于 2026-10-29 全链路跑通）；Claude 的候选选择器**仍为通用模式推断**，未验证。**受硬规则 1 约束，未绑定就不能探测**（矩阵记 `skipped_not_bound`） | 要实测就得**由人改绑**（架构师级决定），再按 `references/web-ai-platforms.md` 六步接入 |
+| **5 个平台已实测，Claude 未标定** | `platforms.py` 已抽象出适配层，**ChatGPT / Kimi / DeepSeek / Gemini / 豆包已实测**（DeepSeek、Gemini、豆包均于 2026-10-29 全链路跑通）；Claude 的候选选择器**仍为通用模式推断**，未验证。**受硬规则 1 约束，未绑定就不能探测**（矩阵记 `skipped_not_bound`） | 要实测就得**由人改绑**（架构师级决定），再按 `references/web-ai-platforms.md` 六步接入 |
 | **「工具说成功/失败」不等于事实** | 三个同源坑：① 导航 `load` 事件不来（Gemini 长轮询）→ 判导航失败；② `bsk fill` 自校验比对多行文本 → 判写入失败（字其实已进去）；③ `innerText` 有字而编辑器 model 是空（Quill）。**一律以页面事实定性**：地址+编辑器、空态类+发送键+字数 | `navigate_soft` / `fill_check` / `normalize_probe` 三处收口；`references/lessons.md` L-GEMINI-NAV-TIMEOUT / FILL-FAILED / FILL-NOT-ACCEPTED |
 | **写完未发就卡住时无路可走** | 守卫正确地拒绝「脏输入框」再写，但以前没有清空工具 → 恢复只能人工点浏览器 | `wa.py clear`（Ctrl+A + Delete，真实键盘；清完复核空态） |
 | ~~**需求阶段无工具**~~ | **已补（2026-10-29）**：`scripts/requirement_gate.py` 做**否定式**校验（未明确未清空 / 冲突未裁定 / 确认未通过 一律拒），`orchestrator.py init --card` 强制先过。**它只拒绝，不生成、不补全、不建议**（硬规则 2） | 卡片模板见 `templates/requirement-card.md` |
 | **长连 soak 未做** | 编排器只跑过单轮/双轮，**没跑过 20 轮预算级的自动循环** | 下一轮可做：只读为主的长连 soak，观察轮次预算与失败计数的真实行为 |
-| **prompt 质量无对照数据** | 本轮把「步骤回执 + 每步由网页版 AI 判完成度」写进了流程，但**没做过 A/B 对照**（同一任务两套 prompt 比方案质量） | 待做：两个独立对话（不同 `STARPILOT_LOCK_KEY`）跑同一任务，比「下一步指令的可执行度」 |
+| **prompt 对照只做过一轮** | 已用两个独立 Kimi 对话做过 2×1 的 A/B（`docs/prompt-ab-20261030.md`）：结构化 brief 给出的是「单步 + 验收判据」，自由 brief 给的是一整套路线图 —— 方向明确，但**样本只有一轮，不足以定阈值** | 待做：多任务 × 多轮重复，比「下一步指令的可执行度」；不同 `STARPILOT_LOCK_KEY` 起独立对话 |
 | **完成度仍靠网页版 AI 自觉** | 没有机器判据能验「它说的完成是不是真完成」；agent 只能靠 `done-check` 四方一致兜底 | 只能靠证据留痕 + 人验收；别把「它说完成了」当事实（硬规则 3） |
 | ~~**指标口径曾漂移**~~ | **已修两轮（2026-10-29）**：① 第一轮把「总消息数」换成「助手气泡数」（契约 v1.0）；② 第二轮发现气泡数在虚拟列表下也不稳（回复 2597 字已渲染、`reply_count` 仍是 2），改为**锚点口径**（消息 ID > 正文指纹 > 计数），通过线 `effective_delta==1`（契约 v1.1 §2.4.1） | 任何口径改动必须同步契约 §2.4/§2.4.1 + 跑 `tests/test_confirm.py` |
 | **升级包不校验签名/哈希** | 只按 HTTPS + 版本号判断，没有签名校验，也不比对内容哈希；镜像站是第三方公益服务，理论上可被投毒（脚本已限缩到固定仓库路径、提取时用 `filter="data"` 防穿越） | 需要时补：仓库内放 `SHA256SUMS`，升级后校验一遍再安装 |
@@ -742,6 +742,6 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `scripts/platforms.py` — 平台适配层：选择器与绑定形态的唯一来源
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验
 - `scripts/risk.py` — 越界请求风险分级（low 放行 / medium 换方案 / high 停下）
-- `scripts/orchestrator.py` — 状态机：init / bind / plan / loop / mode / approve / close
+- `scripts/orchestrator.py` — 状态机：init / mode / bind / plan / loop / approve / audit / close / replan / rebind / decide
 - `scripts/upgrade.py` — 升级器：仓库 `https://github.com/ShenDoyle/Starpilot`，自动挑源（直连 / 公益加速镜像）+ 备份 + 装后自检
 - 仓库地址：<https://github.com/ShenDoyle/Starpilot>（版本以本文件 front-matter 为准）
