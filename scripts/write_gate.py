@@ -379,8 +379,9 @@ def execute_send(p: dict, text: str, sid: str, round_id: int = 0,
 
     ok, res = wa.do_send(p, sid)
     if not ok:
-        return {"ok": False, "error_class": "click_send_failed", "detail": str(res),
-                "before": before}
+        # 平台被别的任务占着不是「点击失败」：单列一类，别让人去查选择器
+        ec = "platform_busy" if str(res).startswith("platform_busy") else "click_send_failed"
+        return {"ok": False, "error_class": ec, "detail": str(res), "before": before}
 
     signals = []
     confirmed = False
