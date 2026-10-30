@@ -46,8 +46,19 @@
 
 ## 用你熟悉的 Agent
 
-| Codex · Claude Code · Cursor · OpenClaw · CodeBuddy · WorkBuddy · Pi |
-| --- |
+<p align="center">
+<table><tr>
+<td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/agents/codex-dark.svg"><img alt="Codex" src="assets/agents/codex.svg" width="36"></picture><br><b>Codex</b></td>
+<td align="center"><img alt="Claude Code" src="assets/agents/claude.svg" width="36"><br><b>Claude Code</b></td>
+<td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/agents/cursor-dark.svg"><img alt="Cursor" src="assets/agents/cursor.svg" width="36"></picture><br><b>Cursor</b></td>
+<td align="center"><img alt="OpenClaw" src="assets/agents/openclaw-avatar.png" width="36"><br><b>OpenClaw</b></td>
+</tr><tr>
+<td align="center"><img alt="CodeBuddy" src="assets/agents/codebuddy.svg" width="36"><br><b>CodeBuddy</b></td>
+<td align="center"><img alt="WorkBuddy" src="assets/agents/workbuddy.svg" width="36"><br><b>WorkBuddy</b></td>
+<td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/agents/pi-dark.svg"><img alt="Pi" src="assets/agents/pi.svg" width="36"></picture><br><b>Pi</b></td>
+<td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/agents/shell-dark.svg"><img alt="任何能跑命令的 Agent" src="assets/agents/shell.svg" width="36"></picture><br><b>其它 Agent</b></td>
+</tr></table>
+</p>
 
 这些 Agent，以及其他能调用 Shell 的 Agent，都能直接装星舵。Agent 和模型由你选择——星舵只做两件事：把你的需求交给网页版 AI 换方案，把方案交给 Agent 去执行。
 
