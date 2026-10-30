@@ -31,8 +31,8 @@
 | --- | --- |
 | **Land a large change** | The web AI cuts the goal into stages with acceptance criteria; the agent does one step at a time and reports back before asking for the next |
 | **Restructure long documents, merge many sources** | Structure first, then rewrite section by section, each with its own criteria; any drift stops the round and triggers a re-plan |
-| **Clean data, reconcile sheets** | Every number carries a source; mismatches are reported as differences, never smoothed over |
-| **Rule-based batch checks and reports** | The web AI writes the rules, the agent executes and keeps evidence; two failures on the same spot go back as a new plan |
+| **Clean data, reconcile sheets** | Every number carries a source; mismatches are reported as differences |
+| **Rule-based batch checks and reports** | The web AI writes the rules, the agent executes and keeps evidence |
 | **Compare options, pick a stack** | The web AI sets the criteria, the agent gathers evidence, every conclusion traces back to a source |
 
 Compared with the usual approaches, the difference is the division of labour:
@@ -60,11 +60,11 @@ Compared with the usual approaches, the difference is the division of labour:
 </tr></table>
 </p>
 
-All of these install Starpilot directly, as does any other agent that can run shell commands. You pick the agent and the model — Starpilot only does two things: hand your requirement to the web AI for a plan, and hand that plan to the agent to execute.
+These, and any other agent that can run shell commands, install it directly. The agent and the model are your call.
 
 ## Quick start
 
-You need one agent from the list above. Everything else, it installs itself. Your only job is to drop the folder in place and say what you want; the one manual step left is flipping the browser extension on.
+One agent from the list above; it installs the rest itself. The one manual step left is flipping the browser extension on.
 
 1. Put this whole folder into your AI client's skills directory (for example `~/.workbuddy/skills/starpilot`), or `git clone` it there.
 2. Say one sentence (see [Try one task](#try-one-task)).
@@ -90,13 +90,7 @@ On Windows, run this in PowerShell: `irm https://raw.githubusercontent.com/Tence
 
 Then enable the browser extension ([Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)); `bsk doctor` must show Connected. If it landed somewhere non-default, point `BSK_BIN` at it.
 
-**Python 3.9+**, no third-party packages. Three self-check commands:
-
-```bash
-python scripts/env.py            # Python version, bsk path, whether the extension is connected
-python scripts/env.py --json     # for the agent: ok + actions (next steps live here)
-python scripts/env.py --install  # install bsk when missing (official script, user-level)
-```
+Python 3.9+, no third-party packages; run `python scripts/env.py` afterwards to confirm.
 
 </details>
 
@@ -106,11 +100,8 @@ Once installed, no commands to memorise:
 
 > 💬 Use Starpilot to do X ／ Have the web AI plan X ／ Follow DeepSeek on this project
 
-You will see three things:
-
 - Requirements get pinned down before work starts: what is clear, what is open, what conflicts. Nothing runs until you agree.
 - Every round reports three lines: what was done, where the evidence is, what fell short.
-- To upgrade, just say **"update Starpilot to the latest"**.
 
 ## Watching, or not watching
 
@@ -124,45 +115,32 @@ Writes need authorisation first: "you may write for the whole task", "only this 
 ## What it will not do
 
 - **No guessing at requirements** — with you watching it asks first; unattended it follows the pre-agreed policy and records the rationale
-- **No widening its own authority** — out-of-scope requests are graded: harmless ones pass with a log line, risky ones switch to an alternative, anything touching credentials, deletion, or cross-site stops
+- **No dressing up results** — a failure is reported as a failure, never as "should be fine now"
+- **No widening its own authority** — harmless requests pass with a log line, risky ones switch to an alternative, anything touching credentials, deletion, or cross-site stops
 - **No touching files behind your back** — writes dry-run by default; either approve them one by one, or authorise a stage up front
-- **No fighting over one conversation** — one conversation per project for its whole life; parallel tasks queue up
+- **No fighting over one conversation** — one conversation and one window per project, for its whole life; parallel tasks queue up
 - **No judging pages from screenshots** — state comes from the DOM, so "it looked like it worked" cannot happen
 
-## Six hard rules (breaking any means failure)
-
-These are fixed in `SKILL.md` §1 and the agent has no room to interpret them: **one conversation** (if it gets hijacked or deleted, self-heal and keep going, never stop) · **never pre-guess direction** · **never judge from screenshots** · **two failures mean a new plan** (back to the AI, not back to you) · **report truthfully** · **single window**.
+These six are fixed in `SKILL.md` §1, with no room to interpret them. Two failures do not stop and wait for you — they go back with the failure in hand for a new plan.
 
 ## Which web AI to use
 
-**Use DeepSeek in mainland China, ChatGPT elsewhere** — both are live-tested and work out of the box. Kimi, Gemini and Doubao are live-tested too; any other chat UI can be wired in, with one calibration run before its first write.
+Any other chat UI can be wired in too — one `probe` run before its first write.
 
 | key | Platform | Status | Best for |
 | --- | --- | --- | --- |
 | `deepseek` | DeepSeek | Live-tested · **first choice in China** | fast direct connection domestically, steady planning |
 | `chatgpt` | ChatGPT | Live-tested · **first choice elsewhere** | best plans and acceptance criteria |
 | `kimi` | Kimi | Live-tested | strongest long-conversation coherence |
-| `gemini` | Gemini | Live-tested | usable |
-| `doubao` | Doubao | Live-tested | usable |
+| `gemini` | Gemini | Live-tested | big window, long documents |
+| `doubao` | Doubao | Live-tested | direct in China, cheapest to set up |
 | `claude` | Claude | Not calibrated | one calibration run and it works |
 
-One conversation carries the whole project, so the web AI's planning quality sets the ceiling on what you get done — that is the reason for these two recommendations, not a compatibility ranking.
-
-Wiring up a new platform:
-
-```bash
-python scripts/wa.py platforms                  # list platforms and their calibration status
-python scripts/wa.py probe --platform <key>     # calibrate selectors against the live page
-python scripts/wa.py bind "<conversation-url>" --platform <key>
-```
-
-Details in `references/web-ai-platforms.md`; before picking a platform, run the self-test in `templates/web-ai-eval.md` — it beats reading benchmarks.
+Calibration and platform details: `references/web-ai-platforms.md`.
 
 ## Commands
 
-Day to day the loop is driven by `scripts/orchestrator.py`: a 14-state machine where every transition passes a guard and is auditable; writes go through a gate (dry-run → approval → single real send → post-write verification); after a crash it only re-verifies the page and never re-sends.
-
-You can also use it without the skill: everything under `scripts/` is plain standard-library Python — treat `SKILL.md` as the operating manual.
+Day to day the loop is driven by `scripts/orchestrator.py`: a 14-state machine with a write gate (dry-run → approval → real send → post-write check); after a crash it only re-verifies, never re-sends. You can also use it without the skill — `scripts/` is plain standard-library Python, and `SKILL.md` doubles as the manual.
 
 **Environment** (the agent runs this before starting)
 
@@ -219,7 +197,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 
 | Item | Notes |
 | --- | --- |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | Core dependency (MIT): CLI + Chrome/Edge extension, driving the browser you are already logged into. Starpilot only calls six subcommands: `session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | Core dependency (MIT): CLI + Chrome/Edge extension, driving the browser you are already logged into. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
 | 🐍 Python 3.9+ | Standard library only, no third-party dependencies |
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
@@ -229,7 +207,7 @@ python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```
 
-Direct GitHub access often times out from mainland China, so the upgrader probes direct access and a set of public accelerators in parallel and takes whichever is fastest; `runtime/ runs/ state/ stage/` are left alone, the tree is backed up before being replaced, and the test suite runs afterwards.
+Or just say **"update Starpilot to the latest"**. Direct GitHub access often times out from mainland China, so the upgrader probes direct access and a set of public accelerators in parallel and takes whichever is fastest; `runtime/ runs/ state/ stage/` are left alone, the tree is backed up before being replaced, and the test suite runs afterwards.
 
 <details>
 <summary><b>bsk connects then drops? (hosts that reap child processes)</b></summary>
@@ -263,7 +241,7 @@ When something goes wrong, look here first: `journal.jsonl` is the single source
 | Keep the agent away from pitfalls others already hit | `references/lessons.md` |
 | Requirement card, confirmation sheet, feedback, stage report | `templates/` |
 
-> The working documents (`SKILL.md`, `references/`, `docs/`) are maintained in Chinese. The 13-field lesson format in `references/lessons.md` is machine-parsed by `scripts/lessons_audit.py` and is deliberately not translated.
+> The working documents (`SKILL.md`, `references/`, `docs/`) are in Chinese.
 
 ## License
 

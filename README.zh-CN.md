@@ -31,8 +31,8 @@
 | --- | --- |
 | **大改动拆开落地** | 网页版 AI 把目标拆成有验收判据的阶段，Agent 一次只做一步，做完回报再要下一步 |
 | **长文重排、多份材料合并** | 先定结构再逐节改写，每节都有判据；偏离方案立刻停下重规划 |
-| **清洗数据、跨表对账** | 每个数字都要出处，对不上就报差异，不许「大致正确」 |
-| **批量核对、按规则出报告** | 规则由网页版 AI 定，Agent 执行并留证，同一处连续失败两次就打包换方案 |
+| **清洗数据、跨表对账** | 每个数字都要出处，对不上就报差异 |
+| **批量核对、按规则出报告** | 规则由网页版 AI 定，Agent 执行并留证 |
 | **多方案调研选型** | 判据由网页版 AI 定，证据由 Agent 找，结论能回溯到来源 |
 
 和常见做法比，差别在分工：
@@ -60,11 +60,11 @@
 </tr></table>
 </p>
 
-这些 Agent，以及其他能调用 Shell 的 Agent，都能直接装星舵。Agent 和模型由你选择——星舵只做两件事：把你的需求交给网页版 AI 换方案，把方案交给 Agent 去执行。
+这些，以及任何能跑 Shell 命令的 Agent，都能直接装。Agent 和模型由你挑。
 
 ## 快速开始
 
-你只需要一个上面这样的 Agent，其余的它自己装。你只要放好文件夹、说一句要做什么；唯一要亲手做的是在浏览器里启用扩展开关。
+一个上面这样的 Agent，其余它自己装；唯一要亲手做的是在浏览器里启用扩展开关。
 
 1. 把整个文件夹放进 AI 客户端的 skills 目录（例如 `~/.workbuddy/skills/starpilot`），或 `git clone` 到那里。
 2. 说一句话（见[试一个任务](#试一个任务)）。
@@ -89,13 +89,7 @@ Windows 在 PowerShell 里跑：`irm https://raw.githubusercontent.com/Tencent/B
 
 再在浏览器启用扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），`bsk doctor` 显示 Connected 才算通。装在非默认目录就设 `BSK_BIN` 指过去。
 
-**Python 3.9+**，不需要任何第三方包。自检三条命令：
-
-```bash
-python scripts/env.py            # Python 版本、bsk 路径、扩展连没连
-python scripts/env.py --json     # 给 Agent 读：ok + actions（下一步写在里面）
-python scripts/env.py --install  # 缺 bsk 时自动装（官方脚本，用户级）
-```
+需要 Python 3.9+（无第三方包）；装完跑 `python scripts/env.py` 确认。
 
 </details>
 
@@ -105,11 +99,8 @@ python scripts/env.py --install  # 缺 bsk 时自动装（官方脚本，用户�
 
 > 💬 用星舵做一下 XX ／ 让网页版 AI 规划一下 XX ／ 跟着 DeepSeek 做这个项目
 
-会看到三件事：
-
 - 开工前把需求问清楚：哪些明确、哪些没定、哪些互相冲突。你点头才开工。
 - 每轮回报三句：做了什么、证据在哪、哪里没做到。
-- 想升级，说一句 **「升到最新版」**。
 
 ## 有人盯，还是没人盯
 
@@ -123,45 +114,32 @@ python scripts/env.py --install  # 缺 bsk 时自动装（官方脚本，用户�
 ## 它不会做的事
 
 - **不硬猜需求**——有人盯时先问清；无人值守时按预案走，依据记下来
-- **不擅自扩大授权**——超范围请求分级处理：无害的放行留痕，有风险的换做法继续，碰凭证、删除、跨站的停下
+- **不美化结果**——失败就报失败，不写「应该可以了」
+- **不擅自扩大授权**——无害的放行留痕，有风险的换做法，碰凭证、删除、跨站的停下
 - **不绕过你动文件**——写操作默认只演练；要么逐条批准，要么开工时授权「这个阶段可以直接写」
-- **不抢同一个对话**——一个项目全程一个对话，多任务并行会排队
+- **不抢同一个对话**——一个项目全程一个对话、一个窗口，多任务并行会排队
 - **不靠截图判断页面**——用 DOM 读事实，避免「看着像成功了」
 
-## 六条硬规则（违反即失败）
-
-这六条写死在 `SKILL.md` §1，Agent 没有解释空间：**同一对话**（被抢或被删就自愈，不停）· **不预估方向** · **不靠截图判断** · **失败两次必须换方案**（回去找 AI，不是找人）· **如实回报** · **单窗口**。
+这六条写死在 `SKILL.md` §1，没有解释空间。失败两次不是停下来找你，是带着现场回去换方案。
 
 ## 支持哪些网页版 AI
 
-**在国内用 DeepSeek，其它场景建议 ChatGPT**——两者都已实测、开箱可用。Kimi、Gemini、豆包同样实测可用；别的对话界面也能接，没实测过的写入前标定一次即可。
+没实测过的对话界面也能接，写入前跑一次 `probe` 标定。
 
 | key | 平台 | 状态 | 适合 |
 | --- | --- | --- | --- |
 | `deepseek` | DeepSeek | 已实测 · **国内首选** | 国内直连快，规划稳 |
 | `chatgpt` | ChatGPT | 已实测 · **海外首选** | 方案与验收判据质量最好 |
 | `kimi` | Kimi | 已实测 | 长对话连贯性好 |
-| `gemini` | Gemini | 已实测 | 可用 |
-| `doubao` | 豆包 | 已实测 | 可用 |
+| `gemini` | Gemini | 已实测 | 窗口大，长文档吃得住 |
+| `doubao` | 豆包 | 已实测 | 国内直连，落地成本低 |
 | `claude` | Claude | 未实测 | 标定一次即可用 |
 
-全程只用一个对话，网页版 AI 的规划质量直接决定完成水平——这是推荐这两个的原因，不是别的平台不能用。
-
-接新平台：
-
-```bash
-python scripts/wa.py platforms                  # 看清单与标定状态
-python scripts/wa.py probe --platform <key>     # 在真页面标定选择器
-python scripts/wa.py bind "<对话地址>" --platform <key>
-```
-
-细节见 `references/web-ai-platforms.md`；挑平台前建议先跑 `templates/web-ai-eval.md` 的自测，比看评测准。
+标定流程与平台细节见 `references/web-ai-platforms.md`。
 
 ## 常用命令
 
-日常由 `scripts/orchestrator.py` 驱动：14 态状态机，每次迁移都有守卫、可审计；写操作走闸门（演练 → 批准 → 单条真发 → 写后核验）；崩溃后只复核页面，绝不重发。
-
-不装 skill 也能用：`scripts/` 全是纯标准库脚本，把 `SKILL.md` 当操作手册即可。
+日常由 `scripts/orchestrator.py` 驱动：14 态状态机，写操作走闸门（演练 → 批准 → 真发 → 写后核验），崩溃后只复核、绝不重发。不装 skill 也能用：`scripts/` 全是纯标准库，把 `SKILL.md` 当操作手册。
 
 **环境**（Agent 开工前会自己跑）
 
@@ -218,7 +196,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 
 | 项 | 说明 |
 | --- | --- |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | 核心依赖（MIT）：CLI + Chrome/Edge 扩展，用你已经登录的浏览器干活。星舵只调六个子命令：`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`。`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | 核心依赖（MIT）：CLI + Chrome/Edge 扩展，用你已经登录的浏览器干活。`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
 | 🐍 Python 3.9+ | 仅标准库，无第三方依赖 |
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
@@ -228,7 +206,7 @@ python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```
 
-国内直连 GitHub 常常超时，升级器会并发探测直连和一批公益加速镜像，谁的快用谁；`runtime/ runs/ state/ stage/` 不动，覆盖前整体备份，装完自动跑单测。
+也可以直接说一句 **「升到最新版」**。国内直连 GitHub 常常超时，升级器会并发探测直连与一批公益加速镜像，谁的快用谁；`runtime/ runs/ state/ stage/` 不动，覆盖前整体备份，装完自动跑单测。
 
 <details>
 <summary><b>bsk 连上了又断？（会回收子进程的宿主）</b></summary>
