@@ -325,6 +325,8 @@ VERDICT_EFFECT = {
     "SENT": "clear",
     "SENT_NO_REPLY": "clear",
     "SENT_MULTI": "clear",
+    # 换方案（replan 专用）：失败计数清零，但不是「成功」，别把它当 SENT 用
+    "REPLAN": "clear",
     # 无结论（既不能报成功也不能报失败 → 人工复核）
     "INCONCLUSIVE_NOT_SUCCESS": 0,
     "INCONCLUSIVE_COLLISION": 0,
@@ -921,9 +923,37 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
             st["last_error_class"] = err
             save_run_state(root, st)
             lesson_candidate(root, st, err, detail)
-            if st["fail_streak"] >= int((st.get("goal") or {}).get("max_same_error", 2)):
-                transition(root, st, "HANDOFF", "同目标连续失败 %d 次" % st["fail_streak"],
-                           {"action": "send", "result": "failed", "error_class": err})
+            cap_err = int((st.get("goal") or {}).get("max_same_error", 2))
+            if st["fail_streak"] >= cap_err:
+                # 两次原则（W 裁定 2026-10-30）：不是停下找人，而是回网页 AI 换方案。
+                # 只有**轮次预算烧完**才真的转交（HANDOFF）；否则停在 PAUSED_HUMAN
+                # 等 replan —— 那一步把失败包交给架构师，而不是交给用户。
+                if budget_gate(st)[0] == "exhausted":
+                    transition(root, st, "HANDOFF",
+                               "轮次预算耗尽（同目标已失败 %d 次）" % st["fail_streak"],
+                               {"action": "send", "result": "failed", "error_class": err})
+                else:
+                    st["needs_replan"] = True
+                    st["replan"] = {"reason": "same_target_failed_twice",
+                                    "fail_streak": st["fail_streak"],
+                                    "error_class": err,
+                                    "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                    st["last_guard_failure"] = {
+                        "reason": "同目标连续失败 %d 次：回网页 AI 换方案（不是找人）"
+                                  % st["fail_streak"],
+                        "checkpoint": "need_replan",
+                        "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                    save_run_state(root, st)
+                    journal(root, st, {"action": "replan", "result": "need_new_plan",
+                                       "error_class": err,
+                                       "fail_streak": st["fail_streak"],
+                                       "reason": "same_target_failed_twice"})
+                    transition(root, st, "PAUSED_HUMAN",
+                               "同目标连续失败 %d 次：等 replan 换方案"
+                               % st["fail_streak"],
+                               {"action": "replan", "result": "need_new_plan",
+                                "error_class": err, "fail_streak": st["fail_streak"]},
+                               by="agent")
             else:
                 st["state"] = "PAUSED_HUMAN"
                 st["last_guard_failure"] = {"reason": "发送失败：%s（%s）" % (err, detail),
@@ -1066,8 +1096,8 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
             return step
         # 执行模式决定「这一轮结束后停不停」——这是两条线唯一的行为差异：
         #   step（逐步确认）：每轮停下，让人看结果、决定下一轮怎么写；
-        #   auto（无人值守）：直接进下一轮，只在三条例外（连续失败 2 次 / 地址漂移 /
-        #                     出现新歧义）才停——那三条例外由各自的守卫负责，不在这里。
+        #   auto（无人值守）：直接进下一轮。连续失败 2 次 / 地址漂移 / 新歧义
+        #                     都是自愈路径（replan / rebind / decide，见契约 §2.14），不在这里停。
         mode = st.get("exec_mode") or "step"
         if mode == "step":
             # 顺序要紧：transition() 成功后会清空 last_guard_failure，
@@ -1638,6 +1668,11 @@ def cmd_close(a) -> int:
                        "appendix_added": added,
                        "lessons_md_sha256_before": before_hash,
                        "lessons_md_sha256_after": after_hash})
+    dig = autonomy_digest(d)
+    journal(root, st, {"action": "close_autonomy", "result": "ok",
+                       "autonomy_count": dig["autonomy_count"],
+                       "replan_count": dig["replan_count"],
+                       "rebind_count": dig["rebind_count"]})
     out = {"ok": True,
            "candidates": len(pending), "merged": len(pending),
            "appendix_added": added, "appendix_updated": updated,
@@ -1653,6 +1688,14 @@ def cmd_close(a) -> int:
            "lesson_ids": [c.get("lesson_id", "") for c in cands],
            "open_lessons": [c.get("lesson_id", "") for c in cands
                             if c.get("appendix_status") == "open"],
+           "autonomy_decisions": dig["autonomy_decisions"],
+           "autonomy_count": dig["autonomy_count"],
+           "replan_count": dig["replan_count"],
+           "rebind_count": dig["rebind_count"],
+           "must_report": dig["must_report"],
+           "report_hint": ("本轮有 %d 条无人值守自主决定：写进阶段报告的「无人值守自主决定」"
+                           "一节，交付时逐条告知用户（不许悄悄交付）"
+                           % dig["autonomy_count"]) if dig["must_report"] else "",
            "lessons_md_sha256_before": before_hash,
            "lessons_md_sha256_after": after_hash}
     print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -1817,6 +1860,183 @@ def cmd_unblock(a) -> int:
                       "last_guard_failure": st.get("last_guard_failure")},
                      ensure_ascii=False, indent=2))
     return 0 if ok else 5
+
+
+def _run_wa(root: str, argv: list, state_name: str = "", timeout: int = 180) -> tuple:
+    """调 wa.py 并解析它的 JSON（不猜输出、不解析人话）。"""
+    p = [sys.executable,
+         os.path.join(os.path.dirname(os.path.abspath(__file__)), "wa.py")] + list(argv)
+    if state_name:
+        p += ["--state", wa_state_path(root, state_name)]
+    try:
+        r = subprocess.run(p, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout)
+    except Exception as e:
+        return 1, {"ok": False, "detail": "%s: %s" % (type(e).__name__, e)}
+    txt = (r.stdout or "").strip()
+    try:
+        obj = json.loads(txt) if txt else {}
+    except Exception:
+        obj = {"raw": txt[-400:]}
+    if not isinstance(obj, dict):
+        obj = {"raw": obj}
+    obj.setdefault("ok", r.returncode == 0)
+    obj["rc"] = r.returncode
+    return r.returncode, obj
+
+
+def cmd_replan(a) -> int:
+    """两次失败之后的出口：回网页 AI 换方案，**不是**停下来找人（W 裁定 2026-10-30）。
+
+    只做状态与留痕：把失败计数清零、置 `needs_replan`，`PAUSED_HUMAN → READY`
+    （actor=recovery，不是人）。下一轮必须发**失败包**给架构师：
+    目标 / 现象 / 已试 / 怀疑（含「指令可能错了」）/ 待定。
+    """
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    if st.get("state") != "PAUSED_HUMAN":
+        print(json.dumps({"ok": False, "state": st.get("state"),
+                          "reason": "replan 只能从 PAUSED_HUMAN 发起（当前 %s）"
+                                    % st.get("state")}, ensure_ascii=False, indent=2))
+        return 5
+    gate, b = budget_gate(st)
+    if gate == "exhausted":
+        print(json.dumps({"ok": False, "budget": b,
+                          "reason": "轮次预算已用尽：不该再换方案，转交（HANDOFF）或收口"},
+                         ensure_ascii=False, indent=2))
+        return 5
+    before = int(st.get("fail_streak") or 0)
+    apply_verdict_effect(st, "REPLAN")     # 唯一写入口：清零也走这里
+    st["needs_replan"] = True
+    st["replan"] = {"reason": getattr(a, "reason", "") or "same_target_failed_twice",
+                    "fail_streak_before": before,
+                    "error_class": st.get("last_error_class") or "",
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    # 显式记一条 replan：transition 只记「迁移」，收口要按 action 汇总，别指望它代劳
+    journal(root, st, {"action": "replan", "result": "ok",
+                       "fail_streak_before": before,
+                       "reason": st["replan"]["reason"],
+                       "error_class": st["replan"]["error_class"]})
+    ok = transition(root, st, "READY", "回网页 AI 换方案：%s"
+                    % (getattr(a, "reason", "") or "同目标连续失败"),
+                    {"action": "replan", "result": "ok", "fail_streak_before": before,
+                     "reason": getattr(a, "reason", "")}, by="recovery")
+    print(json.dumps({"ok": ok, "state": st.get("state"), "budget": budget_of(st),
+                      "needs_replan": True, "fail_streak": st.get("fail_streak"),
+                      "failed_before": before,
+                      "next": "下一轮发失败包（目标/现象/已试/怀疑/待定）："
+                              "loop --once --file <包>"}, ensure_ascii=False, indent=2))
+    return 0 if ok else 5
+
+
+def cmd_rebind(a) -> int:
+    """对话漂移 / 对话消失后的自愈：收旧窗口 → 开新的独立对话 → 校验 → 继续。
+
+    W 裁定（2026-10-30）：漂移多半是别的任务抢了对话，或人动了窗口。
+    这属于**可自愈的环境事件**，不是要人拍板的问题：
+      1. 收掉漂移的会话（best effort：收不掉也照样换，反正这条不用了）
+      2. `bind --new` 走平台自己的新对话入口
+      3. 校验：拿到 url + conv_id（`bind` 内部已做归属/空对话判定）
+      4. state 改写 `target_url_sha256` / `bound_url`，`PAUSED_HUMAN → READY`（actor=recovery）
+
+    上下文靠下一轮重建：本命令置 `needs_context_digest=true`，
+    下一轮第一条消息必须是「项目现状摘要 + 已完成 + 未完成」，不是接着上一条指令往下说。
+    """
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    if st.get("state") != "PAUSED_HUMAN":
+        print(json.dumps({"ok": False, "state": st.get("state"),
+                          "reason": "只有 PAUSED_HUMAN 能重绑：先让守卫把漂移停下来"},
+                         ensure_ascii=False, indent=2))
+        return 5
+    platform = getattr(a, "platform", "") or st.get("platform") or ""
+    if not platform:
+        print(json.dumps({"ok": False, "reason": "不知道平台：加 --platform <key>"},
+                         ensure_ascii=False, indent=2))
+        return 5
+    old = st.get("target_url_sha256") or ""
+    _run_wa(root, ["stop", "--platform", platform], getattr(a, "state", "") or "", timeout=60)
+    rc, res = _run_wa(root, ["bind", "--new", "--platform", platform],
+                      getattr(a, "state", "") or "")
+    url = res.get("url") or ""
+    if rc != 0 or not res.get("ok") or not url:
+        print(json.dumps({"ok": False, "stage": "bind_new",
+                          "reason": "新对话没建成：不要自己硬试第三条路，报回去换方案",
+                          "detail": res}, ensure_ascii=False, indent=2))
+        return 5
+    st["target_url_sha256"] = wg.sha16(url)
+    st["bound_url"] = url
+    st["platform"] = platform
+    st["needs_context_digest"] = True
+    journal(root, st, {"action": "rebind", "result": "ok",
+                       "reason": getattr(a, "reason", "") or "drift",
+                       "url_sha256": st["target_url_sha256"],
+                       "old_url_sha256": old})
+    ok = transition(root, st, "READY", "对话漂移/消失：已回收旧窗口并新开独立对话",
+                    {"action": "rebind", "result": "ok",
+                     "reason": getattr(a, "reason", "") or "drift",
+                     "url_sha256": st["target_url_sha256"]}, by="recovery")
+    print(json.dumps({"ok": ok, "state": st.get("state"), "url": url,
+                      "platform": platform, "old_url_sha256": old,
+                      "needs_context_digest": True,
+                      "next": "下一轮先贴项目现状摘要（目标/已完成/未完成/当前判据），再继续"},
+                     ensure_ascii=False, indent=2))
+    return 0 if ok else 5
+
+
+def cmd_decide(a) -> int:
+    """记一条无人值守时的自主决定——**不许悄悄决定，更不许悄悄交付**。
+
+    每条决定必有四件事：问题、选了哪条、依据（来自网页 AI 或项目预案）、丢了什么。
+    `close` 会把这些汇总进收口输出；交付或人介入时必须逐条告知（W 裁定 2026-10-30）。
+    """
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    q = (getattr(a, "question", "") or "").strip()
+    c = (getattr(a, "choice", "") or "").strip()
+    w = (getattr(a, "why", "") or "").strip()
+    if not (q and c and w):
+        print(json.dumps({"ok": False,
+                          "reason": "decide 需要 --question / --choice / --why："
+                                    "少一项就等于「没记理由的决定」"},
+                         ensure_ascii=False, indent=2))
+        return 5
+    ev = journal(root, st, {"action": "autonomy", "result": "ok",
+                            "question": q, "choice": c, "why": w,
+                            "decided_by": getattr(a, "decided_by", "") or "web_ai",
+                            "reversible": getattr(a, "reversible", "") or "",
+                            "scope": getattr(a, "scope", "") or ""})
+    n = len([e for e in wg.read_journal(run_dir(root, st.get("run_id", "")))
+             if e.get("action") == "autonomy"])
+    print(json.dumps({"ok": True, "count": n,
+                      "recorded": {k: ev.get(k) for k in
+                                   ("ts", "question", "choice", "why",
+                                    "decided_by", "reversible", "scope")},
+                      "note": "收口时会汇总进 autonomy_decisions，交付时必须逐条告知"},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def autonomy_digest(d: str) -> dict:
+    """收口用的自主决定清单：从 journal 汇总，不靠 agent 记得写。"""
+    evs = wg.read_journal(d)
+    pick = lambda act: [e for e in evs if e.get("action") == act]  # noqa: E731
+    autos = pick("autonomy")
+    return {
+        "autonomy_decisions": [{"round": e.get("round_id"), "ts": e.get("ts"),
+                                "question": e.get("question"), "choice": e.get("choice"),
+                                "why": e.get("why"),
+                                "decided_by": e.get("decided_by"),
+                                "reversible": e.get("reversible"),
+                                "scope": e.get("scope")} for e in autos],
+        "autonomy_count": len(autos),
+        "replan_count": len(pick("replan")),
+        "rebind_count": len(pick("rebind")),
+        "must_report": bool(autos),
+    }
 
 
 def cmd_windows(a) -> int:
@@ -1998,6 +2218,27 @@ def main() -> int:
     p.add_argument("--to", default="READY", help="目标状态（默认 READY）")
     p.add_argument("--reason", default="", help="为什么可以继续（进 journal）")
     p.set_defaults(func=cmd_unblock)
+
+    p = add_pl(sub.add_parser("replan",
+                              help="两次失败后回网页 AI 换方案（不是停下来找人）"))
+    p.add_argument("--reason", default="", help="为什么换方案（人话，进 journal）")
+    p.set_defaults(func=cmd_replan)
+
+    p = add_pl(sub.add_parser("rebind",
+                              help="对话漂移/消失：收旧窗口 → 开新的独立对话 → 继续"))
+    p.add_argument("--reason", default="drift",
+                   help="drift（被抢/被切换）/ gone（对话没了）/ other")
+    p.set_defaults(func=cmd_rebind)
+
+    p = add_pl(sub.add_parser("decide",
+                              help="记一条无人值守自主决定（问题/选择/依据，缺一不收）"))
+    p.add_argument("--question", required=True)
+    p.add_argument("--choice", required=True)
+    p.add_argument("--why", required=True, help="依据：网页 AI 的裁定原文或项目预案")
+    p.add_argument("--decided-by", default="web_ai", choices=["web_ai", "agent", "plan"])
+    p.add_argument("--reversible", default="", help="怎么回退（可选）")
+    p.add_argument("--scope", default="", help="影响范围（可选）")
+    p.set_defaults(func=cmd_decide)
 
     p = add_pl(sub.add_parser("windows", help="硬规则 6 断言：同一实例下的会话数"))
     p.set_defaults(func=cmd_windows)

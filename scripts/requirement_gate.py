@@ -29,7 +29,7 @@ PLACEHOLDERS = {"", "-", "—", "（不超过 30 字，说清「谁、在什么�
                 "（transcript 相对路径，如 `docs/requirements/<需求名>-transcript.md`）",
                 "（逐步确认 / 直接执行——记用户原话，二选一；「首次人工确认门」的裁定结果，未确认不许进 LOOP）",
                 "（整个任务 / 本阶段 / 接下来 N 条；直接执行模式必填，逐条批准就写「逐条」）",
-                "（直接执行模式必填：无人看着时遇到岔路怎么选。见下方「无人值守四问」，**答这四问，不要写作文**）"}
+                "（直接执行模式必填：无人看着时遇到岔路怎么选。见下方「无人值守三问」，**答这三问，不要写作文**）"}
 
 SECTION_HEADINGS = {
     "已明确": r"^##+\s*一、已明确",
@@ -187,7 +187,7 @@ def validate(text: str) -> dict:
             v.append({"code": "AUTONOMY_MISSING", "section": "基本信息",
                       "detail": "直接执行模式下「无人值守方案」为空：无人看着时遇到两条路都能走"
                                 "该怎么选、要不要装东西、外部服务挂了怎么办——"
-                                "先答 templates/confirm-gate.md 的「无人值守四问」再填这一格"})
+                                "先答 templates/confirm-gate.md 的「无人值守三问」再填这一格"})
 
     if not secs["已明确"]:
         v.append({"code": "CLARIFIED_EMPTY", "section": "一、已明确",
