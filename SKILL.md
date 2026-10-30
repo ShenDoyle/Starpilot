@@ -246,7 +246,7 @@ python scripts/wa.py platforms        # 看支持哪些平台、哪些已实测
 网页版 AI 需要登录、且当前未登录时：
 
 - **让用户自己登录。不要代填账号密码，不要读取任何凭证。**
-- 用浏览器驱动 CLI 起独立窗口（`--no-focus`），把地址给用户，说清「登录完告诉我」。
+- 用 `bsk` 起独立窗口（`--no-focus`），把地址给用户，说清「登录完告诉我」。
 - **发给网页版 AI 的正文会进平台服务器**（与本地 CLI 不同）：密钥、令牌、密码、
   客户敏感数据、未公开的经营数据**一律不进对话正文**。必须引用时只给结构（字段名/占位符），
   数据让用户当面补，或改成本地处理。
@@ -444,9 +444,25 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 
 ### 5.1 依赖
 
-- **浏览器驱动 CLI**：本 skill 当前**基于 `bsk` 构建并全链路实测——建议先安装 bsk**。
-  `wa.py` 依次在 `BSK_BIN` 环境变量、`PATH`、`~/.local/bin` 查找；不在 PATH 时必须设。
-  也可用 `BSK_BIN` 指向任何暴露同款命令（session / navigate / evaluate / click / press / fill）的本地 CLI
+- **浏览器驱动 CLI = `bsk`（核心依赖）**：[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（MIT）。
+  星舵全程靠它操作浏览器，只调六个子命令：`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`
+  （点击动作在 `evaluate` 的 JS 里做，不依赖 `click` 子命令）。
+  安装（官方脚本，默认落 `~/.local/bin`）：
+
+  ```bash
+  # macOS / Linux
+  curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+  # Windows（PowerShell）
+  irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
+  ```
+
+  还必须在目标浏览器里装扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) /
+  [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），
+  `bsk doctor` 显示 Connected 才算通；只装 CLI 不装扩展 = 一切页面操作都失败。
+  定位顺序：`BSK_BIN` → `PATH` → `~/.local/bin`；不在 PATH 时必须设 `BSK_BIN`。
+  **宿主会回收子进程时**（WorkBuddy / CodeBuddy 等）：让 daemon 以独立后台任务常驻
+  （`bsk daemon start --foreground`），再从另一个工具调用里验证，细节见官方
+  [沙箱宿主指南](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)。
 - Python 3.9+（**仅标准库，无第三方依赖**；任何标准 Python 安装即可）
 
 ### 5.2 目录约定

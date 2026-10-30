@@ -8,6 +8,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Tencent/BrowserSkill"><img alt="核心依赖 bsk" src="https://img.shields.io/badge/%E6%A0%B8%E5%BF%83%E4%BE%9D%E8%B5%96-bsk-2f75f0"></a>
   <img alt="面向" src="https://img.shields.io/badge/%E9%9D%A2%E5%90%91-%E9%80%9A%E7%94%A8%E4%BB%BB%E5%8A%A1-2f75f0">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
   <img alt="宿主" src="https://img.shields.io/badge/%E5%AE%BF%E4%B8%BB-%E4%B8%8D%E4%BE%9D%E8%B5%96%E7%89%B9%E5%AE%9A%E4%BA%A7%E5%93%81-2f75f0">
@@ -59,7 +60,16 @@
 
 ## 怎么装
 
-1. 装好 **bsk** 浏览器驱动（星舵靠它操作浏览器），确认终端里能直接调用 `bsk`；装在别处就先设环境变量 `BSK_BIN` 指向它。
+1. 装 **bsk**——星舵的核心依赖，[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 提供的浏览器 CLI，真正去点开网页、读写对话的就是它：
+
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+   # Windows（PowerShell）
+   irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
+   ```
+
+   再装浏览器扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），跑一下 `bsk doctor` 看到 Connected 就成了。装到了非默认目录，就设环境变量 `BSK_BIN` 指向它。
 2. 电脑上有 Python 3.9 或更高版本即可，不需要装任何第三方包。
 3. 把本项目整个文件夹放进你的 AI 客户端 skills 目录（例如 `~/.workbuddy/skills/starpilot`），或者直接 `git clone` 到那里。
 
@@ -73,7 +83,7 @@
 
 - 它会把需求问清楚（哪些明确、哪些没定、哪些互相冲突），你点头之后才开工
 - 之后每一轮它都会告诉你：这一步做了什么、证据在哪、有什么没做到
-- 想升级：说**「升到最新版」**
+- 想升级：说一句 **「升到最新版」**
 
 ## 有人盯，还是没人盯
 
@@ -212,9 +222,16 @@ python scripts/wa.py bind "<对话地址>" --platform <key>
 
 | 项 | 说明 |
 |---|---|
-| 🌐 **bsk** 浏览器驱动 CLI | 本循环基于它构建并全链路实测；`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 查找 |
+| 🌐 **[bsk](https://github.com/Tencent/BrowserSkill)** | **星舵的核心依赖**（腾讯 BrowserSkill，MIT）：CLI + Chrome/Edge 扩展，让 agent 用你已登录的真实浏览器干活。星舵只调它六个子命令——`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`（点击动作在 `evaluate` 的 JS 里做）；`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 查找 |
 | 🐍 **Python 3.9+** | 仅标准库，无第三方依赖 |
 | 🤖 **网页版 AI** | 一个已登录的对话地址 + 一个浏览器实例 |
+
+<details>
+<summary><b>bsk 连上了但不稳定？（会回收子进程的宿主）</b></summary>
+
+在 WorkBuddy / CodeBuddy 这类会把命令子进程一并回收的宿主里，`bsk doctor` 可能通过而中途连接断掉。做法是让 daemon 以独立后台任务常驻：`bsk daemon start --foreground`，然后再从另一个工具调用里验证。共享 `BSK_HOME`、`BSK_AUTO_START=0` 等细节见官方[沙箱宿主指南](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)。
+
+</details>
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -t tests   # 232 条，纯标准库
