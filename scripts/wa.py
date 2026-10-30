@@ -93,13 +93,17 @@ def platform_lock_path(platform: str) -> str:
 
 
 def lock_platform(platform: str) -> dict:
-    """取平台占用锁；拿不到抛 statelock.LockBusy（异常里带持有者信息）。"""
+    """取平台占用锁；拿不到抛 statelock.LockBusy（异常里带持有者信息）。
+
+    允许同进程重入：cmd_send 装饰器持锁后，内部的 do_send 会再取一次。
+    """
     return statelock.acquire_named(
         platform_lock_path(platform), owner="wa",
         run_id=os.path.basename(os.getcwd()) or "wa",
         timeout=float(os.environ.get(LOCK_WAIT_ENV) or 0),
         stale_after=PLATFORM_LOCK_STALE,
-        resource=platform_lock_path(platform))
+        resource=platform_lock_path(platform),
+        allow_reentry=True)
 
 
 def _resolve_platform_key(a) -> str:
@@ -566,7 +570,24 @@ def do_send(p: dict, sid: str) -> tuple:
     send_method=enter：把焦点交回编辑器再 press Enter——豆包实测点击发送键无效，
     且点击本身会把焦点移走；exec 写入后编辑器本就持焦点，只要不再点按钮即可。
     返回 (ok, detail)，失败时 detail 是原因。
+
+    平台占用锁也在这里取：do_send 是所有发送路径的必经点（CLI 装饰器、写闸门
+    execute_send 都到这儿），锁下沉到这一层才不会被绕过。同进程重入是安全的
+    （外层 cmd_send 已持锁时内层返回 reentrant，不放锁）。
     """
+    try:
+        _lock = lock_platform(p.get("key") or platforms.DEFAULT_PLATFORM)
+    except statelock.LockBusy as e:
+        return False, ("platform_busy：平台 %s 正被另一任务占用（%s）"
+                       % (p.get("key"), json.dumps(e.holder, ensure_ascii=False)))
+    try:
+        return _do_send_now(p, sid)
+    finally:
+        statelock.release_named(platform_lock_path(p.get("key") or platforms.DEFAULT_PLATFORM),
+                                _lock)
+
+
+def _do_send_now(p: dict, sid: str) -> tuple:
     method = p.get("send_method") or "click"
     if method == "enter":
         ok, res = evaluate(platforms.js_focus_editor(p), sid)

@@ -112,11 +112,15 @@ def _try_create(path: str, payload: dict) -> bool:
 
 def acquire_named(lock_path: str, owner: str = "", run_id: str = "",
                   timeout: float = 10.0, stale_after: float = 300.0,
-                  resource: str = "") -> dict:
+                  resource: str = "", allow_reentry: bool = False) -> dict:
     """对任意锁路径拿锁。返回持有者记录；拿不到抛 LockBusy。
 
     这是 acquire() 的泛化底座：state 单写锁、跨项目平台占用锁共用同一套
     O_EXCL + 死进程/超时接管逻辑，不维护两份。
+
+    allow_reentry 默认 False：state 单写锁要挡住**同进程内的嵌套写**（那是 bug，
+    不是需求）。平台占用锁显式打开它，因为 do_send 会被外层 cmd_send 装饰器
+    套着调用，同进程重入是正常路径。
     """
     p = lock_path
     os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
@@ -130,6 +134,14 @@ def acquire_named(lock_path: str, owner: str = "", run_id: str = "",
         if _try_create(p, payload):
             return payload
         holder = read_holder_named(p)
+        # 同进程重入（仅 allow_reentry=True 的锁）：外层已持有（如 wa.cmd_send
+        # 装饰器 → wa.do_send 再取锁）直接放行，release 时不动锁文件——
+        # 否则内层一放，外层就裸奔了。
+        if (allow_reentry and int(holder.get("pid") or 0) == os.getpid()
+                and not holder.get("broken")):
+            return {"pid": os.getpid(), "owner": payload["owner"], "reentrant": True,
+                    "resource": payload.get("resource") or os.path.abspath(p),
+                    "at": payload["at"]}
         age = holder.get("age_s") or 0
         dead = not _pid_alive(int(holder.get("pid") or 0))
         stale_flag = holder.get("stale")
@@ -158,6 +170,9 @@ def acquire(state_path: str, owner: str = "", run_id: str = "",
 
 def release_named(lock_path: str, payload: dict = None) -> None:
     p = lock_path
+    # 重入层不释放锁文件：真正的持锁者（外层）才负责放锁
+    if payload and payload.get("reentrant"):
+        return
     if not os.path.exists(p):
         return
     # 只释放自己的锁：pid 对不上就不动（防误删别人的锁）
