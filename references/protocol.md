@@ -31,6 +31,28 @@
 
 `fail_streak` 的维护规则：**失败 +1，成功清零**。不要手动改小。
 
+### 1.1 旁挂文件：`<state>.progress.json`
+
+`awaiting_reply` 只回答「在不在等」，不回答「等了多久、卡在哪」。后两个问题由这个
+观察文件回答（`wa.py wait` / `triage` 每次探测刷新）：
+
+```json
+{
+  "stage": "generating",
+  "started_at": 1793365528.5,
+  "probe_at": 1793365536.0,
+  "progress_at": 1793365536.0,
+  "seen": {"msg_count": 2, "reply_count": 1, "last_len": 70,
+           "doc_len": 1276, "doc_nodes": 1502, "generating": false}
+}
+```
+
+- `stage`：`waiting` / `generating` / `settling` / `done` / `timeout` /
+  `probe_failed` / `session_lost` / 各分诊码（`risk_control` 等）。
+- `progress_at` **只在页面真的变了**的时候推进；`probe_at` 每次都推进。
+  两者一对照就能分清「探测在跑但页面不动」和「连探测都没在跑」。
+- 它不持锁、写失败不影响主流程：**给旁观者看的事实**，不是状态机的一部分。
+
 ---
 
 ## 2. 反馈格式（发给网页版 AI）

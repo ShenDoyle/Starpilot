@@ -1,4 +1,4 @@
-# orchestrator 契约（O0 基线冻结）· **v1.7**
+# orchestrator 契约（O0 基线冻结）· **v1.8**
 
 > 本文件是**实现规格**，不是愿望清单。`scripts/orchestrator.py` / `scripts/write_gate.py` 必须逐条对上。
 > 冻结日期：2026-10-29　·　来源：网页 AI（Kimi）第 1 轮规划回复 `runtime/wa/turn-001-reply.md`
@@ -9,7 +9,7 @@
 
 ## 0.0 契约版本与冻结规则
 
-**契约版本：v1.7（升级于 2026-10-30，依据豆包机实测「读不到回复 + 窗口堆积」）**
+**契约版本：v1.8（升级于 2026-10-30，依据「等满 900 秒才知道出事」的实测反馈）**
 
 **冻结范围**：§2.4 的指标定义与单写通过线（`reply_count` / `msg_count` /
 `resend_attempts` / `effective_delta == 1`）、§2.4.1 锚点优先级、§2.5 的
@@ -43,6 +43,7 @@ ChatGPT 按硬规则 1 纪律搁置（`deferred_rule1`）——这些是**平台
 | **v1.5** | **2026-10-30** | ① **§2.9 授权范围与 `expire_time`**：`scope=single|count|stage|task`（默认上限 1/5/50/200），授权单落 `writes/_grants/`，含人话 `scope_human`；过期或用完回落到需批准，不静默降级；② **§2.10 越界风险分级**：`risk.py` low 放行留痕 / medium 换替代方案继续 / high 停下转人工，拦截输出带人话；③ **§2.11 mid-loop 模式切换**：`orchestrator.py mode --set step|auto --reason`，下一轮生效、不重开 run、journal 留痕；④ **§2.12 步骤回执与完成度判定权**：每轮反馈必带「它让我做的/我实际做的/一致？/差异原因」四列，完成度由网页 AI 判定，auto≠不问架构师，无回执不进下一轮；⑤ **§2.13 读正文剔除思考过程**：`READ_IGNORE_COMMON` + 平台 `sel.read_ignore`，克隆节点剔除，probe 与 read 同口径；⑥ INIT 出口改为「预期完整性」而非轮次硬约束（信息一次给足即不必再往返） | 用户六条规划反馈：不反复打扰、一次授权、越界先保完成、中途可改、每步由 webAI 判完成度、弱引导（confirm-gate 人话确认单）|
 | **v1.6** | **2026-10-30** | ① **§2.14 三种可自愈情况**：连续失败 2 次 → `replan` 回网页 AI 换方案（唯一入口 `REPLAN`，计数清零 + 回 READY，不找人）；对话漂移/消失 → `rebind` 收旧窗 + 开独立对话 + 置 `needs_context_digest`，下一轮先贴项目现状摘要；新歧义且预案未覆盖 → 让网页 AI 按「符合项目要求的最优解」裁定后 `decide` 留痕；② **禁止悄悄决定/悄悄交付**：`close` 汇总 `autonomy_decisions`，交付或人介入时逐条告知；③ 真·停收窄为四种（物理动作 / high 风险越界 / 环境彻底不可用 / 预算烧完）；④ §2.7 第 3 条、§2.11 第 3 条、§2.12 第 4 条同步改为「默认自愈」 | 用户裁定：失败两次是回去找 AI 换思路，不是停下来找人；漂移多半是抢对话或人动了窗口，回收旧窗开新对话继续；新歧义让 webAI 按项目要求判最优解，但必须留痕告知 |
 | **v1.7** | **2026-10-30** | ① **§2.15 实例唯一性与窗口回收**：`instance_report` 按 label 判重复，开窗前拦下重复安装并给修复路径（`WA_ALLOW_DUPLICATE_EXT=1` 可绕过）；`_norm_session` 折 `browser_instance_id`（旧实现过滤条件恒真 → 旧窗口一个都收不掉）；实例选择只用 `browsers --json`，无法唯一确定就报错不就近挑；窗口回收 → 原地址续窗（`--max-recover`，默认 1），`conv_id` 变了才 `rebind`；10 分钟内第 4 次开窗直接拒；② 弹窗判据改「可见 + 面积 ≥24px」并报 `modal_rect`（ChatGPT 的 0×0 隐形 `[role=dialog]` 会让每次发送都被判成弹窗）；③ §5 新增 `wa.py doctor` / `wa.py wait --max-recover` | 豆包工作机实测：同一 Chrome 装 4 份扩展 → 发送与读回落在不同实例，永远读不到回复且窗口堆积 |
+| **v1.8** | **2026-10-30** | ① **§2.16 等待的三时钟与分诊**：`wait` 拆成首字 / 停滞 / 总超时三个时钟，到点走 `platforms.judge_stall` 的固定阶梯（风控/覆盖层优先 → 漂移 → 是否真在生成 → 回复是否已到 → 选择器是否失效 → 发送是否生效 → 静默拒绝）；② 新增只读命令 `wa.py triage`（`--relocate` 备用读法复探、`--reload` 仅非生成态），退出码 10–15 与结论一一对应，`9` 仍留给平台锁；③ 探针新增覆盖层几何、验证码 iframe、限流文案、掉登录、`doc_len`/`doc_nodes`，风控文案只取界面层不扫整页；④ 观察文件 `<state>.progress.json` + `orchestrator.py status.stall`，让「卡住」对第三方可见 | 实测：首字 2–5 秒、send 18 秒；「等满 900 秒才知道出事」的现场反馈，以及 web AI 评审指出的「覆盖层会让风控被误判成 DOM 改版」「刷新会杀掉正在生成的回复」 |
 
 ### v1.0 冻结证据（历史，保留备查）
 
@@ -518,6 +519,43 @@ decide 缺字段拒绝、close 汇总自主决定）；`SKILL.md` §4.9。
 
 ---
 
+## 2.16 等待的三时钟与分诊（v1.8 新增）
+
+**背景**：等待只有一个 900 秒总超时。网页 AI 正常 2–5 秒就有首字（DeepSeek 实测），
+开联网搜索也只到 20 秒量级；`wa.py send` 本身要 18 秒（写入 + 发送后校验），返回时回复
+往往已在流式输出。也就是说「很久没动静」几乎不可能是「模型在思考」，而是风控/限流、
+没发出去、选择器失效、窗口被回收之一。把这类异常拖到 15 分钟后才报，是纯粹的浪费。
+
+**规则**
+
+1. **三个时钟**（参数缺省取平台 `ttft_s` / `stall_s`，都可 CLI 覆盖）：
+   - 首字 `--first-token`（默认 45s）：发送已确认后，必须看到「生成中」或首字。
+   - 停滞 `--stall`（默认 60s）：已在生成但页面连续无变化。
+   - 总超时 `--timeout`（900s）：兜底上限，语义不变。
+2. **到点走分诊，不硬等**。判定顺序固定（`platforms.judge_stall`，纯函数、可离线单测）：
+   `risk_control` / `login_required` → `conv_drift` → `still_generating`（含假生成
+   `stream_dead`）→ `reply_ready` → `selector_stale` → `send_not_taken` → `no_start`。
+   **覆盖层优先**：验证码或全屏遮罩会让 `editor=false`，若先判「编辑器没了」就会把风控
+   误判成 DOM 改版，两侧处置完全相反。
+3. **判定与动作分离**。`wa.py wait` / `wa.py triage` 只读页面、不刷新、不重发、不关窗口；
+   要 rebind / 重发 / reload 由上层按 stage 决定。**禁止**在生成态刷新页面（会丢回复）；
+   `triage --reload` 仅非生成态、且刷完必须重走 bind + send。
+4. **风控文案只从界面层取**（遮罩 / 弹窗 / alert），**不扫整页 innerText**：助手回答里
+   出现「请求过于频繁」会被误判成风控（实测误报）。
+5. **退出码即结论**：`10` 风控/掉登录 · `11` 漂移 · `12` 假生成 · `13` 选择器失效 ·
+   `14` 没发出去 · `15` 静默拒绝。`9` 仍为平台占用锁（§2.8），不得占用。
+6. **观察文件** `<state>.progress.json`：每次探测刷新 `stage` / `seen`，仅当页面真变化才
+   推进 `progress_at`；不持锁、写失败不抛。`orchestrator.py status` 的 `stall` 块读它给出
+   `stalled` 与下一步命令——「卡住」必须能被第三方看见，不能只有当事人知道。
+
+**验收**：`tests.test_stall_triage`（36 条：风控优先级 / 漂移 / 假生成 / 选择器失效 /
+没发出去 / 静默拒绝 / 观察文件 / status.stall）。真机：注入全屏遮罩 → `risk_control`
+（1266x644）；注入 turnstile iframe → `risk_control`（captcha）；未发送的 state 跑
+`wait --first-token 5` → 11 秒内 `no_start`，不再等满 900 秒；正常一轮 send + wait
+在默认时钟下 `ok:true`，未被误杀。
+
+---
+
 ## 3. 恢复、预算、人工卡点、幂等
 
 ### 3.1 预算（默认值，可被 `state/current_goal.md` 覆盖）
@@ -646,6 +684,8 @@ python scripts/orchestrator.py card --file <需求卡片>   # 否定式校验（
 python scripts/wa.py unlock --state <.wa-state.json>    # 清残留的 state 写锁（崩溃恢复）
 python scripts/wa.py clear --state <.wa-state.json>     # 清空输入框（不发送）：给「写完未发」的恢复态
 python scripts/wa.py wait --timeout 900 [--max-recover 1]  # 会话被回收时在原地址续窗一次（§2.15）
+python scripts/wa.py wait [--first-token 45] [--stall 60]  # 三时钟（§2.16）：到点走分诊，不硬等
+python scripts/wa.py triage [--relocate] [--reload]      # 卡住判定：只读页面，rc 即结论（§2.16）
 python scripts/wa.py doctor [--state <.wa-state.json>]  # 体检：实例（含重复安装）/ 会话 / state 指向
 python scripts/lessons_audit.py [--strict] [--max-age-days 14]  # 知识库体检
 ```

@@ -1380,6 +1380,41 @@ def budget_of(st: dict) -> dict:
     }
 
 
+# 「卡住」的外部可见性：一个人/另一个 agent 站在外面，唯一能靠的是文件事实。
+# 这里只读两个文件（state + 观察文件），不碰浏览器——status 必须一秒内返回，
+# 才可能被反复调用、被定时任务轮询。
+STALL_AGE_S = 180
+STALL_STAGES = ("waiting", "generating", "settling", "probe_failed")
+
+
+def stall_report(root: str, state_path_arg: str = "") -> dict:
+    p = wa_state_path(root, state_path_arg)
+    prog = wa.read_progress(p)
+    st = wa.load_state(p)
+    stage = prog.get("stage", "")
+    age = prog.get("progress_age_s")
+    out = {
+        "stage": stage,
+        "progress_age_s": age,
+        "probe_age_s": prog.get("probe_age_s"),
+        "seen": prog.get("seen"),
+        "awaiting_reply": bool(st.get("awaiting_reply")),
+        "stalled": False,
+    }
+    if age is not None and stage in STALL_STAGES and age >= STALL_AGE_S:
+        out["stalled"] = True
+        out["hint"] = ("%.0f 秒没有进展（stage=%s）：跑 python scripts/wa.py triage "
+                       "--state \"%s\" 判卡在哪；不要重发、不要刷新。" % (age, stage, p))
+    elif st.get("awaiting_reply") and not prog:
+        out["stalled"] = True
+        out["hint"] = ("state 说在等回复，但没有观察文件：wait 可能根本没跑起来"
+                       "（或跑在另一个 state 路径上）。")
+    elif st.get("awaiting_reply") and stage == "timeout":
+        out["stalled"] = True
+        out["hint"] = "上一次 wait 已超时退出，但 state 仍标着等回复：先 triage 再决定重发。"
+    return out
+
+
 def cmd_status(a) -> int:
     root = wg.workspace_root(a.workspace)
     run_id = a.run or wg.read_pointer(root)
@@ -1404,6 +1439,7 @@ def cmd_status(a) -> int:
         "requirement_gate": st.get("requirement_gate"),
         "windows": (window_report(root, a.state) if getattr(a, "state", None) is not None
                     else {}),
+        "stall": stall_report(root, a.state),
         "next_hint": STEP_HINT.get(st.get("state", "INIT"), ""),
         "state_history": (st.get("state_history") or [])[-5:],
     }

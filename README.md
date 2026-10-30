@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/Tencent/BrowserSkill"><img alt="Core dependency: bsk" src="https://img.shields.io/badge/Core%20dependency-bsk-2f75f0"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.1%20preview-6b7280">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.2%20preview-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -158,7 +158,8 @@ python scripts/wa.py bind "https://chatgpt.com/c/<id>" --platform chatgpt
 python scripts/wa.py bind --new --platform kimi         # start a new conversation (first round only)
 python scripts/wa.py read --out runtime/wa/turn-1.md    # read the reply, save it verbatim
 python scripts/wa.py send --platform kimi --file runtime/wa/feedback-1.md
-python scripts/wa.py wait --platform kimi --timeout 900 # DOM-based verdict, never screenshots
+python scripts/wa.py wait --platform kimi --timeout 900 # three clocks: triage after 45s with no first token
+python scripts/wa.py triage                             # stuck? one read-only command: risk / drift / DOM change / never sent
 python scripts/wa.py probe --platform claude            # calibrate before binding a new platform
 ```
 
@@ -203,7 +204,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 294 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 330 tests, stdlib only
 python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```

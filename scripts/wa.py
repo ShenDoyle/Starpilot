@@ -975,6 +975,10 @@ def cmd_send(a) -> int:
     # 闸门层（write_gate）调的是同一个函数。历史上这里另写了一套，口径漂移出过「假重发」
     # （references/lessons.md L-KIMI-DELTA-METRIC-SCOPE）。
     before_snap = confirm.trim(cur)
+    # 发送前基线：等回复时判「页面动没动」全靠它。
+    # 存在 state 里而不是只在内存里，是为了让**旁观者**也能判——
+    # 卡住之后人和 orchestrator 跑的 `wa.py triage` 没有这个基线就只能靠猜。
+    send_base = _base_snapshot(cur, st, p)
     signals = []
     after_snap = {}
     for _ in range(20):
@@ -1022,6 +1026,8 @@ def cmd_send(a) -> int:
     st["last_send_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     st["last_send_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     st["awaiting_reply"] = True
+    send_base["conv_id"] = send_base.get("conv_id") or st.get("conv_id") or ""
+    st["send_base"] = send_base
     st.setdefault("history", []).append({
         "turn": st["turn"], "at": st["last_send_at"],
         "hash": st["last_send_hash"], "chars": len(text),
@@ -1039,19 +1045,145 @@ def cmd_send(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 观察文件
+# 「它到底卡在哪」这件事，不该只有当事人（agent 自己）知道。
+# state 文件参与状态机、要持锁、只在真实状态变化时写；这个观察文件相反：
+# 不持锁、每次探测都刷新、坏了也不抛——它是给旁观者（人、另一个 agent、
+# 定时任务、orchestrator）看的事实，用来回答「多久没进展、卡在哪一步」。
+PROGRESS_SUFFIX = ".progress.json"
+
+
+def progress_path(path: str) -> str:
+    return path + PROGRESS_SUFFIX
+
+
+def write_progress(path: str, stage: str, cur: dict | None = None,
+                   progressed: bool = False) -> None:
+    """刷新观察文件。`progressed=True` 表示「页面确实变了」（不是单纯又探了一次）。"""
+    rec = {}
+    try:
+        with open(progress_path(path), encoding="utf-8") as f:
+            rec = json.load(f) or {}
+    except Exception:
+        rec = {}
+    now = time.time()
+    rec.setdefault("started_at", now)
+    rec["stage"] = stage
+    rec["probe_at"] = now
+    if progressed or "progress_at" not in rec:
+        rec["progress_at"] = now
+    if cur is not None:
+        rec["seen"] = {k: cur.get(k) for k in
+                       ("msg_count", "reply_count", "last_len", "doc_len",
+                        "doc_nodes", "generating", "editor_len")}
+    try:
+        tmp = progress_path(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, progress_path(path))
+    except Exception:
+        pass  # 观察文件坏了不影响主流程：它是给旁观者看的，不是判据来源
+
+
+def read_progress(path: str) -> dict:
+    try:
+        with open(progress_path(path), encoding="utf-8") as f:
+            rec = json.load(f) or {}
+    except Exception:
+        return {}
+    now = time.time()
+    if rec.get("probe_at"):
+        rec["probe_age_s"] = round(now - rec["probe_at"], 1)
+    if rec.get("progress_at"):
+        rec["progress_age_s"] = round(now - rec["progress_at"], 1)
+    return rec
+
+
+# verdict → 退出码。人看 hint，机器看 rc：两者都要稳定，才能被上层直接分支。
+# 注意码段：9 已经是「平台占用锁被占」，别撞。10 起是分诊结论。
+STALL_RC = {
+    platforms.STALL_RISK: 10,     # 风控/验证码/限流文案：需要人
+    platforms.STALL_LOGIN: 10,    # 掉登录态：需要人
+    platforms.STALL_DRIFT: 11,    # 对话漂移：rebind
+    platforms.STALL_DEAD: 12,     # 假生成：流死了
+    platforms.STALL_STALE: 13,    # 选择器失效：复探/回填
+    platforms.STALL_NOT_SENT: 14,  # 发送没生效
+    platforms.STALL_SILENT: 15,   # 平台侧静默拒绝
+}
+
+
+def _base_snapshot(cur: dict, st: dict, p: dict) -> dict:
+    """发送后的基线：判「页面动没动」只能跟它比。"""
+    return {
+        "msg_count": cur.get("msg_count") or 0,
+        "reply_count": cur.get("reply_count") or 0,
+        "doc_len": cur.get("doc_len") or 0,
+        "doc_nodes": cur.get("doc_nodes") or 0,
+        "editor_len": cur.get("editor_len") or 0,
+        "conv_id": st.get("conv_id") or platforms.conv_id_of(p, cur.get("url") or ""),
+    }
+
+
+def triage(p: dict, st: dict, cur: dict, base: dict, *, unchanged_s: float,
+           fake_gen_s: float = platforms.FAKE_GEN_DEFAULT_S) -> dict:
+    """把探针事实翻成「卡在哪、下一步做什么」。判定口径全在 platforms.judge_stall。"""
+    out = platforms.judge_stall(p, cur, base, unchanged_s=unchanged_s,
+                                fake_gen_s=fake_gen_s)
+    out["stage"] = out["verdict"]
+    out["rc"] = STALL_RC.get(out["verdict"], 5)
+    out["url"] = cur.get("url") or ""
+    return out
+
+
 def cmd_wait(a) -> int:
+    """等回复完成。三个时钟，不是一个总超时。
+
+    · 首字时钟（--first-token，默认按平台 ttft_s）：发送已确认后多久内必须看到
+      「在生成」或首字。过了就走分诊——正常路径几秒就有动静，长时间没动静
+      大概率是风控/没发出去/选择器失效，而不是「模型在思考」。
+    · 停滞时钟（--stall）：已经在生成但页面连续多久毫无变化。停止按钮还在却
+      一个字不动 = 假生成（流死了），继续等只是把 15 分钟烧掉。
+    · 总时钟（--timeout）：兜底上限，保持 900 秒不变。
+
+    分诊不动 DOM、不刷新、不重发：它只读页面然后把结论说清楚。
+    真正要动（reload / rebind / 重发）由上层按 stage 决定——判和做分开，
+    才不会出现「一着急就刷新，把正在生成的回复弄丢」。
+    """
     path = state_path(a.state)
     st = load_state(path)
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
-    deadline = time.time() + a.timeout
+    ttft_s = float(getattr(a, "first_token", 0) or p.get("ttft_s") or 45)
+    stall_s = float(getattr(a, "stall", 0) or p.get("stall_s") or 60)
+    t0 = time.time()
+    deadline = t0 + a.timeout
     stable = 0
     prev_len = -1
-    prev_msgs = -1
     started = False
     recovered = 0
     max_recover = int(getattr(a, "max_recover", 1) or 0)
     notes = []
+    base = None
+    last_change = t0
+    prev_sig = None
+    ttft_done = False
+    stall_done = False
+    slow_warned = False
+
+    def finish(payload: dict, rc: int) -> int:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return rc
+
+    def bail(tri: dict) -> int:
+        """分诊结论是「别再等了」：把事实和下一步一起交出去。"""
+        write_progress(path, tri["stage"], None)
+        payload = {"ok": False, "stage": tri["stage"], "rc": tri["rc"],
+                   "waited_s": round(time.time() - t0, 1),
+                   "hint": tri["hint"], "evidence": tri.get("evidence"),
+                   "risk": tri.get("risk", ""), "recovered": recovered,
+                   "notes": notes, "url": tri.get("url")}
+        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
+        return tri["rc"]
 
     while time.time() < deadline:
         ok, cur = read_state(p, sid)
@@ -1059,6 +1191,7 @@ def cmd_wait(a) -> int:
             # 判「会话没了」不该等三次：read_state 一次就要 4 秒（滚动 + 三轮探测），
             # 累计三次近 20 秒，长任务里这 20 秒会白等；`session list` 一次只要几十毫秒。
             # 「死」是硬事实（session list 里没有），立刻处理；「活着但抖动」才等下轮再试。
+            write_progress(path, "probe_failed")
             if not session_alive(sid):
                 if recovered < max_recover:
                     # bsk 会按空闲（默认 5 分钟）回收窗口。窗口没了不等于对话没了：
@@ -1071,6 +1204,7 @@ def cmd_wait(a) -> int:
                     recovered += 1
                     started = False
                     prev_len = -1
+                    last_change = time.time()
                     continue
                 print(json.dumps({"ok": False, "stage": "session_lost",
                                   "session": sid, "recovered": recovered,
@@ -1079,6 +1213,7 @@ def cmd_wait(a) -> int:
                                           "再用 bind <同一个 url> 接上；不要 --new，"
                                           "回复和上下文都在原对话里。"},
                                  ensure_ascii=False, indent=2), file=sys.stderr)
+                write_progress(path, "session_lost")
                 return 6
             time.sleep(a.interval)
             continue
@@ -1086,10 +1221,56 @@ def cmd_wait(a) -> int:
         if cur.get("error"):
             print(json.dumps({"ok": False, "stage": "page_error", "detail": cur["error"],
                               "url": cur.get("url")}, ensure_ascii=False, indent=2))
+            write_progress(path, "page_error", cur)
             return 4
 
-        if cur.get("msg_count", 0) > int(st.get("last_send_msg_count") or 0):
+        if base is None:
+            # 优先用 send 时刻落盘的基线：它才是「发送前」的样子。
+            # 没有就退化成第一次探测（此时回复可能已经开始，判「页面动没动」会偏保守）。
+            base = st.get("send_base") or _base_snapshot(cur, st, p)
+
+        sig = (cur.get("msg_count"), cur.get("reply_count"), cur.get("last_len"),
+               cur.get("doc_len"), cur.get("doc_nodes"), bool(cur.get("generating")))
+        changed = sig != prev_sig
+        if changed:
+            last_change = time.time()
+        prev_sig = sig
+
+        if cur.get("msg_count", 0) > int(st.get("last_send_msg_count") or 0) or cur.get("generating"):
             started = True
+
+        stage = "waiting"
+        if started:
+            stage = "generating" if cur.get("generating") else "settling"
+        write_progress(path, stage, cur, progressed=changed)
+
+        # ---- 首字时钟：过了还没动静，就走分诊，不要空等到总超时 ----
+        age = time.time() - t0
+        if not started and not ttft_done:
+            if age >= ttft_s * 0.55 and not slow_warned:
+                slow_warned = True
+                print("首字迟迟未到（%.0fs，硬阈值 %.0fs）：再做一轮判定，"
+                      "正常路径 2–5 秒就该有动静。" % (age, ttft_s), file=sys.stderr)
+            if age >= ttft_s:
+                ttft_done = True
+                tri = triage(p, st, cur, base, unchanged_s=time.time() - last_change)
+                # 「还在生成/回复已到」= 我们的时钟算早了，继续按原逻辑走，不动页面。
+                if tri["verdict"] in (platforms.STALL_ALIVE, platforms.STALL_READY):
+                    notes.append("首字时钟到点但判定为 %s，继续等" % tri["verdict"])
+                else:
+                    return bail(tri)
+
+        # ---- 停滞时钟：说在生成，但页面连续不动 ----
+        if started and cur.get("generating") and not stall_done:
+            if time.time() - last_change >= stall_s:
+                stall_done = True
+                tri = triage(p, st, cur, base, unchanged_s=time.time() - last_change)
+                if tri["verdict"] in (platforms.STALL_ALIVE, platforms.STALL_READY):
+                    notes.append("停滞时钟到点但判定为 %s，继续等" % tri["verdict"])
+                    last_change = time.time()
+                    stall_done = False
+                else:
+                    return bail(tri)
 
         if started and not cur.get("generating") and cur.get("last_len", 0) > 0:
             if cur.get("regen"):
@@ -1100,14 +1281,14 @@ def cmd_wait(a) -> int:
                     if stable >= 1:
                         st["awaiting_reply"] = False
                         st["fail_streak"] = 0
+                        st["last_progress_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         save_state(path, st)
-                        print(json.dumps({"ok": True, "chars": cur["last_len"],
-                                          "msg_count": cur.get("msg_count"),
-                                          "signal": "regen",
-                                          "recovered": recovered, "notes": notes,
-                                          "tail": cur.get("last_tail", "")},
-                                         ensure_ascii=False, indent=2))
-                        return 0
+                        write_progress(path, "done", cur, progressed=True)
+                        return finish({"ok": True, "chars": cur["last_len"],
+                                       "msg_count": cur.get("msg_count"),
+                                       "signal": "regen",
+                                       "recovered": recovered, "notes": notes,
+                                       "tail": cur.get("last_tail", "")}, 0)
                 else:
                     stable = 0
             elif cur["last_len"] == prev_len:
@@ -1115,14 +1296,14 @@ def cmd_wait(a) -> int:
                 if stable >= 2:
                     st["awaiting_reply"] = False
                     st["fail_streak"] = 0
+                    st["last_progress_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     save_state(path, st)
-                    print(json.dumps({"ok": True, "chars": cur["last_len"],
-                                      "msg_count": cur.get("msg_count"),
-                                      "signal": "text_stable",
-                                      "recovered": recovered, "notes": notes,
-                                      "tail": cur.get("last_tail", "")},
-                                     ensure_ascii=False, indent=2))
-                    return 0
+                    write_progress(path, "done", cur, progressed=True)
+                    return finish({"ok": True, "chars": cur["last_len"],
+                                   "msg_count": cur.get("msg_count"),
+                                   "signal": "text_stable",
+                                   "recovered": recovered, "notes": notes,
+                                   "tail": cur.get("last_tail", "")}, 0)
             else:
                 stable = 0
         else:
@@ -1131,11 +1312,22 @@ def cmd_wait(a) -> int:
         prev_len = cur.get("last_len", 0) if not cur.get("generating") else -1
         time.sleep(a.interval)
 
-    print(json.dumps({"ok": False, "stage": "timeout", "waited_s": a.timeout,
-                      "recovered": recovered, "notes": notes,
-                      "hint": "超时不等于失败：再跑一次 wait，或先 probe 看 generating/last_len"},
-                     ensure_ascii=False, indent=2))
-    return 5
+    # 总超时：仍然是兜底，但要把「最后看到的现场」一起交出去，而不是只说超时。
+    tri = None
+    try:
+        ok, cur = read_state(p, sid)
+        if ok and base is not None:
+            tri = triage(p, st, cur, base, unchanged_s=time.time() - last_change)
+    except Exception:
+        tri = None
+    write_progress(path, "timeout")
+    payload = {"ok": False, "stage": "timeout", "waited_s": a.timeout,
+               "recovered": recovered, "notes": notes,
+               "progress": read_progress(path),
+               "hint": "超时不等于失败：再跑一次 wait，或先 triage 看卡在哪一步"}
+    if tri:
+        payload["triage"] = {k: tri.get(k) for k in ("stage", "hint", "evidence")}
+    return finish(payload, 5)
 
 
 def cmd_read(a) -> int:
@@ -1193,11 +1385,78 @@ def cmd_doctor(a) -> int:
         "state": {k: st.get(k) for k in ("platform", "url", "conv_id", "session",
                                          "browser", "awaiting_reply", "turn")},
         "state_path": path,
+        # 卡住的可见性：state 有锁、只在状态变化时写，观察文件每次探测都刷。
+        # 两者都给出去，人才分得清「卡在探测」和「卡在没回复」。
+        "progress": read_progress(path),
     }
     if rep["duplicates"]:
         out["hint"] = duplicate_hint(rep)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0 if out["ok"] else 6
+
+
+def cmd_triage(a) -> int:
+    """「它到底卡在哪」——一条只读命令，任何人都能在卡住时跑。
+
+    存在的理由：卡住的现场只有 agent 自己知道，人只能看着不动。把判定做成
+    **只读 + 结构化**，人才有话说、另一个 agent 才能接手、定时任务才能报警。
+    它不刷新、不重发、不关窗口：只读页面 + 读观察文件 + 给结论。
+    """
+    path = state_path(a.state)
+    st = load_state(path)
+    p = platforms.get(a.platform or st.get("platform"))
+    sid = ensure_session(st, path)
+    ok, cur = read_state(p, sid)
+    if not ok:
+        print(json.dumps({"ok": False, "stage": "probe_failed", "detail": str(cur),
+                          "hint": "页面探不通：先 wa.py doctor 看会话与实例；"
+                                  "会话没了不是对话没了，bind 同一个 url 接上。"},
+                         ensure_ascii=False, indent=2))
+        return 4
+
+    prog = read_progress(path)
+    base = st.get("send_base") or _base_snapshot(cur, st, p)
+    unchanged = float(prog.get("progress_age_s") or 0.0)
+    tri = triage(p, st, cur, base, unchanged_s=unchanged)
+    out = {
+        "ok": tri["verdict"] in (platforms.STALL_ALIVE, platforms.STALL_READY),
+        "stage": tri["stage"],
+        "hint": tri["hint"],
+        "evidence": tri["evidence"],
+        "risk": tri.get("risk", ""),
+        "url": tri.get("url"),
+        "progress": prog,
+        "state": {k: st.get(k) for k in ("platform", "conv_id", "awaiting_reply",
+                                         "turn", "last_send_at")},
+        "platform": p["key"],
+        "platform_verified": p["verified"],
+    }
+    # 兜底读取：选择器失效时，页面文本其实读得到——这一步只读，不刷新页面。
+    # 刷新是最后手段（会杀掉正在生成的回复），而且刷新后必须重走发送流程，
+    # 所以默认不做，要人显式加 --reload。
+    if getattr(a, "relocate", False):
+        ok2, nd = evaluate(platforms.js_read_last(p), sid)
+        if ok2 and isinstance(nd, dict) and nd.get("text"):
+            out["relocate"] = {"ok": True, "fallback": bool(nd.get("fallback")),
+                               "chars": len(nd["text"]), "tail": nd["text"][-200:]}
+            if nd.get("fallback"):
+                out["relocate"]["note"] = ("备用读法能读到正文 → 平台的 messages 选择器失效，"
+                                           "不是没回复。按 references/web-ai-platforms.md 回填选择器。")
+        else:
+            out["relocate"] = {"ok": False,
+                               "note": "备用读法也读不到：页面确实没有可读正文。"}
+    if getattr(a, "reload", False):
+        # 只有确认不在生成态才允许：正在生成时刷新 = 把回复丢掉。
+        if cur.get("generating"):
+            out["reload"] = {"skipped": "页面仍在生成，刷新会丢回复"}
+        else:
+            ok3, _ = evaluate("location.reload()", sid, timeout=20)
+            out["reload"] = {"done": bool(ok3),
+                             "note": "刷新后必须重走 bind + send，不要假设原回复还在"}
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    # 0 = 页面本身正常（还在生成 / 回复已到）；其余就是分诊码。
+    # 别把「正常」也塞进失败码段——上层要能一眼分清「去点验证码」和「去读回复」。
+    return 0 if out["ok"] else tri["rc"]
 
 
 def cmd_state(a) -> int:
@@ -1329,11 +1588,24 @@ def main() -> int:
     p.add_argument("--interval", type=float, default=3.0)
     p.add_argument("--max-recover", type=int, default=1, dest="max_recover",
                    help="会话被回收后自动续窗的次数（默认 1；续窗＝在原对话地址重开窗口）")
+    p.add_argument("--first-token", type=float, default=0, dest="first_token",
+                   help="首字时钟（秒）：多久内必须看到生成中或首字，过了就走分诊。"
+                        "0 = 用平台的 ttft_s（默认 45）")
+    p.add_argument("--stall", type=float, default=0,
+                   help="停滞时钟（秒）：已在生成但页面连续多久不变算卡住。"
+                        "0 = 用平台的 stall_s（默认 60）")
     p.set_defaults(func=cmd_wait)
 
     p = add_pl(sub.add_parser("read", help="读取末条回复"))
     p.add_argument("--out")
     p.set_defaults(func=cmd_read)
+
+    p = add_pl(sub.add_parser("triage", help="卡住判定：只读页面，说清卡在哪、下一步做什么"))
+    p.add_argument("--relocate", action="store_true",
+                   help="用备用读法复探（只读，不刷新）：分辨「选择器失效」与「确实没回复」")
+    p.add_argument("--reload", action="store_true",
+                   help="最后手段：非生成态下刷新页面（会丢掉页面状态，刷新后必须重走 bind + send）")
+    p.set_defaults(func=cmd_triage)
 
     p = add_pl(sub.add_parser("doctor", help="体检：浏览器实例 / 重复扩展 / 会话 / state"))
     p.set_defaults(func=cmd_doctor)

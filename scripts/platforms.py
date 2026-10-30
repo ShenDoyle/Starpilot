@@ -410,6 +410,13 @@ _DEFAULTS = {
     # 允许的**真实写**路径白名单。空 = 该平台禁止真实写（未实测）。
     # 写闸门（write_gate.py）只认这张表；不在表里的写入方法一律 WRITE_BLOCKED_WRITE_METHOD。
     "write_allowed": [],
+    # ---- 时间预算（秒）：三类时钟，取代「一个 900 秒总超时」----
+    # 首字：从「发送已确认」起算，多久内必须看到生成中或首字。过了就走分诊。
+    # 实测（2026-10-30，DeepSeek）：首字 2–5 秒；开联网搜索会拖到 20 秒以上。
+    # 45 秒是「正常路径的 3–10 倍」，宁可宽一点也不要误杀正在搜索/思考的轮次。
+    "ttft_s": 45,
+    # 停滞：已在生成但文本连续多久不变，算流死了（先看是不是假生成）。
+    "stall_s": 60,
 }
 
 
@@ -642,6 +649,152 @@ def list_platforms():
     ]
 
 
+# ---------------------------------------------------------------- 卡住的判定口径
+#
+# 分工和别处一致：JS 只报页面事实（overlay / captcha / doc_len ...），
+# 「这算风控还是算改版」在本文件判——因为判定规则要能离线单测，
+# 而它恰恰是最容易悄悄退化的那种规则（风控被误判成 DOM 改版，两侧处置完全相反）。
+
+# 优先级：验证码 > 全屏遮罩 > 提示文案 > 掉登录。
+# 顺序不是审美：越靠前的越「确定且不可自愈」，靠后的越可能是页面正常状态的一部分。
+RISK_HINTS = {
+    "captcha": "页面在做验证码/人机验证（%s）。这是物理动作，**必须人来**；"
+               "验完再跑 wa.py triage，不要重发、不要刷新。",
+    "overlay": "有全屏遮罩挡住页面（%s）。先看它写的什么：限流提示要人关，"
+               "引导层点掉后跑 wa.py triage 复核。",
+    "banner": "页面提示「%s」，这是平台的限流/风控文案（不是模型在思考）。"
+              "按限流处理：等冷却或换平台，别原地重试。",
+    "login": "编辑器不在了且页面在请你登录（掉登录态）。需要人重新登录，"
+             "登录后 bind 同一个 url 接上，不要 --new。",
+}
+
+
+def risk_kind(cur):
+    """返回 "" / "captcha" / "overlay" / "banner" / "login"（越靠前越优先）。"""
+    d = cur or {}
+    if d.get("captcha"):
+        return "captcha"
+    if d.get("overlay"):
+        return "overlay"
+    if d.get("risk_text"):
+        return "banner"
+    if d.get("login_hint"):
+        return "login"
+    return ""
+
+
+def risk_detail(cur):
+    """给 hint 用的细节（尺寸 / 文案 / 验证码来源）。"""
+    d = cur or {}
+    kind = risk_kind(d)
+    if kind == "captcha":
+        return d.get("captcha_src") or "iframe"
+    if kind == "overlay":
+        txt = (d.get("overlay_text") or "").strip().replace("\n", " ")
+        return "%s %s" % (d.get("overlay_rect") or "尺寸未知", txt[:60] or "（无文案）")
+    if kind == "banner":
+        return (d.get("risk_text") or "").strip()
+    return ""
+
+
+# 判定码（wa.py 用它决定退出码与下一步动作）
+STALL_RISK = "risk_control"
+STALL_LOGIN = "login_required"
+STALL_DRIFT = "conv_drift"
+STALL_ALIVE = "still_generating"
+STALL_DEAD = "stream_dead"
+STALL_READY = "reply_ready"
+STALL_STALE = "selector_stale"
+STALL_NOT_SENT = "send_not_taken"
+STALL_SILENT = "no_start"
+
+# 「页面在动」的阈值：文本增长多少才算「确实变了」。
+# 取 20 字符：流式输出一秒几十字，20 字远低于一秒的量；而 UI 抖动（计时器、
+# 「正在搜索…」省略号动画）通常不足 20 字，不会被当成正文。
+DOC_GROWTH_MIN = 20
+# 生成中但整个子树一字不动多久算「假生成」（停止按钮在、流已死）。
+FAKE_GEN_DEFAULT_S = 15.0
+
+
+def judge_stall(p, cur, base, *, unchanged_s=0.0, fake_gen_s=FAKE_GEN_DEFAULT_S):
+    """判定「现在到底卡在哪」。纯函数：只吃探针事实 + 发送前基线。
+
+    `base` 是发送前的快照（msg_count / reply_count / doc_len / doc_nodes /
+    editor_len / conv_id）。`unchanged_s` 表示「页面已经多少秒没有任何变化」，
+    由调用方按自己的探测节奏算好传进来——本函数不看时钟，只做口径。
+
+    返回 {"verdict", "evidence", "hint"}，verdict 见上方 STALL_* 常量。
+    """
+    d = cur or {}
+    b = base or {}
+    ev = {
+        "msg_count": d.get("msg_count"),
+        "reply_count": d.get("reply_count"),
+        "last_len": d.get("last_len"),
+        "generating": bool(d.get("generating")),
+        "editor_len": d.get("editor_len"),
+        "doc_len": d.get("doc_len"),
+        "doc_nodes": d.get("doc_nodes"),
+        "unchanged_s": round(unchanged_s, 1),
+    }
+
+    # 1) 风控/覆盖层最优先：它会让下面所有「在不在」的判断失真。
+    kind = risk_kind(d)
+    if kind:
+        stage = STALL_LOGIN if kind == "login" else STALL_RISK
+        return {"verdict": stage, "risk": kind, "evidence": ev,
+                "hint": RISK_HINTS[kind] % (risk_detail(d) or "无细节")}
+
+    # 2) 还是不是同一块对话。地址漂移的处置是 rebind，和「没回复」不是一回事。
+    bound = b.get("conv_id") or ""
+    now = conv_id_of(p, d.get("url") or "")
+    if bound and now and now != bound:
+        ev["bound_conv_id"] = bound
+        ev["conv_id"] = now
+        return {"verdict": STALL_DRIFT, "evidence": ev,
+                "hint": "页面已经不在绑定的那条对话上（%s → %s）。按 §4.9.1 rebind，"
+                        "不要在错的对话上继续等。" % (bound, now)}
+
+    grew = (d.get("doc_len") or 0) - (b.get("doc_len") or 0)
+    nodes_grew = (d.get("doc_nodes") or 0) - (b.get("doc_nodes") or 0)
+
+    # 3) 说在生成，就要证明它在动：停止按钮在 + 子树一字不动 = 假生成。
+    if d.get("generating"):
+        if grew >= DOC_GROWTH_MIN or nodes_grew > 0:
+            return {"verdict": STALL_ALIVE, "evidence": ev,
+                    "hint": "还在生成（页面文本 +%d 字）：只是慢，继续等，别动 DOM。" % grew}
+        if unchanged_s >= fake_gen_s:
+            return {"verdict": STALL_DEAD, "evidence": ev,
+                    "hint": "停止按钮还在，但页面 %.0f 秒一个字没变：流已经死了，UI 状态没复位。"
+                            "先按一次停止再重发，别无限等。" % unchanged_s}
+        return {"verdict": STALL_ALIVE, "evidence": ev,
+                "hint": "生成中且暂无可读变化（可能还在思考）：再观察一轮。"}
+
+    # 4) 回复其实已经到了，只是我们的判定没跟上（竞态）。
+    if (d.get("reply_count") or 0) > (b.get("reply_count") or 0) and (d.get("last_len") or 0) > 0:
+        return {"verdict": STALL_READY, "evidence": ev,
+                "hint": "回复已经在页面上了，直接读，别再等超时。"}
+
+    # 5) 页面在动、我们的选择器读不到 → DOM 改版（这一步才轮到「重新找元素」）。
+    if grew >= DOC_GROWTH_MIN or nodes_grew > 8:
+        return {"verdict": STALL_STALE, "evidence": ev,
+                "hint": "页面文本已增长 %d 字 / 节点 +%d，但回复选择器读不到："
+                        "选择器失效，不是没回复。跑 wa.py triage --relocate 用备用选择器复探，"
+                        "两个都落空就带证据回填 platforms.py。" % (grew, nodes_grew)}
+
+    # 6) 我的字还在输入框里 = 发送根本没生效。
+    if (d.get("editor_len") or 0) > 0 and (d.get("msg_count") or 0) <= (b.get("msg_count") or 0):
+        return {"verdict": STALL_NOT_SENT, "evidence": ev,
+                "hint": "提问还留在输入框里，消息数没涨：发送没生效（被拒或被遮罩吃掉点击）。"
+                        "先 probe 看弹窗/风控，再重发；不要当成「模型在想」。"}
+
+    # 7) 全都没动静：平台侧静默拒绝。
+    return {"verdict": STALL_SILENT, "evidence": ev,
+            "hint": "页面没有任何变化（消息数、文本、节点都不动）且没有风控提示："
+                    "平台侧静默拒绝。按限流处理——换平台或等冷却，别原地重试。"}
+
+
+
 # ---------------------------------------------------------------- JS 生成
 
 
@@ -773,6 +926,55 @@ def js_probe(p):
     return Math.round(r.width) + 'x' + Math.round(r.height);
   })() : '';
 
+  // ---- 覆盖层 / 验证码 / 掉登录（2026-10-30，采纳 web AI 评审的「覆盖层优先」规则）----
+  // 为什么必须先判覆盖层：全屏遮罩会让「编辑器在不在」「停止按钮在不在」全部失真。
+  // 一个验证码 overlay 足以让 editor=false，于是「风控」被误判成「DOM 改版」，
+  // 而两侧的处置完全相反（一个要人，一个要改选择器）。
+  // 判据只用几何 + 计算样式，不用类名猜：面积覆盖八成以上视口、fixed/absolute、且有层级。
+  const vpArea = innerWidth * innerHeight;
+  let ovl = null, ovlArea = 0;
+  for (const el of document.querySelectorAll('body > div, body > dialog, [role="dialog"], [class*="modal"], [class*="overlay"], [class*="mask"], [class*="backdrop"]')) {
+    if (editor && el.contains(editor)) { continue; }   // 含编辑器的容器是布局，不是遮罩
+    let r;
+    try { r = el.getBoundingClientRect(); } catch (e) { continue; }
+    if (r.width * r.height < vpArea * 0.8) { continue; }
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') { continue; }
+    if (parseFloat(cs.opacity || '1') < 0.1) { continue; }
+    if (cs.position !== 'fixed' && cs.position !== 'absolute') { continue; }
+    const z = parseInt(cs.zIndex, 10);
+    if (!(z >= 10)) { continue; }
+    if (r.width * r.height > ovlArea) { ovlArea = r.width * r.height; ovl = el; }
+  }
+  const CAPTCHA_SEL = 'iframe[src*="captcha" i], iframe[src*="turnstile" i], ' +
+    'iframe[src*="geetest" i], iframe[src*="challenges" i], iframe[src*="hcaptcha" i], ' +
+    'iframe[src*="recaptcha" i], [class*="geetest"], [id*="captcha" i], ' +
+    '[class*="captcha" i], [class*="slider-verify"], [class*="verify-slider"]';
+  let capNode = null;
+  try { capNode = document.querySelector(CAPTCHA_SEL); } catch (e) { capNode = null; }
+  // 风险文案只从「界面层」取：遮罩 / 弹窗 / alert 区。
+  // **不能扫整页 innerText**：助手刚回答过「请求过于频繁」这类内容时，
+  // 正文里就有这些字，扫全页等于把答案当成风控（真实误报，2026-10-30 踩过）。
+  const riskSrc = [
+    ovl ? (ovl.innerText || '') : '',
+    modalText,
+    errs || ''
+  ].join(' ').replace(/\\s+/g, ' ').trim().slice(0, 300);
+  const RISK_RE = /(请求过于频繁|操作过于频繁|访问过于频繁|请求太频繁|请稍后再试|稍后再试|异常流量|异常访问|安全验证|人机验证|滑块|滑动验证|验证码|too many requests|rate.?limit|verify you are human|unusual (traffic|activity)|are you a robot|checking your browser)/i;
+  const riskMatch = (RISK_RE.exec(riskSrc) || [''])[0];
+  // 掉登录：编辑器不见了 **且** 页面在请你登录。单看「登录」两个字会命中页脚的推广链接。
+  const loginHint = !editor && [...document.querySelectorAll('a, button')]
+    .some(b => /^(登录|立即登录|Log in|Sign in|Sign up|Log in to continue)$/i.test((b.innerText || '').trim()));
+
+  // ---- 更宽窗口的「页面到底动没动」----
+  // 用来分辨「选择器失效」和「页面根本没响应」：我们的回复选择器读不到，
+  // 但祖先容器的文本/节点数在涨 → 消息在，只是选择器没命中（DOM 改版）；
+  // 祖先容器也一字不动 → 页面没收到/没渲染（静默拒绝）。
+  let conv = null;
+  try { conv = document.querySelector('[class*="chat" i], [class*="conversation" i], main') || document.body; } catch (e) { conv = document.body; }
+  const docLen = conv ? ((conv.innerText || '').length) : 0;
+  const docNodes = conv ? conv.getElementsByTagName('*').length : 0;
+
   // ---- 锚点指纹（计数用，见 §2.4）----
   const asstFps = asst.map(fpT).filter(Boolean);
   const userFps = users.map(fpT).filter(Boolean);
@@ -858,6 +1060,19 @@ def js_probe(p):
     modal: !!visibleModal,
     modal_text: modalText,
     modal_rect: modalRect,
+    // 覆盖层 / 风控 / 掉登录：只报事实，怎么判在 Python（normalize + judge）
+    overlay: !!ovl,
+    overlay_rect: ovl ? (() => { const r = ovl.getBoundingClientRect();
+      return Math.round(r.width) + 'x' + Math.round(r.height); })() : '',
+    overlay_text: ovl ? (ovl.innerText || '').trim().slice(0, 120) : '',
+    captcha: !!capNode,
+    captcha_src: capNode ? ((capNode.getAttribute('src') || capNode.className || '') + '').slice(0, 80) : '',
+    risk_text: riskMatch,
+    risk_src: riskSrc.slice(0, 120),
+    login_hint: loginHint,
+    doc_len: docLen,
+    doc_nodes: docNodes,
+    iframes: document.querySelectorAll('iframe').length,
     error: errs
   });
 })()

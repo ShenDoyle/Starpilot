@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.1"
+version: "0.1.2"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.1）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.2）。版本只从 `SKILL.md` 读，不从别处猜。
 - **编号沿革**：开发期内部迭代到 `2.3.4`，2026-10-30 首次对外发布时归零为 `0.1.0`（预览版，不是正式版）。升级判据是「远端 > 本地」，所以从 2.3.4 迁过来要用 `upgrade.py --to-latest --force` 重装一次。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
@@ -476,6 +476,7 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 |---|---|---|
 | **窗口被回收** | `conv_id` 没变，地址还能打开；`wa.py wait/read` 报连续探测失败或 `session_lost` | **在同一个 url 上续窗**。`wait` 内置 `--max-recover 1` 会自动续一次；回复在平台侧，不会丢 |
 | **对话真没了 / 被换掉** | `conv_id` 变了、地址变首页、提示对话不存在 | 走 4.9.1 `rebind`（开新对话 + 上下文摘要） |
+| **发出去了但没回复** | 消息数涨了、页面也变了，就是没有正文；或干脆什么都没动 | 先 `wa.py triage` 分诊（4.9.4），**不是等满 15 分钟** |
 
 bsk 默认空闲 5 分钟就回收 Agent Window，所以「窗口没了」是常态、不是故障。
 **别把续窗写成 rebind**：新对话没有上文，拿它接着干等于让 AI 失忆重来。
@@ -536,6 +537,45 @@ python scripts/orchestrator.py decide \
 - 用户否决某条：按新指示改，不辩护，改动也记进 journal。
 - 读起来像「我替用户拍板了」的决定，先问自己：这是项目要求推出来的，还是我图省事？
   后者一律走 §4.4 报回去。
+
+#### 4.9.4 没回复：三时钟 + 分诊（先判，再做）
+
+网页版 AI 正常几秒就有动静。**长时间没动静不是「它在想」，是异常**——
+风控/限流、根本没发出去、选择器失效、窗口被回收，四种里必有一种。
+
+所以等待不再是「一个 900 秒总超时」，而是三个时钟（`wa.py wait` 内置）：
+
+| 时钟 | 初值 | 过了说明什么 |
+|---|---|---|
+| 首字 `--first-token` | 45 秒（平台 `ttft_s`） | 连「在生成」都没出现：不是慢，是没开始 |
+| 停滞 `--stall` | 60 秒（平台 `stall_s`） | 说在生成，但页面一个字没变：流死了 |
+| 总超时 `--timeout` | 900 秒 | 兜底，保留不变 |
+
+到点不硬等，走**分诊阶梯**——顺序是「便宜且确定」到「昂贵且靠猜」，**不是**一上来就重找元素：
+
+| 顺序 | 看什么 | 结论 | 动作 |
+|---|---|---|---|
+| 1 | 验证码 iframe / 全屏遮罩 / 限流文案 / 掉登录 | `risk_control` `login_required` | **停下找人**（物理动作）；验完再 triage，不重发不刷新 |
+| 2 | `conv_id` / 地址 | `conv_drift` | 4.9.1 `rebind` |
+| 3 | 停止按钮在不在、页面文本有没有涨 | `still_generating` | 只是慢，继续等，**不动 DOM** |
+| 3b | 停止按钮在、整棵子树 15 秒一字不变 | `stream_dead` | 假生成；按一次停止再重发 |
+| 4 | 回复计数涨了、正文有字 | `reply_ready` | 直接读，别等超时 |
+| 5 | 页面文本涨了、我们的选择器读不到 | `selector_stale` | 选择器失效（DOM 改版）：`triage --relocate` 用备用读法复探 |
+| 6 | 我发的字还在输入框里 | `send_not_taken` | 发送没生效（被拒/被遮罩吃了点击），不是模型在想 |
+| 7 | 全都不动、也没有风控提示 | `no_start` | 平台侧静默拒绝：按限流处理，换平台或等冷却 |
+
+**两条不许做的**：
+
+1. **不刷新页面**。「重新找元素」不等于 reload——正在生成时刷新 = 把回复丢掉。
+   选择器失效的判据是「页面在涨、我们读不到」，用备用读法复探即可；
+   `triage --reload` 是最后手段，只在非生成态，且刷新后必须重走 bind + send。
+2. **不在没分诊的情况下重发**。重复提问会把上下文搞乱，而且限流时重发只会更糟。
+
+判定做完，`wa.py wait` 会带着 stage + evidence + hint 一起退出，
+`bail` 的那条走 stderr，正文不污染 stdout。退出码就是结论，不用解析文字：
+
+`10` 风控/掉登录（**找人**）· `11` 漂移（rebind）· `12` 假生成 · `13` 选择器失效 ·
+`14` 没发出去 · `15` 静默拒绝（`9` 仍是平台占用锁，别混）；`0` = 页面正常（在生成或回复已到）。
 
 ---
 
@@ -622,6 +662,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `wa.py unlock` | 清残留的 state 写锁（O_EXCL 锁 + 死进程接管） |
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
+| `wa.py triage [--relocate]` | 卡住判定：只读页面，判风控/漂移/假生成/选择器失效/没发出去，给下一步。`--relocate` 用备用读法复探（不刷新） |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
 | `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk（§5.1） |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
@@ -708,6 +749,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
 | 某任务回复加载不出 / 对话被跳到别处 | **另一任务在同一平台抢会话**（多任务并发打架） | 双方都停：`wa.py plock` 看谁在用；错开平台或浏览器 profile（`STARPILOT_LOCK_KEY`）后再继续；被抢的任务按 URL 漂移守卫停下，**不要自动跳转、不要自动重绑** |
 | 总是读不到回复，且开了一堆标签页 | **同一浏览器装了多份 BrowserSkill**（bsk 报多个实例）：发送在 A、读回在 B | `wa.py doctor` 看 `duplicates`；`chrome://extensions` 里删到只留一份，再跑一次 doctor 确认 `ok: true` |
+| 明明发了、消息数也涨了，就是没有回复 | 分四种：风控/限流、假生成（停止按钮在但流死了）、选择器失效、平台静默拒绝 | **别等满 900 秒**：`wa.py triage` 一条命令判（§4.9.4），按 rc=10–15 处置；只有风控/验证码才找人 |
+| 页面弹验证码 / 滑块 / 「请求过于频繁」 | 平台风控，属于物理动作 | 立刻停，把 `triage` 输出原样给人（含 `risk` 与文案）；**不重发、不刷新**，验完再 `triage` 复核 |
+| 停止按钮还在，正文一个字不动超过 15 秒 | 假生成：流已经死了，UI 状态没复位 | `triage` 判 `stream_dead`；按一次停止再重发，不要无限等 |
 | 读不到回复，但 `probe` 一切正常 | 窗口被 bsk 按空闲回收了（默认 5 分钟），state 里的 session 已不存在 | `wa.py wait` / `read` 会自动续窗一次；仍失败就 `wa.py doctor` 看会话，再 `bind <同一个 url>` 接上，**不要 `--new`** |
 | 反复开窗、10 分钟内被拒（rc≠0） | 会话在反复失效或实例在切换，重试掩盖了真实原因 | 停下来看 doctor + 最近一次 `wait` 输出的 `stage`（`session_lost` / `timeout`），按 §4.4 把现场报回去 |
 | 弹窗检测把正常页面判成弹窗 | 平台有 0×0 的隐形 `[role="dialog"]` 容器（ChatGPT 实测） | 判据已改为「可见 + 面积 ≥24px」；报错里带 `modal_rect`，尺寸异常就说明是配置问题，不是页面挡路 |
@@ -734,7 +778,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v0.1.1 现状，别假装有）
+## 8. 已知缺口（v0.1.2 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|
