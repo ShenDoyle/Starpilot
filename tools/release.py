@@ -33,6 +33,9 @@ CLI_README = "tools/cli-readme.md"   # 进包后重命名为 README.md
 
 SKIP_EXT = (".pyc", ".pyo")
 
+# 不打包的历史残留：upgrade.py 装 skill 时也从不动 archive/，包里带上会跟装好的目录不一致
+SKIP_PREFIX = ("archive/",)
+
 
 def read_version(root=ROOT):
     p = os.path.join(root, "SKILL.md")
@@ -60,7 +63,7 @@ def git_tracked(root=ROOT):
                 files.append(rel.replace(os.sep, "/"))
     keep = []
     for f in sorted(files):
-        if f.endswith(SKIP_EXT) or f.startswith("dist/"):
+        if f.endswith(SKIP_EXT) or f.startswith("dist/") or f.startswith(SKIP_PREFIX):
             continue
         if os.path.exists(os.path.join(root, f)):
             keep.append(f)
