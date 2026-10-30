@@ -1,7 +1,7 @@
 ---
 name: starpilot
-description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development。"
-version: "2.2.0"
+description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
+version: "2.3.0"
 ---
 
 # 星舵 Starpilot
@@ -42,6 +42,42 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 | ④ 执行 | Agent | 代码 / 产物 + 留证 | `runtime/runs/<run_id>/` |
 | ⑤ 回报 | Agent | 反馈六段 + 失败转交 | `templates/feedback.md` |
 | ⑥ 收口 | 网页版 AI 裁定 + 用户验收 | 阶段报告 + 阻塞项清单 | `templates/phase-report.md` |
+
+---
+
+## 0.1 来源与升级（用户说「升到最新版」就照这里做）
+
+- **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
+- **当前版本**：见本文件 front-matter 的 `version`（现在 2.3.0）。版本只从 `SKILL.md` 读，不从别处猜。
+- **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
+
+用户说「升级星舵 / 星舵升到最新版 / 检查有没有新版 / update starpilot」时，**直接执行**，不必先问「要不要升」——这就是用户要的动作：
+
+```bash
+python scripts/upgrade.py --check        # 只看：本地 vX → 远端 vY（有新版本退出码 4）
+python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份 → 覆盖 → 跑单测自检
+```
+
+**网络（国内常态：直连不通）**：`raw.githubusercontent.com` 与 `codeload.github.com` 在国内经常直接超时。
+脚本默认 `--mirror auto`：并发探测 **直连 + 一批公益加速前缀**（`ghfast.top`、`gh-proxy.com`、
+`ghproxy.net`、`hub.gitmirror.com`、`ghproxy.cc`），直连能用就直连，不能用就取最快的可用镜像。
+规则：
+
+- **不要自己拼加速链接**（别手改 `raw.githubusercontent` 域名、别用网盘或不知名代理站），一律交给脚本；
+- 要固定某个源：`--mirror https://ghfast.top`；要强制直连：`--mirror direct`（不通会明确报错，不静默降级）；
+- 全部源都不通才报失败，报错里会写清「请检查网络或用 --mirror 指定可用镜像」。
+
+**升级纪律**：
+
+| 项 | 规定 |
+|---|---|
+| 不许动的数据 | `runtime/`、`runs/`、`state/`、`stage/`、`.wa-state.json` —— 脚本逐项排除，**任何情况下不覆盖用户现场** |
+| 备份 | 覆盖前整目录备份成 `<目录>.bak-<时间戳>`；装完单测失败会把回滚命令打出来 |
+| 开发副本 | 目录里有 `.git` 时脚本拒绝覆盖（提示用 `git pull --ff-only`），确要覆盖加 `--force` |
+| 残留清理 | 默认按上次安装清单删除「旧版有、新版没有」的文件，清单里没有的一律不碰；要保留加 `--no-prune` |
+| 升级后必须汇报三件套 | ① 版本 `旧 → 新`；② 用的哪个源（直连还是哪个镜像，多少 ms）；③ 自检结果（`Ran N tests / OK`） |
+| 宿主缓存 | skill 目录被宿主加载过就要重载一次 skill 才生效，须在汇报里提醒用户 |
+| 失败 | rc=1 时**不换第三种办法硬试**（硬规则 4）：把失败输出原样给用户 + 回滚命令，停下 |
 
 ---
 
@@ -441,6 +477,7 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 | `wa.py unlock` | 清残留的 state 写锁（O_EXCL 锁 + 死进程接管） |
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
+| `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
 
 ### 5.3 会话纪律
 
@@ -537,7 +574,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v2.2 现状，别假装有）
+## 8. 已知缺口（v2.3 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|
@@ -552,6 +589,8 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | **prompt 质量无对照数据** | 本轮把「步骤回执 + 每步由网页版 AI 判完成度」写进了流程，但**没做过 A/B 对照**（同一任务两套 prompt 比方案质量） | 待做：两个独立对话（不同 `STARPILOT_LOCK_KEY`）跑同一任务，比「下一步指令的可执行度」 |
 | **完成度仍靠网页版 AI 自觉** | 没有机器判据能验「它说的完成是不是真完成」；agent 只能靠 `done-check` 四方一致兜底 | 只能靠证据留痕 + 人验收；别把「它说完成了」当事实（硬规则 3） |
 | ~~**指标口径曾漂移**~~ | **已修两轮（2026-10-29）**：① 第一轮把「总消息数」换成「助手气泡数」（契约 v1.0）；② 第二轮发现气泡数在虚拟列表下也不稳（回复 2597 字已渲染、`reply_count` 仍是 2），改为**锚点口径**（消息 ID > 正文指纹 > 计数），通过线 `effective_delta==1`（契约 v1.1 §2.4.1） | 任何口径改动必须同步契约 §2.4/§2.4.1 + 跑 `tests/test_confirm.py` |
+| **升级包不校验签名/哈希** | 只按 HTTPS + 版本号判断，没有签名校验，也不比对内容哈希；镜像站是第三方公益服务，理论上可被投毒（脚本已限缩到固定仓库路径、提取时用 `filter="data"` 防穿越） | 需要时补：仓库内放 `SHA256SUMS`，升级后校验一遍再安装 |
+| **镜像可用性不由我们控制** | 公益加速站随时可能关停或变慢；脚本每次并发实测挑最快的，全挂了才报错 | 备用：`--mirror <自建前缀>`，或直连可用时自动走直连 |
 | **离线回放只覆盖 DOM 契约** | `tests/fixtures/` 是真机录制的 DOM 快照，`tests/domsel.py` 在 Python 里重放选择器；但它验的是**选择器命中**，不验「真页面渲染时序」 | 下一轮该做「真机 vs 回放偏差」对照（DeepSeek 第 2 轮裁定建议） |
 
 ---
@@ -569,3 +608,5 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验
 - `scripts/risk.py` — 越界请求风险分级（low 放行 / medium 换方案 / high 停下）
 - `scripts/orchestrator.py` — 状态机：init / bind / plan / loop / mode / approve / close
+- `scripts/upgrade.py` — 升级器：仓库 `https://github.com/ShenDoyle/Starpilot`，自动挑源（直连 / 公益加速镜像）+ 备份 + 装后自检
+- 仓库地址：<https://github.com/ShenDoyle/Starpilot>（版本以本文件 front-matter 为准）

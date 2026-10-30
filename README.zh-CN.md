@@ -61,7 +61,8 @@ Starpilot/
 │   ├── confirm.py                    ★ 发送/等待判定的唯一实现（锚点口径，两层共用）
 │   ├── statelock.py                  state 单写锁（O_EXCL + 死进程接管，纯标准库）
 │   ├── requirement_gate.py           需求卡片否定式校验（只拒绝，不生成）
-│   └── lessons_audit.py              知识库体检（格式/重复/超期 open/blocking）
+│   ├── lessons_audit.py              知识库体检（格式/重复/超期 open/blocking）
+│   └── upgrade.py                    ★ 升级器：拉 GitHub 最新版，自动切公益加速镜像 + 备份 + 装后自检
 │
 ├── templates/                    产出物模板（照着填，别自由发挥）
 │   ├── requirement-card.md           ① 需求卡片（含执行模式/授权范围/无人值守方案）
@@ -71,7 +72,7 @@ Starpilot/
 │   ├── done-check.md                 收口前四方一致性核对
 │   └── web-ai-eval.md                ★ 网页 AI 记忆自测表（选平台时用）
 │
-├── tests/                            ★ 214 个验收单测（stdlib unittest，无第三方依赖）
+├── tests/                            ★ 229 个验收单测（stdlib unittest，无第三方依赖）
 │   ├── test_orchestrator.py          状态机 / 预算 / 恢复 / 收口
 │   ├── test_orchestrator_gaps.py     迁移矩阵 actor 门控 / 三值语义 / 锚点等待 / 前置断言
 │   ├── test_confirm.py               发送确认口径（含两个历史事故回放）
@@ -81,6 +82,7 @@ Starpilot/
 │   ├── test_grant_risk.py            授权范围 / 过期 / 越界风险分级
 │   ├── test_mode_switch.py           mid-loop step↔auto 切换
 │   ├── test_read_noise.py            读正文剔除思考过程 / 推荐提问
+│   ├── test_upgrade.py               升级器：版本解析 / 镜像回退 / 覆盖安装 / 残留清理
 │   ├── test_platforms_replay.py      真机 DOM 快照回放（改坏选择器离线就红）
 │   ├── test_lessons_audit.py         知识库体检（含 blocking / 超龄）
 │   ├── domsel.py                     迷你选择器引擎（回放用，纯 html.parser）
@@ -104,8 +106,25 @@ Starpilot/
 ```bash
 git clone https://github.com/ShenDoyle/Starpilot.git
 cd Starpilot
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 个单测，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 229 个单测，纯标准库
 ```
+
+仓库地址：**<https://github.com/ShenDoyle/Starpilot>**
+
+### 升级（说一句「升到最新版」就行）
+
+```bash
+python scripts/upgrade.py --check        # 本地 vX → 远端 vY（有新版本退出码 4）
+python scripts/upgrade.py --to-latest    # 选源 → 下载 → 备份 → 覆盖 → 跑单测自检
+```
+
+- **国内网络自动加速**：`raw.githubusercontent.com` / `codeload.github.com` 直连经常超时，脚本会并发探测
+  直连与一批公益加速前缀（`ghfast.top`、`gh-proxy.com`、`ghproxy.net`、`hub.gitmirror.com`、`ghproxy.cc`），
+  直连能用就直连，不能用就取最快的可用镜像；也可 `--mirror <前缀>` 指定、`--mirror direct` 强制直连。
+- **不动现场**：`runtime/` `runs/` `state/` `stage/` `.wa-state.json` 一律排除；
+  覆盖前把旧目录整体备份成 `<目录>.bak-<时间戳>`，装完单测失败会打回滚命令。
+- **装完自检**：自动跑全量单测（229 条），装坏了当场就红，不会等你下次用才发现。
+- 目录里有 `.git`（开发副本）时脚本拒绝覆盖，提示改用 `git pull --ff-only`；确要覆盖加 `--force`。
 
 > **前置**：请先安装 **`bsk`** 浏览器驱动 CLI——本循环当前基于它构建并全链路实测
 > （见「六、外部依赖」；等价 CLI 可用 `BSK_BIN` 接入）。
@@ -244,7 +263,7 @@ python scripts/wa.py bind "<对话地址>" --platform claude
 | ② 网页 AI 规划 | 90% | 29 轮规划留档，产出总纲 + 契约 + 阶段报告；O0~O4 全部裁定完成 |
 | ③ 步骤拆解 | 90% | 阶段路线 + 每阶段准出标准与裁定（O4 收口口径已冻结进契约） |
 | ④ 取指令执行 | 88% | `wa.py` + `platforms.py` + `write_gate.py` + `orchestrator.py` 四件套就位；6 平台可路由，**ChatGPT + Kimi + DeepSeek + Gemini + 豆包 已实测** |
-| ⑤ 逐步执行 | 95% | 写闸门实测跑通（dry-run→批准→单条真发→核验，`effective_delta=1` 且 `delta_source=anchor`）；等待侧改为锚点口径；崩溃恢复实测零重发；**165 个验收单测全绿** |
+| ⑤ 逐步执行 | 95% | 写闸门实测跑通（dry-run→批准→单条真发→核验，`effective_delta=1` 且 `delta_source=anchor`）；等待侧改为锚点口径；崩溃恢复实测零重发；**229 个验收单测全绿** |
 | ⑥ 完成项目 | 60% | 知识回流已强制且有**体检**（`lessons_audit.py`：blocking open 阻塞收口、open 超 14 天告警）；缺口剩「多平台实测（需人改绑）」与「长连 soak」 |
 
 ### 已闭合的三个缺口（2026-10-29）

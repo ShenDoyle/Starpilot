@@ -63,7 +63,8 @@ Starpilot/
 │   ├── confirm.py                    ★ The only implementation of send/wait verdicts (anchor-based, shared by both layers)
 │   ├── statelock.py                  Single-writer state lock (O_EXCL + dead-process takeover, stdlib only)
 │   ├── requirement_gate.py           Negative-form requirement-card validation (rejects only, never generates)
-│   └── lessons_audit.py              Knowledge-base health check (format / duplicates / stale open / blocking)
+│   ├── lessons_audit.py              Knowledge-base health check (format / duplicates / stale open / blocking)
+│   └── upgrade.py                    ★ Upgrader: pull latest from GitHub, auto-fallback to public accelerators, back up, self-check
 │
 ├── templates/                    Artifact templates (fill them in; do not improvise)
 │   ├── requirement-card.md           ① Requirement card (incl. exec mode / grant scope / unattended policy)
@@ -73,7 +74,7 @@ Starpilot/
 │   ├── done-check.md                 Pre-close four-way consistency check
 │   └── web-ai-eval.md                ★ Web-AI memory self-test (used when choosing a platform)
 │
-├── tests/                            ★ 214 acceptance tests (stdlib unittest, zero third-party deps)
+├── tests/                            ★ 229 acceptance tests (stdlib unittest, zero third-party deps)
 │   ├── test_orchestrator.py          State machine / budget / recovery / close-out
 │   ├── test_orchestrator_gaps.py     Migration matrix actor gating / three-valued semantics / anchor wait / preconditions
 │   ├── test_confirm.py               Send-verdict criteria (incl. two incident replays)
@@ -86,6 +87,7 @@ Starpilot/
 │   ├── test_read_noise.py            Thinking-block / suggested-question stripping on read
 │   ├── test_platforms_replay.py      Live DOM snapshot replay (a broken selector turns red offline)
 │   ├── test_lessons_audit.py         Knowledge-base health check (incl. blocking / staleness)
+│   ├── test_upgrade.py               Upgrader: version parsing / mirror fallback / install / prune
 │   ├── domsel.py                     Mini selector engine (for replay, pure html.parser)
 │   └── fixtures/{deepseek,kimi,gemini}/  Live-recorded DOM snapshots
 │
@@ -107,8 +109,26 @@ Starpilot/
 ```bash
 git clone https://github.com/ShenDoyle/Starpilot.git
 cd Starpilot
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 165 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 229 tests, stdlib only
 ```
+
+Repo: **<https://github.com/ShenDoyle/Starpilot>**
+
+### Upgrade (just say "update Starpilot to the latest")
+
+```bash
+python scripts/upgrade.py --check        # local vX → remote vY (exit 4 when newer)
+python scripts/upgrade.py --to-latest    # pick source → download → back up → install → run tests
+```
+
+- **Automatic fallback behind a bad network**: `raw.githubusercontent.com` and `codeload.github.com` often time
+  out from mainland China. The script probes direct access and a set of public accelerators in parallel
+  (`ghfast.top`, `gh-proxy.com`, `ghproxy.net`, `hub.gitmirror.com`, `ghproxy.cc`), prefers direct when it works,
+  otherwise takes the fastest live mirror. Pin one with `--mirror <prefix>`, or force direct with `--mirror direct`.
+- **Never touches your data**: `runtime/` `runs/` `state/` `stage/` and `.wa-state.json` are excluded; the old
+  tree is copied to `<dir>.bak-<timestamp>` first, and a failed self-check prints the rollback command.
+- **Self-check built in**: the full suite (229 tests) runs after install, so a broken upgrade goes red immediately.
+- In a `.git` checkout the script refuses to overwrite (use `git pull --ff-only`); `--force` overrides.
 
 > **Prerequisite**: install the **`bsk`** browser-driving CLI first — the loop is currently built and live-tested against it (see §6; a `BSK_BIN` override exists for equivalent CLIs).
 
@@ -236,7 +256,7 @@ Before switching platforms, run `templates/web-ai-eval.md` first (20 minutes; se
 | ② Web AI planning | 90% | 29 planning rounds archived; charter + contract + stage reports produced; O0–O4 all adjudicated |
 | ③ Step breakdown | 90% | Stage roadmap + per-stage exit criteria and rulings (O4 close-out criteria frozen into the contract) |
 | ④ Execute instructions | 88% | `wa.py` + `platforms.py` + `write_gate.py` + `orchestrator.py` in place; 6 platforms routable, **ChatGPT + Kimi + DeepSeek + Gemini + Doubao live-tested** |
-| ⑤ Step-by-step execution | 95% | Write gate live-tested (dry-run→approve→single real send→verify, `effective_delta=1` with `delta_source=anchor`); wait side moved to anchor criteria; crash recovery live-tested with zero re-sends; **165 acceptance tests green** |
+| ⑤ Step-by-step execution | 95% | Write gate live-tested (dry-run→approve→single real send→verify, `effective_delta=1` with `delta_source=anchor`); wait side moved to anchor criteria; crash recovery live-tested with zero re-sends; **229 acceptance tests green** |
 | ⑥ Finish the project | 60% | Knowledge reflow enforced **with health checks** (`lessons_audit.py`: blocking open items block close-out; open items older than 14 days warn); remaining gaps: "multi-platform live tests (needs human rebinding)" and "long-running soak" |
 
 ### Three gaps that have been closed (2026-10-29)
