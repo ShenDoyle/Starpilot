@@ -70,13 +70,43 @@ _JS_PICK = """
   // 指纹都不变，所以「新增了几个指纹」比「当前渲染出几个节点」稳。
   // 见 docs/orchestrator-contract.md §2.4。
   const fpNorm = (t) => (t || '').replace(/[\\s#*`>\\[\\]\\(\\)~_\\-|]+/g, '');
-  const fpOf = (el) => fpNorm((el.innerText || '')).slice(0, 64);
+  // txt 可传已净化的正文（stripped），避免指纹把思考块里的字算进来。
+  const fpOf = (el, txt) => fpNorm(txt === undefined ? (el.innerText || '') : txt).slice(0, 64);
 """
+
+# 「思考过程」跨平台黑名单：这些子树的文字是模型的推理草稿，不是回复正文。
+# 为什么必须剔：① 会把推理当指令执行（Kimi 实测：7103 字里 5841 字是推理）；
+# ② 推理是逐字流式增长的，把它算进消息指纹会让同一条回复的指纹一直变，
+#    「末条是否变化」判据直接失效（锚点计数跟着崩）。
+# 只收「明确的推理容器」，不收泛化前缀（[class*="think"] 会误伤正常正文类名）。
+READ_IGNORE_COMMON = [
+    ".toolcall-flow",              # Kimi：思考 + 工具调用折叠流
+    "[data-testid*=\"thought\"]",  # ChatGPT / Gemini：思考块
+    "[class*=\"think-block\"]",    # DeepSeek R1 等：思考折叠区
+    "[class*=\"reasoning\"]",      # o 系列 / 推理模型的 reasoning 容器
+    "[class*=\"chain-of-thought\"]",
+]
+
+
+def read_ignore_of(p):
+    """读正文时要剔除的选择器 = 跨平台黑名单 + 平台显式声明（保序去重）。
+
+    去重是必要的：平台自己也声明 `.toolcall-flow` 时（Kimi），重复项会让
+    clone 上做两遍 remove，白白多扫一次 DOM。
+    """
+    out, seen = [], set()
+    for sel in list(READ_IGNORE_COMMON) + list((p.get("sel") or {}).get("read_ignore") or []):
+        if sel and sel not in seen:
+            seen.add(sel)
+            out.append(sel)
+    return out
 
 # 通用兜底：靠「主区域文本」判断最后一条回复（不知道消息节点属性时用）
 _JS_TAIL_FALLBACK = """
   const mainEl = document.querySelector('main') || document.body;
-  const mainText = (mainEl && mainEl.innerText) || '';
+  // 兜底分支同样剔除思考块：否则 messages 选择器失效时，兜底反而把推理当正文。
+  const mainClean = (typeof strip === 'function') ? strip(mainEl) : mainEl;
+  const mainText = (mainClean && mainClean.innerText) || '';
   const markers = ['ChatGPT 说：', 'ChatGPT says:', 'Claude', '助手', 'Assistant'];
   let tail = mainText;
   for (const m of markers) {
@@ -295,6 +325,9 @@ PLATFORMS = {
             "speech": ["button[aria-label*=\"语音\"]"],
             "scroll": ["div.chat-detail-main",
                        "div.chat-detail-content", "main"],
+            # 读正文时剔除的噪声：思考/工具调用折叠流（Kimi 实测 7103 字里 5841 字是推理）
+            "read_ignore": [".toolcall-flow",
+                            ".toolcall-rollup__summary-clp"],
         },
     },
 
@@ -658,6 +691,24 @@ def js_probe(p):
   };
   const edBlank = hasEmptyCls(editor);
 
+  // ---- 剔除「思考过程」（跨平台）：推理草稿不是回复正文 ----
+  // strip 在 clone 上做，不动页面；fpOf/textOf 一律走净化后的文本，
+  // 否则流式增长的推理会把「末条指纹」变成永远在变的量。
+  const IGNORE = __IGNORE__;
+  const strip = (el) => {
+    if (!el || !IGNORE.length) return el;
+    let hit = false;
+    for (const sel of IGNORE) { try { if (el.querySelector(sel)) { hit = true; break; } } catch (e) {} }
+    if (!hit) return el;
+    const c = el.cloneNode(true);
+    for (const sel of IGNORE) {
+      try { c.querySelectorAll(sel).forEach(n => n.remove()); } catch (e) {}
+    }
+    return c;
+  };
+  const textOf = (el) => ((strip(el).innerText) || '').trim();
+  const fpT = (el) => fpOf(el, textOf(el));
+
   // ---- 末条回复正文 ----
   let lastText = '';
   const useMarker = %s || asst.length === 0;
@@ -676,7 +727,7 @@ def js_probe(p):
     }
   }
   if (!lastText && asst.length) {
-    lastText = (asst[asst.length - 1].innerText || '').trim();
+    lastText = textOf(asst[asst.length - 1]);
   }
   if (!lastText && !useMarker) {
     lastText = full.trim();
@@ -701,9 +752,9 @@ def js_probe(p):
   const modalText = modal ? (modal.innerText || '').trim().slice(0, 120) : '';
 
   // ---- 锚点指纹（计数用，见 §2.4）----
-  const asstFps = asst.map(fpOf).filter(Boolean);
-  const userFps = users.map(fpOf).filter(Boolean);
-  const allFps = all.map(fpOf).filter(Boolean);
+  const asstFps = asst.map(fpT).filter(Boolean);
+  const userFps = users.map(fpT).filter(Boolean);
+  const allFps = all.map(fpT).filter(Boolean);
 
   // ---- 平台自带的稳定标识（比正文指纹更硬）----
   // DeepSeek 的虚拟列表在每条消息外层挂了 data-virtual-list-item-key（如 -2/2/-4/4），
@@ -801,7 +852,8 @@ def js_probe(p):
     # 轮次容器选择器（可空）：只在平台显式声明时才按容器 id 取锚点，
     # 避免「看见长得像 id 的属性就当消息身份」。
     return (js.replace("__ANCHOR_BOX__", json.dumps(p.get("anchor_box") or ""))
-              .replace("__REGEN_SEL__", json.dumps(p.get("regen_selector") or "")))
+              .replace("__REGEN_SEL__", json.dumps(p.get("regen_selector") or ""))
+              .replace("__IGNORE__", json.dumps(read_ignore_of(p), ensure_ascii=False)))
 
 
 def js_fill(p, text):
@@ -920,7 +972,7 @@ def js_read_last(p):
     s = p["sel"]
     # 平台声明的「读正文时要剔除的噪声子树」（豆包：回复里的推荐提问 suggest_message_list）。
     # 在 clone 上剔除，不动页面——原文仍完整，只是不把 UI 文案当 AI 正文。
-    ignore = json.dumps(s.get("read_ignore") or [], ensure_ascii=False)
+    ignore = json.dumps(read_ignore_of(p), ensure_ascii=False)
     return """
 (() => {
   %s

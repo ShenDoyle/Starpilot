@@ -47,7 +47,7 @@ TRANSITIONS = {
     "SENDING": ["AWAITING_REPLY", "PAUSED_HUMAN", "HANDOFF"],
     "AWAITING_REPLY": ["REPLY_VERIFIED", "ROUND_DONE", "PAUSED_HUMAN", "HANDOFF"],
     "REPLY_VERIFIED": ["ROUND_DONE"],
-    "ROUND_DONE": ["READY", "HANDOFF", "CLOSED"],
+    "ROUND_DONE": ["READY", "HANDOFF", "CLOSED", "PAUSED_HUMAN"],
     "PAUSED_HUMAN": ["READY", "AWAITING_REPLY", "CLOSED", "HANDOFF"],
     "RECOVERING": ["READY", "AWAITING_REPLY", "REPLY_VERIFIED", "PAUSED_HUMAN", "HANDOFF"],
     "HANDOFF": ["CLOSED"],
@@ -476,6 +476,67 @@ def wait_for_reply(p: dict, sid: str, before_count: int, timeout: int,
 
 # ---------------------------------------------------------------- init / bind / plan
 
+EXEC_MODES = ("step", "auto")
+MODE_HUMAN = {
+    "step": "逐步确认：每一轮在真实发送前停下来等你拍板",
+    "auto": "无人值守：按既定规划连续跑，只在「连续失败 2 次 / 地址漂移 / 出现新歧义」时停",
+}
+
+
+def _resolve_exec_mode(cli_val: str, card_res: dict = None) -> str:
+    """执行模式的三级来源：命令行 > 需求卡片 > 缺省 step。
+
+    缺省必须是 step：拿不到人明确说过「直接执行」，就不许替他决定不打扰。
+    """
+    v = (cli_val or "").strip().lower()
+    if v in EXEC_MODES:
+        return v
+    code = ((card_res or {}).get("stats") or {}).get("exec_mode_code") or ""
+    if code in EXEC_MODES:
+        return code
+    return "step"
+
+
+def cmd_mode(a) -> int:
+    """查看 / 切换执行模式（mid-loop 可切，含切换留痕）。
+
+    用户裁定：两条线之间随时能打断重选——不是一锤定音。
+    但每次切换都要留一句为什么，否则事后没人能解释「这轮为什么没停」。
+    """
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    cur = st.get("exec_mode") or "step"
+
+    if not a.set:
+        print(json.dumps({"ok": True, "run_id": run_id, "exec_mode": cur,
+                          "explain": MODE_HUMAN.get(cur, cur),
+                          "switches": st.get("exec_mode_switches") or [],
+                          "state": st.get("state")}, ensure_ascii=False, indent=2))
+        return 0
+
+    to = a.set.strip().lower()
+    if to not in EXEC_MODES:
+        print(json.dumps({"ok": False, "error": "exec_mode 只能是 step / auto，拿到 %r" % to,
+                          "hint": "step=逐步确认；auto=无人值守"}, ensure_ascii=False))
+        return 2
+    if to == cur and not a.force:
+        print(json.dumps({"ok": True, "run_id": run_id, "exec_mode": cur,
+                          "noop": True, "explain": "已经是这个模式了"}, ensure_ascii=False))
+        return 0
+    rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "from": cur, "to": to,
+           "by": a.by or "human", "reason": a.reason or ""}
+    st["exec_mode"] = to
+    st.setdefault("exec_mode_switches", []).append(rec)
+    save_run_state(root, st)
+    journal(root, st, {"action": "exec_mode_switch", "result": "ok",
+                       "from": cur, "to": to, "reason": a.reason or "",
+                       "by": a.by or "human"})
+    print(json.dumps({"ok": True, "run_id": run_id, "exec_mode": to,
+                      "explain": MODE_HUMAN[to], "switch": rec},
+                     ensure_ascii=False, indent=2))
+    return 0
+
 
 def cmd_init(a) -> int:
     root = wg.workspace_root(a.workspace)
@@ -507,6 +568,10 @@ def cmd_init(a) -> int:
     st = {
         "run_id": run_id, "stage_id": a.stage or "", "state": "INIT",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # 执行模式：step=逐步确认（每轮停在 APPROVED 前等人批）；auto=无人值守。
+        # 来源优先级：命令行 --exec-mode > 卡片「执行模式」> 缺省 step（保守）。
+        "exec_mode": _resolve_exec_mode(getattr(a, "exec_mode", "") or "", card_res),
+        "exec_mode_switches": [],
         "goal": dict(goal, text=a.goal or ""),
         "target_url_sha256": "", "platform": "", "round": 0, "rounds_used": 0,
         "fail_streak": 0, "last_error_class": "", "last_guard_failure": None,
@@ -744,41 +809,69 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
         step["to"] = "DRY_RUN_OK"
         return step
 
-    # ---- DRY_RUN_OK → APPROVED：人工卡点（首次真实写前）----
+    # ---- DRY_RUN_OK → APPROVED：唯一的「人」的卡点 ----
+    # 两种放行方式：
+    #   ① 单条批准（single）：只对这一组 hash 有效；
+    #   ② 授权单（count/stage/task）：一次授权覆盖后续多条 —— 用户裁定「一次授权覆盖」，
+    #      也是「无人值守不反复打扰」的唯一实现方式。
+    # 两者都没有 = 没被授权，一律 fail-closed 停下，并**说清怎么一次授权**。
     if cur == "DRY_RUN_OK":
         aid = (st.get("pending") or {}).get("approval_id") or ""
         d = run_dir(root, st.get("run_id"))
+        dry_path = os.path.join(d, "writes", "%s.dry.json" % aid)
+        dry = {}
+        if os.path.exists(dry_path):
+            with open(dry_path, encoding="utf-8") as f:
+                dry = json.load(f)
         rec, why = wg.load_approval(d, aid)
+        grant, grant_path = None, ""
         if rec is None:
-            st["last_guard_failure"] = {"reason": "人工卡点：首次真实写前需要批准（%s）"
-                                        % (why or aid), "checkpoint": "write_approval",
+            grant, grant_path, gwhy = wg.find_grant(
+                d, dry.get("target_url_sha256") or "", p.get("key") or "",
+                st.get("stage_id") or "")
+        if rec is None and grant is None:
+            hint = ("一次性授权可免去后面每轮都停：write_gate.py approve --approval %s "
+                    "--scope task --ttl 3600 --max-writes 200" % aid)
+            st["last_guard_failure"] = {"reason": "人工卡点：这次写没有批准或授权覆盖（%s）"
+                                        % ("%s；%s" % (why, gwhy) if rec is None else why),
+                                        "checkpoint": "write_approval",
+                                        "hint": hint,
                                         "at": time.strftime("%Y-%m-%d %H:%M:%S")}
             save_run_state(root, st)
             transition(root, st, "PAUSED_HUMAN", "等待人工批准真实写",
                        {"action": "checkpoint", "result": "paused",
-                        "checkpoint": "write_approval", "approval_id": aid})
+                        "checkpoint": "write_approval", "approval_id": aid,
+                        "hint": hint})
             step["action"] = "checkpoint_write_approval"
             step["approval_id"] = aid
+            step["hint"] = hint
             step["stop"] = True
             return step
-        dry_path = os.path.join(d, "writes", "%s.dry.json" % aid)
-        with open(dry_path, encoding="utf-8") as f:
-            dry = json.load(f)
-        if (rec.get("target_url_sha256") != dry.get("target_url_sha256")
-                or rec.get("prompt_sha256") != dry.get("prompt_sha256")):
-            st["last_guard_failure"] = {"reason": "批准与计划不一致（URL/prompt hash 对不上）",
-                                        "checkpoint": "write_approval"}
-            save_run_state(root, st)
-            transition(root, st, "PAUSED_HUMAN", "批准与计划不一致",
-                       {"action": "checkpoint", "result": "paused",
-                        "checkpoint": "write_approval"})
-            step["action"] = "approval_mismatch"
-            step["stop"] = True
-            return step
-        transition(root, st, "APPROVED", "批准有效：%s" % aid,
-                   {"action": "approve", "result": "ok", "approval_id": aid})
+        if rec is not None:
+            if (rec.get("target_url_sha256") != dry.get("target_url_sha256")
+                    or rec.get("prompt_sha256") != dry.get("prompt_sha256")):
+                st["last_guard_failure"] = {"reason": "批准与计划不一致（URL/prompt hash 对不上）",
+                                            "checkpoint": "write_approval"}
+                save_run_state(root, st)
+                transition(root, st, "PAUSED_HUMAN", "批准与计划不一致",
+                           {"action": "checkpoint", "result": "paused",
+                            "checkpoint": "write_approval"})
+                step["action"] = "approval_mismatch"
+                step["stop"] = True
+                return step
+            how = "单条批准"
+            gid = ""
+        else:
+            how = "授权单（%s，剩余 %d 条）" % (
+                grant.get("scope"),
+                int(grant.get("max_writes") or 0) - int(grant.get("used") or 0))
+            gid = grant.get("grant_id") or ""
+        transition(root, st, "APPROVED", "放行依据：%s %s" % (how, aid),
+                   {"action": "approve", "result": "ok", "approval_id": aid,
+                    "grant_id": gid, "basis": "grant" if gid else "approval"})
         step["action"] = "approved"
         step["to"] = "APPROVED"
+        step["basis"] = "grant" if gid else "approval"
         return step
 
     # ---- APPROVED → SENDING：真发（必须经闸门）----
@@ -971,7 +1064,27 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
             step["action"] = "budget_exhausted"
             step["stop"] = True
             return step
-        transition(root, st, "READY", "进入下一轮", {"action": "next_round", "result": "ok"})
+        # 执行模式决定「这一轮结束后停不停」——这是两条线唯一的行为差异：
+        #   step（逐步确认）：每轮停下，让人看结果、决定下一轮怎么写；
+        #   auto（无人值守）：直接进下一轮，只在三条例外（连续失败 2 次 / 地址漂移 /
+        #                     出现新歧义）才停——那三条例外由各自的守卫负责，不在这里。
+        mode = st.get("exec_mode") or "step"
+        if mode == "step":
+            # 顺序要紧：transition() 成功后会清空 last_guard_failure，
+            # 所以 checkpoint 必须**在迁移之后**写，否则 PAUSED_HUMAN 读出来是空的。
+            transition(root, st, "PAUSED_HUMAN", "逐步确认：本轮结束，等待人工确认下一轮",
+                       {"action": "checkpoint", "result": "paused",
+                        "checkpoint": "round_review", "round": st.get("round")})
+            st["last_guard_failure"] = {
+                "reason": "逐步确认：本轮已结束，等你看完结果再决定下一轮",
+                "checkpoint": "round_review",
+                "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            save_run_state(root, st)
+            step["action"] = "round_review_pause"
+            step["stop"] = True
+            return step
+        transition(root, st, "READY", "进入下一轮（无人值守）",
+                   {"action": "next_round", "result": "ok", "exec_mode": mode})
         step["action"] = "next_round"
         step["to"] = "READY"
         return step
@@ -1814,7 +1927,17 @@ def main() -> int:
     p.add_argument("--round-timeout", type=int, default=0)
     p.add_argument("--send-timeout", type=int, default=0)
     p.add_argument("--card", default="", help="需求卡片路径：先过否定式校验才建 run")
+    p.add_argument("--exec-mode", default="", choices=["", "step", "auto"],
+                   help="执行模式：step=逐步确认（缺省）；auto=无人值守。"
+                        "缺省时读需求卡片的「执行模式」字段")
     p.set_defaults(func=cmd_init)
+
+    p = add_pl(sub.add_parser("mode", help="查看/切换执行模式（mid-loop 可切）"))
+    p.add_argument("--set", default="", choices=["", "step", "auto"])
+    p.add_argument("--reason", default="", help="为什么切：写进切换记录，事后要能解释")
+    p.add_argument("--by", default="human")
+    p.add_argument("--force", action="store_true", help="已是该模式也照样记一条")
+    p.set_defaults(func=cmd_mode)
 
     p = add_pl(sub.add_parser("bind", help="绑定对话（沿用 wa.py 的绑定逻辑）"))
     p.add_argument("url", nargs="?", default="")

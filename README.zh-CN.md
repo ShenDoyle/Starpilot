@@ -42,7 +42,7 @@ Starpilot/
 ├── README.md                     本文件
 │
 ├── docs/
-│   ├── orchestrator-contract.md    ★ 编排契约 v1.4（O0~O5 准出 + §2.4 指标/§2.5 三值语义/§2.6 对话归属门禁/§2.7 人工确认门与执行模式/§2.8 平台占用锁）
+│   ├── orchestrator-contract.md    ★ 编排契约 v1.5（O0~O5 准出 + §2.4 指标/§2.5 三值语义/§2.6 对话归属门禁/§2.7 人工确认门与执行模式/§2.8 平台占用锁/§2.9 授权范围与 expire_time/§2.10 越界风险分级/§2.11 mid-loop 模式切换/§2.12 步骤回执/§2.13 剔除思考过程）
 │   └── requirements/               需求卡片（进规划前必须先过否定式闸门）
 │
 ├── references/                   知识层（只读，随用随查）
@@ -55,7 +55,8 @@ Starpilot/
 ├── scripts/
 │   ├── platforms.py                 ★ 平台适配层：选择器与绑定形态的唯一来源
 │   ├── wa.py                        循环桥接 CLI：bind/probe/send/wait/read/state/unlock/plock/stop（bind/send/clear 先取跨任务平台占用锁）
-│   ├── write_gate.py                 ★ 写闸门：缺省 dry-run → 批准 → 单条真实写 → 核验
+│   ├── write_gate.py                 ★ 写闸门：缺省 dry-run → 批准 → 授权范围（single/count/stage/task + expire_time）→ 真实写 → 核验
+│   ├── risk.py                       越界请求风险分级：low 放行留痕 / medium 换替代方案 / high 停下问人
 │   ├── orchestrator.py               ★ 编排器：14 态状态机 + 守卫 + 预算 + 恢复 + 收口回流
 │   ├── confirm.py                    ★ 发送/等待判定的唯一实现（锚点口径，两层共用）
 │   ├── statelock.py                  state 单写锁（O_EXCL + 死进程接管，纯标准库）
@@ -63,18 +64,23 @@ Starpilot/
 │   └── lessons_audit.py              知识库体检（格式/重复/超期 open/blocking）
 │
 ├── templates/                    产出物模板（照着填，别自由发挥）
-│   ├── requirement-card.md           ① 需求卡片
+│   ├── requirement-card.md           ① 需求卡片（含执行模式/授权范围/无人值守方案）
+│   ├── confirm-gate.md               ★ 首次确认单（人话版：≤10 行摘要 + 6 行权限清单）
 │   ├── feedback.md                   ⑤ 反馈 + 失败转交 + 写操作回报
 │   ├── phase-report.md               ⑥ 阶段报告
 │   ├── done-check.md                 收口前四方一致性核对
 │   └── web-ai-eval.md                ★ 网页 AI 记忆自测表（选平台时用）
 │
-├── tests/                            ★ 165 个验收单测（stdlib unittest，无第三方依赖）
+├── tests/                            ★ 214 个验收单测（stdlib unittest，无第三方依赖）
 │   ├── test_orchestrator.py          状态机 / 预算 / 恢复 / 收口
 │   ├── test_orchestrator_gaps.py     迁移矩阵 actor 门控 / 三值语义 / 锚点等待 / 前置断言
 │   ├── test_confirm.py               发送确认口径（含两个历史事故回放）
 │   ├── test_fill_guard.py            写入接受判定（空态类/发送键/字数）+ 流式补全见证
 │   ├── test_statelock.py             state 锁（含死进程接管、外来锁不误删）
+│   ├── test_platformlock.py          跨任务平台占用锁 + 执行模式/轮末暂停
+│   ├── test_grant_risk.py            授权范围 / 过期 / 越界风险分级
+│   ├── test_mode_switch.py           mid-loop step↔auto 切换
+│   ├── test_read_noise.py            读正文剔除思考过程 / 推荐提问
 │   ├── test_platforms_replay.py      真机 DOM 快照回放（改坏选择器离线就红）
 │   ├── test_lessons_audit.py         知识库体检（含 blocking / 超龄）
 │   ├── domsel.py                     迷你选择器引擎（回放用，纯 html.parser）

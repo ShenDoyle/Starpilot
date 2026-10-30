@@ -44,7 +44,7 @@ Starpilot/
 ├── README.zh-CN.md               Chinese README
 │
 ├── docs/
-│   ├── orchestrator-contract.md    ★ Orchestrator contract v1.4 (O0–O5 exit criteria + §2.4 metrics / §2.5 three-valued semantics / §2.6 conversation-ownership gate / §2.7 human-gate & exec mode / §2.8 platform occupancy lock)
+│   ├── orchestrator-contract.md    ★ Orchestrator contract v1.5 (O0–O5 exit criteria + §2.4 metrics / §2.5 three-valued semantics / §2.6 conversation-ownership gate / §2.7 human-gate & exec mode / §2.8 platform occupancy lock / §2.9 grant scope & expire_time / §2.10 risk tiers / §2.11 mid-loop mode switch / §2.12 step receipts / §2.13 thinking-block stripping)
 │   └── requirements/               Requirement cards (must pass the negative-form gate before planning)
 │
 ├── references/                   Knowledge layer (read-only, consult as needed; in Chinese)
@@ -57,7 +57,8 @@ Starpilot/
 ├── scripts/
 │   ├── platforms.py                 ★ Platform adapter layer: the single source of selectors & binding shapes
 │   ├── wa.py                        Loop bridge CLI: bind/probe/send/wait/read/state/unlock/plock/stop (bind/send/clear take a cross-task platform occupancy lock)
-│   ├── write_gate.py                 ★ Write gate: dry-run by default → approve → single real write → verify
+│   ├── write_gate.py                 ★ Write gate: dry-run by default → approval → grant scope (single/count/stage/task + expire_time) → real write → verify
+│   ├── risk.py                       Out-of-scope request risk tiers: low = allow & log, medium = switch to alternative, high = stop and ask
 │   ├── orchestrator.py               ★ Orchestrator: 14-state machine + guards + budget + recovery + close-out reflow
 │   ├── confirm.py                    ★ The only implementation of send/wait verdicts (anchor-based, shared by both layers)
 │   ├── statelock.py                  Single-writer state lock (O_EXCL + dead-process takeover, stdlib only)
@@ -65,19 +66,24 @@ Starpilot/
 │   └── lessons_audit.py              Knowledge-base health check (format / duplicates / stale open / blocking)
 │
 ├── templates/                    Artifact templates (fill them in; do not improvise)
-│   ├── requirement-card.md           ① Requirement card
+│   ├── requirement-card.md           ① Requirement card (incl. exec mode / grant scope / unattended policy)
+│   ├── confirm-gate.md               ★ One-shot human confirmation sheet (plain language, ≤10 lines + 6 permission rows)
 │   ├── feedback.md                   ⑤ Feedback + failure handoff + write-operation report
 │   ├── phase-report.md               ⑥ Stage report
 │   ├── done-check.md                 Pre-close four-way consistency check
 │   └── web-ai-eval.md                ★ Web-AI memory self-test (used when choosing a platform)
 │
-├── tests/                            ★ 165 acceptance tests (stdlib unittest, zero third-party deps)
+├── tests/                            ★ 214 acceptance tests (stdlib unittest, zero third-party deps)
 │   ├── test_orchestrator.py          State machine / budget / recovery / close-out
 │   ├── test_orchestrator_gaps.py     Migration matrix actor gating / three-valued semantics / anchor wait / preconditions
 │   ├── test_confirm.py               Send-verdict criteria (incl. two incident replays)
 │   ├── test_fill_guard.py            Write-acceptance verdicts (blank class / send key / length) + streaming witness
 │   ├── test_bind_guard.py            Conversation-ownership gate (conv_id / msg_count / conv_origin)
 │   ├── test_statelock.py             State lock (incl. dead-process takeover, foreign locks preserved)
+│   ├── test_platformlock.py          Cross-task platform occupancy lock + exec-mode & round-done pauses
+│   ├── test_grant_risk.py            Grant scope / expire_time / out-of-scope risk tiers
+│   ├── test_mode_switch.py           Mid-loop step<->auto switching
+│   ├── test_read_noise.py            Thinking-block / suggested-question stripping on read
 │   ├── test_platforms_replay.py      Live DOM snapshot replay (a broken selector turns red offline)
 │   ├── test_lessons_audit.py         Knowledge-base health check (incl. blocking / staleness)
 │   ├── domsel.py                     Mini selector engine (for replay, pure html.parser)

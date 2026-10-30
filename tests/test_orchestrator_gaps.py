@@ -95,7 +95,7 @@ class TestTransitionMatrix(Base):
                    "SENDING": {"AWAITING_REPLY", "PAUSED_HUMAN", "HANDOFF"},
                    "AWAITING_REPLY": {"REPLY_VERIFIED", "ROUND_DONE", "PAUSED_HUMAN", "HANDOFF"},
                    "REPLY_VERIFIED": {"ROUND_DONE"},
-                   "ROUND_DONE": {"READY", "HANDOFF", "CLOSED"},
+                   "ROUND_DONE": {"READY", "HANDOFF", "CLOSED", "PAUSED_HUMAN"},
                    "PAUSED_HUMAN": {"READY", "AWAITING_REPLY", "CLOSED", "HANDOFF"},
                    "RECOVERING": {"READY", "AWAITING_REPLY", "REPLY_VERIFIED",
                                   "PAUSED_HUMAN", "HANDOFF"},
@@ -217,7 +217,9 @@ class TestCardGate(Base):
             "# 需求卡片\n\n## 基本信息\n\n| 项 | 内容 |\n|---|---|\n"
             "| 项目名 | 星舵 |\n| 一句话目标 | 让 Agent 跑闭环 |\n"
             "| 原始往来记录 | docs/requirements/t-transcript.md |\n"
-            "| 执行模式 | 直接执行 |\n\n"
+            "| 执行模式 | 直接执行 |\n"
+            "| 授权范围 | 整个任务 |\n"
+            "| 无人值守方案 | 选改动最小的；不装依赖；外部挂了换备用；连败 2 次停 |\n\n"
             "## 一、已明确\n\n| # | 要求 | 落地 | 验收 |\n|---|---|---|---|\n"
             "| 1 | 要能审计 | journal | grep |\n\n"
             "## 二、未明确\n\n| # | 待确认 | A | B | 影响 |\n|---|---|---|---|---|\n\n"

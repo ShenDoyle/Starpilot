@@ -178,6 +178,8 @@ class TestExecModeGate(unittest.TestCase):
 | 一句话目标 | 做个东西 |
 | 原始往来记录 | docs/requirements/t-transcript.md |
 | 执行模式 | {mode} |
+| 授权范围 | 整个任务 |
+| 无人值守方案 | 两条路都通时选改动最小的；不装新依赖；外部服务挂了换备用；连续失败 2 次就停 |
 
 ## 一、已明确
 

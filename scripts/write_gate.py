@@ -29,6 +29,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confirm  # noqa: E402
 import platforms  # noqa: E402
+import risk as riskmod  # noqa: E402
 import wa  # noqa: E402
 
 # ---------------------------------------------------------------- 落盘原语
@@ -136,9 +137,17 @@ BLOCK_CODES = {
 }
 
 
-def blocked(code: str, detail: str = "", extra: dict = None) -> int:
+def blocked(code: str, detail: str = "", extra: dict = None, risk: dict = None) -> int:
+    """拦截输出。带 risk 时把「风险等级 + 换方案建议」一并给人看。
+
+    用户裁定：越界不是一律硬停——分低/中/高三档，中高档必须给替代方案，
+    否则等于把「接下来怎么办」的成本丢回给 agent，任务就那么停在那儿了。
+    """
     out = {"ok": False, "error_code": code,
            "message": BLOCK_CODES.get(code, code), "detail": detail}
+    if risk:
+        out["risk"] = risk
+        out["next_step"] = risk.get("alternative") or ""
     if extra:
         out.update(extra)
     print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -298,6 +307,89 @@ def cmd_plan(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 授权范围（grant）
+
+# 「一次授权覆盖到哪」——用户裁定：一次授权可以覆盖整个任务，
+# 前提是范围、条数上限、失效时间都写在明面上，且都能被人一眼看懂。
+SCOPE_HUMAN = {
+    "single": "只批准这一条消息：内容一个字都不能改，发完即失效",
+    "count": "批准接下来 {n} 条发送：不用每条再问，{n} 条用完或到 {t} 自动失效",
+    "stage": "批准本阶段（{stage}）的所有发送：最多 {n} 条，到 {t} 自动失效",
+    "task": "批准整个任务的所有发送：最多 {n} 条，到 {t} 自动失效——这期间不再逐条问你",
+}
+DEFAULT_MAX_WRITES = {"single": 1, "count": 5, "stage": 50, "task": 200}
+
+
+def grants_dir(run_dir: str) -> str:
+    d = os.path.join(run_dir, "writes", "_grants")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _fmt_time(epoch: float) -> str:
+    """业务可读的失效时间（用户明确要的字段名就是 expire_time）。"""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def grant_scope_human(scope: str, n: int, expire_time: str, stage: str = "") -> str:
+    tpl = SCOPE_HUMAN.get(scope) or SCOPE_HUMAN["single"]
+    return tpl.format(n=n, t=expire_time, stage=stage or "本阶段")
+
+
+def find_grant(run_dir: str, url_sha: str, platform: str, stage: str = "",
+               now: float = None) -> tuple:
+    """找一张能覆盖这次写的授权单。
+
+    返回 (grant, path, why)。why 只在找不到时非空——它是**人话**，
+    直接进拦截输出，让人知道差在哪（过期了 / 用完了 / 不是这条对话）。
+    """
+    now = time.time() if now is None else now
+    d = grants_dir(run_dir)
+    best, best_path, why = None, "", "没有任何授权单（先 approve --scope task 再跑）"
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(d, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                g = json.load(f)
+        except Exception:
+            continue
+        if g.get("target_url_sha256") != url_sha:
+            why = "授权单不是这条对话的（URL 对不上）"
+            continue
+        if platform and g.get("platform") and g["platform"] != platform:
+            why = "授权单是给平台 %s 的，当前是 %s" % (g["platform"], platform)
+            continue
+        if now > float(g.get("expires_at") or 0):
+            why = "授权单已过期（%s 失效）" % (g.get("expire_time") or "?")
+            continue
+        scope = g.get("scope") or "single"
+        if scope == "stage" and (g.get("stage") or "") and stage and g["stage"] != stage:
+            why = "授权单只覆盖阶段 %s，当前是 %s" % (g["stage"], stage)
+            continue
+        used, cap = int(g.get("used") or 0), int(g.get("max_writes") or 0)
+        if cap and used >= cap:
+            why = "授权单的 %d 条额度已用完" % cap
+            continue
+        if best is None or float(g.get("created_at_epoch") or 0) > float(best.get("created_at_epoch") or 0):
+            best, best_path = g, path
+    return best, best_path, ("" if best else why)
+
+
+def consume_grant(path: str) -> dict:
+    """用掉一次额度。失败不影响已发生的写——账记不上比写重复更安全。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            g = json.load(f)
+        g["used"] = int(g.get("used") or 0) + 1
+        g["last_used_at"] = _fmt_time(time.time())
+        atomic_write_json(path, g)
+        return g
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------- approve
 
 
@@ -310,19 +402,51 @@ def cmd_approve(a) -> int:
     with open(dry_path, encoding="utf-8") as f:
         dry = json.load(f)
     ttl = max(60, int(a.ttl))
+    scope = (getattr(a, "scope", "") or "single").strip().lower()
+    if scope not in SCOPE_HUMAN:
+        return blocked("WRITE_BLOCKED_NO_APPROVAL",
+                       "scope 只能是 single / count / stage / task，拿到的是 %r" % scope)
+    cap = int(getattr(a, "max_writes", 0) or 0) or DEFAULT_MAX_WRITES.get(scope, 1)
+    if scope == "single":
+        cap = 1
+    expires_at = time.time() + ttl
+    expire_time = _fmt_time(expires_at)
+    stage = getattr(a, "stage", "") or dry.get("stage_id") or ""
+
     rec = {
         "approval_id": a.approval,
         "approved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "expires_at": time.time() + ttl,
+        "expires_at": expires_at,
+        # 业务字段（用户指定命名）：给人看的是人话时间，程序看的是 expires_at
+        "expire_time": expire_time,
         "ttl": ttl,
         "approver": a.by or "human",
+        "scope": scope,
+        "max_writes": cap,
+        "stage": stage,
         "target_url_sha256": dry.get("target_url_sha256"),
         "prompt_sha256": dry.get("prompt_sha256"),
-        "note": "批准只对这一组 (URL hash, prompt hash) 生效。",
+        "scope_human": grant_scope_human(scope, cap, expire_time, stage),
+        "note": "single 只对这一组 (URL hash, prompt hash) 生效；"
+                "count/stage/task 是「授权单」，按条数与失效时间核销。",
     }
     atomic_write_json(os.path.join(run_dir, "writes", "%s.approval.json" % a.approval), rec)
+
+    grant_path = ""
+    if scope != "single":
+        g = dict(rec)
+        g.update({"grant_id": "g-%s" % sha16("%s|%s|%s" % (a.approval, scope, time.time())),
+                  "created_at_epoch": time.time(),
+                  "used": 0,
+                  "platform": dry.get("platform") or ""})
+        grant_path = os.path.join(grants_dir(run_dir), "%s.json" % g["grant_id"])
+        atomic_write_json(grant_path, g)
+
     print(json.dumps({"ok": True, "approval_id": a.approval, "ttl": ttl,
-                      "expires_at": rec["expires_at"]},
+                      "expires_at": rec["expires_at"], "expire_time": expire_time,
+                      "scope": scope, "max_writes": cap,
+                      "grant_file": os.path.relpath(grant_path, run_dir) if grant_path else "",
+                      "what_this_allows": rec["scope_human"]},
                      ensure_ascii=False, indent=2))
     return 0
 
@@ -526,30 +650,50 @@ def cmd_send(a) -> int:
         return blocked("WRITE_BLOCKED_MODE_DRY_RUN",
                        "STARPILOT_WRITE_MODE=%s" % write_mode(),
                        {"approval_id": a.approval, "mode": write_mode()})
-    rec, why = load_approval(run_dir, a.approval)
-    if rec is None:
-        return blocked("WRITE_BLOCKED_NO_APPROVAL", why, {"approval_id": a.approval})
 
     st = wa.load_state(wa_state_path(root, a.state))
     p = platforms.get(a.platform or st.get("platform"))
     if not p.get("verified"):
         return blocked("WRITE_BLOCKED_PLATFORM_UNVERIFIED",
-                       "平台 %s 未实测" % p.get("key"), {"approval_id": a.approval})
+                       "平台 %s 未实测" % p.get("key"), {"approval_id": a.approval},
+                       risk=riskmod.classify("platform_unverified"))
     if p.get("write_method") not in allowed_write_methods(p):
         return blocked("WRITE_BLOCKED_WRITE_METHOD",
                        "平台 %s 只允许 %s" % (p.get("key"), allowed_write_methods(p)),
-                       {"approval_id": a.approval})
+                       {"approval_id": a.approval},
+                       risk=riskmod.classify("write_method"))
 
     if dry.get("platform") and p.get("key") != dry.get("platform"):
         return blocked("WRITE_BLOCKED_TARGET_MISMATCH",
                        "平台不一致：计划 %s，当前 %s" % (dry.get("platform"), p.get("key")),
-                       {"approval_id": a.approval})
+                       {"approval_id": a.approval},
+                       risk=riskmod.classify("platform_mismatch"))
 
+    # ---- 地址漂移：分「换参数 / 换对话 / 跨站」三级，只有低风险才放行 ----
     url = st.get("url") or ""
-    if sha16(url) != dry.get("target_url_sha256"):
-        return blocked("WRITE_BLOCKED_TARGET_MISMATCH",
-                       "当前 URL hash %s != 计划 %s" % (sha16(url), dry.get("target_url_sha256")),
-                       {"approval_id": a.approval})
+    url_sha = sha16(url)
+    drift = None
+    if url_sha != dry.get("target_url_sha256"):
+        drift = riskmod.classify("url_drift", bound_url=dry.get("target_url") or "",
+                                 current_url=url)
+        if not drift.get("allow"):
+            return blocked("WRITE_BLOCKED_TARGET_MISMATCH",
+                           "当前 URL hash %s != 计划 %s" % (url_sha, dry.get("target_url_sha256")),
+                           {"approval_id": a.approval, "bound_url": dry.get("target_url"),
+                            "current_url": url}, risk=drift)
+        # 低风险（同一条对话，只是 query 变了）：按计划的 hash 核销授权，
+        # 真实地址由 guard 再核一次域名 —— 两层都过才写。
+        url_sha = dry.get("target_url_sha256")
+
+    # ---- 批准：先认单条批准，再认覆盖它的授权单（一次授权、中途不打扰）----
+    rec, why = load_approval(run_dir, a.approval)
+    grant, grant_path = None, ""
+    if rec is None:
+        grant, grant_path, gwhy = find_grant(
+            run_dir, url_sha, p.get("key") or "", dry.get("stage_id") or "")
+        if not grant:
+            return blocked("WRITE_BLOCKED_NO_APPROVAL", "%s；%s" % (why, gwhy),
+                           {"approval_id": a.approval})
 
     text = ""
     pf = dry.get("prompt_file") or ""
@@ -563,18 +707,21 @@ def cmd_send(a) -> int:
     if sha16(text) != dry.get("prompt_sha256"):
         return blocked("WRITE_BLOCKED_TARGET_MISMATCH",
                        "正文已变（hash %s != 计划 %s）" % (sha16(text), dry.get("prompt_sha256")),
-                       {"approval_id": a.approval})
+                       {"approval_id": a.approval},
+                       risk=riskmod.classify("prompt_drift"))
 
     sid = wa.ensure_session(st, wa_state_path(root, a.state))
     snap = dom_snapshot(p, sid)
     ok, why = guard_ok(snap, url)
     if not ok:
-        return blocked("WRITE_BLOCKED_GUARD", why, {"approval_id": a.approval})
+        return blocked("WRITE_BLOCKED_GUARD", why, {"approval_id": a.approval},
+                       risk=riskmod.classify("guard"))
 
     # ---- 幂等：同指纹已发过就不许再发 ----
     if not a.force and _already_sent(run_dir, dry):
         return blocked("WRITE_BLOCKED_DUPLICATE",
-                       "同 (URL hash, prompt hash) 已发过", {"approval_id": a.approval})
+                       "同 (URL hash, prompt hash) 已发过", {"approval_id": a.approval},
+                       risk=riskmod.classify("duplicate"))
 
     # ---- 真发 ----
     run_state = _load_run_state(run_dir)
@@ -584,6 +731,12 @@ def cmd_send(a) -> int:
     res["send_id"] = getattr(a, "send_id", "") or ""
     res["mode"] = write_mode()
     res["write_method"] = p.get("write_method")
+    if grant:
+        # 这次是靠「授权单」放行的，不是逐条批准 —— 留痕，便于事后解释为什么没问你
+        res["grant_id"] = grant.get("grant_id")
+        res["grant_scope"] = grant.get("scope")
+    if drift is not None:
+        res["risk_note"] = drift.get("human")
     if not res.get("ok"):
         # 失败**不**产生 result.json（闸门语义：没成功就没产物）
         res["result_file"] = None
@@ -593,6 +746,8 @@ def cmd_send(a) -> int:
         return 4
     result_path = os.path.join(run_dir, "writes", "%s.result.json" % a.approval)
     atomic_write_json(result_path, res)
+    if grant_path:
+        consume_grant(grant_path)   # 只有真发成功才核销额度
     res["result_file"] = os.path.relpath(result_path, run_dir)
     append_journal(run_dir, _event(run_dir, a.round, dry, res,
                                    send_id=getattr(a, "send_id", "") or ""))
@@ -745,10 +900,18 @@ def main() -> int:
     p.add_argument("--stage", default="")
     p.set_defaults(func=cmd_plan)
 
-    p = add_pl(sub.add_parser("approve", help="批准一份计划"))
+    p = add_pl(sub.add_parser("approve", help="批准一份计划（可一次覆盖整个任务）"))
     p.add_argument("--approval", required=True)
-    p.add_argument("--ttl", type=int, default=600)
+    p.add_argument("--ttl", type=int, default=600, help="多少秒后失效")
     p.add_argument("--by", default="human")
+    # 授权范围：一次授权覆盖到哪。用户裁定「一次授权覆盖」= task，
+    # 但必须同时给出条数上限与失效时间，否则等于无限放权。
+    p.add_argument("--scope", default="single",
+                   choices=["single", "count", "stage", "task"],
+                   help="single=只这一条；count=接下来 N 条；stage=本阶段；task=整个任务")
+    p.add_argument("--max-writes", type=int, default=0,
+                   help="条数上限（0=按 scope 取默认：count 5 / stage 50 / task 200）")
+    p.add_argument("--stage", default="", help="scope=stage 时绑定的阶段名")
     p.set_defaults(func=cmd_approve)
 
     p = add_pl(sub.add_parser("send", help="按批准发一条（缺省被闸门挡住）"))

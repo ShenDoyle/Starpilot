@@ -27,7 +27,9 @@ import sys
 PLACEHOLDERS = {"", "-", "—", "（不超过 30 字，说清「谁、在什么场景下、要什么结果」）",
                 "待确认 / 已确认 / 部分确认（不算通过）",
                 "（transcript 相对路径，如 `docs/requirements/<需求名>-transcript.md`）",
-                "（逐步确认 / 直接执行——记用户原话，二选一；「首次人工确认门」的裁定结果，未确认不许进 LOOP）"}
+                "（逐步确认 / 直接执行——记用户原话，二选一；「首次人工确认门」的裁定结果，未确认不许进 LOOP）",
+                "（整个任务 / 本阶段 / 接下来 N 条；直接执行模式必填，逐条批准就写「逐条」）",
+                "（直接执行模式必填：无人看着时遇到岔路怎么选。见下方「无人值守四问」，**答这四问，不要写作文**）"}
 
 SECTION_HEADINGS = {
     "已明确": r"^##+\s*一、已明确",
@@ -102,7 +104,8 @@ def _basic_fields(text: str) -> dict:
     for line in text.splitlines():
         cells = _cells(line)
         if len(cells) >= 2 and cells[0] in ("项目名", "提出人", "提出日期", "一句话目标",
-                                            "原始往来记录", "执行模式"):
+                                            "原始往来记录", "执行模式",
+                                            "授权范围", "无人值守方案"):
             out[cells[0]] = cells[1]
     return out
 
@@ -110,10 +113,20 @@ def _basic_fields(text: str) -> dict:
 # 执行模式是固定二选一词表（SKILL §2.5 首次人工确认门）：
 # 只认这两个词根，其余写法一律不认（fail-closed）。
 EXEC_MODE_WORDS = ("逐步确认", "直接执行")
+# 人话 → 机器码：agent 与编排器只认机器码，避免「大概那个意思」被当成授权。
+EXEC_MODE_CANON = {"逐步确认": "step", "直接执行": "auto"}
 
 
 def _exec_mode_ok(val: str) -> bool:
     return any(w in (val or "") for w in EXEC_MODE_WORDS)
+
+
+def exec_mode_of(val: str) -> str:
+    """卡片上的执行模式原文 → "step" / "auto"；认不出返回 ""（不许猜）。"""
+    for word, code in EXEC_MODE_CANON.items():
+        if word in (val or ""):
+            return code
+    return ""
 
 
 CONFIRM_WORDS = ("已确认", "待确认", "部分确认", "未确认", "已授权", "授权")
@@ -161,6 +174,21 @@ def validate(text: str) -> dict:
                   "detail": "「执行模式」=%r 不在固定二选一（逐步确认 / 直接执行）词表里："
                             "不认其他写法" % mode})
 
+    # 直接执行 = 人不在场。这时候「遇到岔路怎么选」和「授权覆盖到哪」必须**事先**写死，
+    # 否则 agent 只能要么自己乱决定、要么中途停下来问——两种都是用户不要的。
+    scope_val = (basic.get("授权范围") or "").strip()
+    autonomy = (basic.get("无人值守方案") or "").strip()
+    if exec_mode_of(mode) == "auto":
+        if not scope_val or scope_val in PLACEHOLDERS:
+            v.append({"code": "SCOPE_MISSING", "section": "基本信息",
+                      "detail": "直接执行模式下「授权范围」为空：一次授权要覆盖到哪"
+                                "（整个任务 / 本阶段 / 接下来 N 条）必须写明，否则等于无限放权"})
+        if not autonomy or autonomy in PLACEHOLDERS:
+            v.append({"code": "AUTONOMY_MISSING", "section": "基本信息",
+                      "detail": "直接执行模式下「无人值守方案」为空：无人看着时遇到两条路都能走"
+                                "该怎么选、要不要装东西、外部服务挂了怎么办——"
+                                "先答 templates/confirm-gate.md 的「无人值守四问」再填这一格"})
+
     if not secs["已明确"]:
         v.append({"code": "CLARIFIED_EMPTY", "section": "一、已明确",
                   "detail": "没有任何一条「已明确」要求：这张卡片还没开始填"})
@@ -202,6 +230,9 @@ def validate(text: str) -> dict:
         "stats": {
             "raw_brief": 1 if raw_brief and raw_brief not in PLACEHOLDERS else 0,
             "exec_mode": 1 if mode and mode not in PLACEHOLDERS and _exec_mode_ok(mode) else 0,
+            # 机器码版本：编排器读这个（step=逐步确认 / auto=无人值守），
+            # exec_mode 的 0/1 是给「卡片是否合格」用的，别混用。
+            "exec_mode_code": exec_mode_of(mode),
             "clarified": len(secs["已明确"]),
             "pending": len(secs["未明确"]),
             "conflicts": len(secs["有冲突"]),

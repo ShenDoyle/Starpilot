@@ -1,4 +1,4 @@
-# orchestrator 契约（O0 基线冻结）· **v1.4**
+# orchestrator 契约（O0 基线冻结）· **v1.5**
 
 > 本文件是**实现规格**，不是愿望清单。`scripts/orchestrator.py` / `scripts/write_gate.py` 必须逐条对上。
 > 冻结日期：2026-10-29　·　来源：网页 AI（Kimi）第 1 轮规划回复 `runtime/wa/turn-001-reply.md`
@@ -39,6 +39,8 @@ ChatGPT 按硬规则 1 纪律搁置（`deferred_rule1`）——这些是**平台
 | **v1.3** | **2026-10-29** | ① **§2.6 对话归属门禁**：bind 判「这条对话归谁」（`conv_id` + `msg_count` + `conv_origin` 三元），首次绑到非空对话默认拒绝（`foreign_conv`），`--reuse-existing` 显式豁免；② bind 前置**读数稳定等待**（懒加载平台的 `msg_count=0` 可能是「加载中的假空」，连续 3 次相同才判）；③ `new_chat` 落点必须「无会话 id + 0 条消息」，入口被重定向回已有对话直接拒绑；④ 发送首轮跳转后落盘 `conv_id` + `conv_origin=new_chat`；⑤ `bind --reuse` 校验 conv_id 与 conv_origin 齐全，缺一即拒；⑥ gemini 补 `new_chat_url=/app`（home 会重定向回最近对话） | 用户实测反馈：项目被绑到用户正在聊的 Gemini 对话（`L-GEMINI-FOREIGN-CONV-ff592c`） |
 
 | **v1.4** | **2026-10-30** | ① **§2.7 首次人工确认门与执行模式**：INIT 出口扩为三条件（+执行模式），卡片「执行模式」字段机器校验（`EXEC_MODE_MISSING` / `EXEC_MODE_INVALID`，词根二选一 fail-closed）；直接执行模式下仍必须停的三条例外；**三轮审查法则**（同性质审查第 3 轮必须当面问网页 AI 是否继续）；② **§2.8 平台占用锁**：`wa.py with_platform_lock` 装饰 bind/send/clear，锁文件 `~/.starpilot/locks/lock-<平台>-<key>.json`（跨项目可见），被占 rc=9 报持有者、不排队死等，语义与 state 单写锁同源（死进程/超时/坏锁接管），`wa.py plock` 查看/强拆，`STARPILOT_LOCK_KEY` 按浏览器 profile 隔离 | 用户实测反馈：① agent 每步强等人工确认（未裁定过执行模式）；② 两任务共用 ChatGPT 抢同一 tab、触发风控（回复加载不出、误判对话异常自动跳转） |
+
+| **v1.5** | **2026-10-30** | ① **§2.9 授权范围与 `expire_time`**：`scope=single|count|stage|task`（默认上限 1/5/50/200），授权单落 `writes/_grants/`，含人话 `scope_human`；过期或用完回落到需批准，不静默降级；② **§2.10 越界风险分级**：`risk.py` low 放行留痕 / medium 换替代方案继续 / high 停下转人工，拦截输出带人话；③ **§2.11 mid-loop 模式切换**：`orchestrator.py mode --set step|auto --reason`，下一轮生效、不重开 run、journal 留痕；④ **§2.12 步骤回执与完成度判定权**：每轮反馈必带「它让我做的/我实际做的/一致？/差异原因」四列，完成度由网页 AI 判定，auto≠不问架构师，无回执不进下一轮；⑤ **§2.13 读正文剔除思考过程**：`READ_IGNORE_COMMON` + 平台 `sel.read_ignore`，克隆节点剔除，probe 与 read 同口径；⑥ INIT 出口改为「预期完整性」而非轮次硬约束（信息一次给足即不必再往返） | 用户六条规划反馈：不反复打扰、一次授权、越界先保完成、中途可改、每步由 webAI 判完成度、弱引导（confirm-gate 人话确认单）|
 
 ### v1.0 冻结证据（历史，保留备查）
 
@@ -341,6 +343,115 @@ tab、对话打架、触发平台风控（2026-10-29 实测：ChatGPT 回复加�
 
 ---
 
+## 2.9 授权范围与 `expire_time`（v1.5 新增）
+
+**背景**：写闸门原先只有「单条批准 + TTL」，直接执行模式下每条消息都要人点一次——
+与「不反复打扰」直接冲突。用户裁定：**一次授权可以覆盖整个任务**，但范围、条数、
+失效时间必须写在明面上。
+
+**规则**（实现：`write_gate.py` 的 grant 层）：
+
+| scope | 覆盖 | 默认条数上限 |
+|---|---|---|
+| `single` | 只这一条（内容一字不改，发完失效） | 1 |
+| `count` | 接下来 N 条 | 5 |
+| `stage` | 本阶段全部（绑定 `stage` 名） | 50 |
+| `task` | 整个任务全部 | 200 |
+
+1. 授权单落 `runs/<run_id>/writes/_grants/`，字段：`grant_id` / `approval_id` /
+   `scope` / `max_writes` / `stage` / `expires_at`（程序用）/ **`expire_time`**（人话时间，
+   用户指定字段名）/ `scope_human`（一句话讲清「这次批准包含什么」）。
+2. 每次真实写前 `find_grant` 找一张**能覆盖**这次写的授权单：URL hash 与平台必须匹配；
+   `stage` 授权单必须与当前阶段一致；条数用完 / 过期 → 找不到，回到 `WRITE_BLOCKED_NO_APPROVAL`，
+   **不静默降级为逐条批准**。
+3. `expire_time` 到点即失效，**不存在「批准一直有效」**；要续权重新 `approve --scope`。
+4. `approve` 输出必须带 `scope_human`（人话），人不需要读 JSON 才知道自己批了什么。
+
+**验收**：`tests.test_grant_risk`（scope 四种粒度、过期、条数上限、stage 错配）。
+
+---
+
+## 2.10 越界请求风险分级（v1.5 新增）
+
+**背景**：计划外请求一律硬拒会卡死任务；一律放行等于没有边界。用户裁定：
+**安全且无害的可以通过；风险大的换方案先把项目做完，不许硬停。**
+
+**规则**（实现：`scripts/risk.py`，返回值带 `level` / `allow` / `human` / `alternative`）：
+
+| level | 判据 | 动作 |
+|---|---|---|
+| `low` | 只读、项目目录内、不涉凭证、不装东西 | 放行 + journal 留痕 + 反馈报备一行 |
+| `medium` | 装依赖、写项目外、调外部服务 | **不执行原请求**，改用 `alternative` 继续推进 |
+| `high` | 涉凭证/密钥、删除、跨站跳转、身份权限变更 | 停下转 `PAUSED_HUMAN`，给替代方案与理由 |
+
+1. 拦截输出必须同时给 `risk.level` 和 `risk.human`（一句人话），让人不做技术解读也能判断。
+2. `medium` 的处理不是「失败」：它要带替代方案继续，任务不许因此停摆。
+3. `high` 只有一种出口：人拍板。agent 不得自行「先做了再说」。
+
+**验收**：`tests.test_grant_risk`（分级判据、替代方案非空、跨站判 high）。
+
+---
+
+## 2.11 mid-loop 执行模式切换（v1.5 新增）
+
+**背景**：一开始选错模式就整场报废不合理。用户裁定：**中途可以打断、重新选路线**。
+
+**规则**：
+
+1. `orchestrator.py mode --set step|auto --reason "<用户原话>"`：随时可切，写
+   `exec_mode` 到 run state，并把切换记进 journal（`action=mode_switch`，含 reason）。
+2. 切换**下一轮立即生效**，不要求重开 run、不重开对话（硬规则 1）。
+3. `step` 模式在 `ROUND_DONE` 转 `PAUSED_HUMAN`（`checkpoint=round_review`）；
+   `auto` 模式直接进下一轮，只在三条例外或 CLOSE 时停。
+4. 打断流程（SKILL §2.5.1）：停手 → 落现场（`action=interrupt`）→ 判断是「需求变了」
+   （回 §2 重过需求门）还是「只是换盯法」（`mode --set`）→ 接着走。
+5. `mode` 命令本身也要过平台锁吗？**不要**：它不碰浏览器，只改本地 state。
+
+**验收**：`tests.test_mode_switch`（auto 不停 / step 停 / 切换后行为翻转 / reason 留痕）。
+
+---
+
+## 2.12 步骤回执与完成度判定权（v1.5 新增）
+
+**背景**：网页 AI 看不到本地屏幕，它对「这一步做成了什么样」的全部认知来自 agent 的反馈。
+只写「已完成」会让它在错误前提上继续规划，错误逐轮放大。
+
+**规则**：
+
+1. 每轮反馈必须含**步骤回执**表：`它让我做的` / `我实际做的` / `一致？` / `差异原因`。
+   ⚠️/❌ 行必须写清差异，不许合并成一行，不许全 ✅ 而无产物路径。
+2. **完成度判定权归网页 AI**：agent 不得自己宣布阶段完成；偏离由它判定并改下一步方案。
+3. **`auto` ≠ 不问架构师**：auto 只是不找人工，每轮仍是「执行 → 回执 → 等下一步」。
+   **无回执不得进下一轮**（连做多步再汇报 = 让架构师在多个盲区上同时规划）。
+4. agent 自己察觉偏离 → 写进「问题 / 偏差」，照旧执行当前指令，不擅自改方案；
+   若属「两种做法都合理且选错返工」→ 按 §2.7 第 3 条例外处理。
+5. 同一步连续 3 轮判「未完成」→ 触发三轮法则（§2.7 第 5 条），当面问判据是否有问题。
+
+**验收**：`templates/feedback.md` A 段含该表；`SKILL.md` §4.8；交接清单含「步骤回执写全」。
+
+---
+
+## 2.13 读正文剔除思考过程（v1.5 新增）
+
+**背景**：Kimi 实测把推理过程与推荐提问渲染进末条气泡，`wa.py read` 读回 7103 字，
+前 50 行是英文推理，真正答复从第 3 节开始——agent 会把推理当指令执行。
+
+**规则**：
+
+1. `platforms.READ_IGNORE_COMMON` 定义跨平台默认黑名单（思考块、工具调用折叠块、
+   推荐提问列表等）；平台可在 `sel.read_ignore` 追加自己的选择器（Kimi 已加
+   `.toolcall-flow` / `.toolcall-rollup__summary-clp`）。
+2. 剔除在**克隆节点**上做（`cloneNode(true)` 后 `remove()`），不改真页面。
+3. `read_ignore_of(p)` 对「通用 + 平台」去重合并；`js_read_last` 与 `js_probe` 的
+   `lastText` 走同一份黑名单——**probe 与 read 的口径必须一致**，否则等待判据与
+   正文长度打架（会误判「文本还在增长」）。
+4. 剔除后正文为空 → 不返回空字符串假装成功，按「读不到」报错。
+
+**验收**：`tests.test_read_noise`（黑名单注入、去重、哨兵替换、空正文报错）；
+真机：Kimi 同一回复剔除前 7103 字 → 剔除后只剩正文。
+
+---
+
 ## 3. 恢复、预算、人工卡点、幂等
 
 ### 3.1 预算（默认值，可被 `state/current_goal.md` 覆盖）
@@ -367,12 +478,23 @@ tab、对话打架、触发平台风控（2026-10-29 实测：ChatGPT 回复加�
 5. **恢复不改变 `fail_streak`**：崩溃既不算失败也不算成功（无结论），
    清零它会绕过「两次失败停」，加一它会冤枉一次崩溃。见 §2.5。
 
-### 3.3 人工卡点（四处，命中即 `PAUSED_HUMAN`，等人）
+### 3.3 人工卡点（命中即 `PAUSED_HUMAN`，等人）
+
+**固定卡点**（与执行模式无关，一律停）：
 
 1. **绑定后首跑前** —— 人工确认目标与对话地址。
-2. **首次真实写前** —— `DRY_RUN_OK → APPROVED` 这步必须有人批。
+2. **首次真实写前** —— `DRY_RUN_OK → APPROVED` 这步必须有人批；若已有覆盖本次写的
+   授权单（§2.9），则由授权单放行，不再逐条停。
 3. **恢复不确定时** —— `sent_unconfirmed` 且 DOM 复核不出结论。
 4. **两次失败 / 预算耗尽时** —— 转 `HANDOFF`，等人接手。
+5. **`risk.level=high` 的越界请求** —— 见 §2.10，不自行决定。
+
+**模式相关卡点**：
+
+| 卡点 | 触发条件 | checkpoint 值 |
+|---|---|---|
+| 每轮结束复核 | `exec_mode=step` 时 `ROUND_DONE` | `round_review` |
+| 交付验收 | 网页 AI 裁定「可交付」→ CLOSE | `delivery` |
 
 ### 3.4 幂等
 
