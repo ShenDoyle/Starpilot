@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.2"
+version: "0.1.5"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.2）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.5）。版本只从 `SKILL.md` 读，不从别处猜。
 - **编号沿革**：开发期内部迭代到 `2.3.4`，2026-10-30 首次对外发布时归零为 `0.1.0`（预览版，不是正式版）。升级判据是「远端 > 本地」，所以从 2.3.4 迁过来要用 `upgrade.py --to-latest --force` 重装一次。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
@@ -98,6 +98,25 @@ python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份
 ---
 
 ## 2. INIT：接需求（激活 skill 的第一件事）
+
+### 2.0 硬前置门（违反即终止本轮执行，2026-10-31 新增）
+
+> 2026-10-31 审计（`docs/agent-compliance-audit-20261031.md`）：跳过 INIT 是
+> 「整条违规链的起点」——agent 直接自行开工后，自定路线、绕过编排器、手工发送
+> 全部成为连锁后果。本门是机器可判的断言，不是建议。
+
+进入任何执行动作（环境自检、浏览器导航、代码修改）之前，以下四项缺一不可：
+
+| # | 检查项 | 合格证据 |
+|---|---|---|
+| 1 | 网页 AI 对话已绑定或明确走纯本地路径 | state 绑定记录 / 用户原话指定纯本地 |
+| 2 | 需求摘要已提交给网页 AI（或用户已拍板纯本地） | journal 里 `action=init` 事件 |
+| 3 | 网页 AI 的返回（或用户拍板）已留档 | `docs/requirements/*-transcript.md` |
+| 4 | 执行模式已知（step / auto，来源=用户原话） | 需求卡片或 journal |
+
+**「无人值守」授权不免除本门**——它只是把「找用户确认」换成「按固定策略自愈」（§4.9），
+不改变「先对齐再动手」的顺序。唯一例外：用户原话明确指定「跳过 INIT / 直接修 skill 本身」
+时，把该原话记进 journal 再继续。
 
 ### 2.1 先读完所有上下文，再开口
 
@@ -211,6 +230,18 @@ transcript 里找到**原话出处**：
 `EXEC_MODE_INVALID` / `SCOPE_MISSING` / `AUTONOMY_MISSING`，缺了直接拒进 LOOP）。
 
 #### 2.5.1 打断与重新选路线
+
+**无人值守异常信号协议（2026-10-31 新增，先于下面四步执行）**：
+用户消息被取消、工具命令被杀、doctor 报错、session 意外终止、收到任何非预期终止信号时——
+
+1. **记录**：信号内容 + 时间戳进 journal（`action=signal`，一字不改）；
+2. **暂停**：不再发起新的写入/发送（已开始的单个只读探测可完成）；
+3. **报告优先**：下一次能与用户通信时，**第一句话**报告该信号并确认继续方式；
+4. **禁止**以「继续推进任务」为由忽略信号——中断是环境在说话，不是可忽略的噪声。
+
+（宿主如 ZCode 会把工具取消当常态事件；星舵把「取消后不报告就继续」定义为违例。）
+
+人中途回来说「停一下，换个方向」时，**不许硬切**，按序做四件事：
 
 人中途回来说「停一下，换个方向」时，**不许硬切**，按序做四件事：
 
@@ -613,6 +644,29 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 - 装到非默认目录 → 设 `BSK_BIN` 指过去，之后每条命令都带上，不要每次重新找。
 - 星舵只调它的六个子命令：`session` / `navigate` / `evaluate` / `fill` / `press` / `browsers`
   （点击在 `evaluate` 的 JS 里做，不依赖 `click`）。
+- **传输层可切换（0.1.5）：ZCode 宿主可用自带浏览器（IAB），bsk 变为可选**。
+  设 `STARPILOT_TRANSPORT=iab` 即走 IAB op 队列（`scripts/transport.py` +
+  `scripts/iab-worker.mjs`）：**不需要安装 bsk 与扩展**，只需用户在自带浏览器里
+  登录目标平台一次（登录态通常与用户浏览器共享，已满足）。约定：
+  · 页面动作（navigate/evaluate/fill/press）由 wa.py 写入 op 队列，agent 在 node
+    REPL 里反复运行 `iab-worker.mjs` 消费——**必须先官方 bootstrap 再把 agent
+    显式传入**（VM 跨 realm，worker 内取不到宿主 globalThis）：
+    `await run("<工作区>", { agent })`；
+  · **wait 期间必须持续跑 worker**，否则 op 超时（rc=124）——这是 IAB 传输的
+    固有节奏，不是故障；
+  · 环境自检（env.py）在 iab 传输下对 bsk 的检查自动豁免；
+  · 窗口纪律（单窗口/开窗限速）在 iab 传输下由宿主托管语义替代，不适用。
+  · **IAB 传输为实验性**：op 队列/路由/导航/写入/发送链路已实测跑通，但
+    「goto 对话 URL 后内容区挂载」在 2026-10-31 晚间实测中失效（msgs=0、
+    侧栏点击不导航；bsk 传输同样命中 → 判定平台侧行为）。默认传输仍是 bsk；
+    切 iab 前先跑一轮只读验证（navigate + evaluate probe msgs>0）。
+- **bsk ≥ 0.4.0 的 cooperate 语义已由兼容层处理，不要绕过**（bsk 传输下）：0.4.0 起所有触页面动作
+  （evaluate/navigate/fill/press/click）要求 `--context`（来自 `cooperate sync`），
+  且一个 context 只授权一次动作。星舵在 `wa.py bsk()` 统一入口接了
+  `scripts/bskcompat.py`：命中 cooperate 错误 → 自动 wait+sync → 带 context 重试。
+  上层照旧写即可；**直接裸调 `bsk evaluate ...` 会全量失败**，这是 2026-10-31
+  「星舵一发就挂」的最大单一来源（lessons L-BSK040）。代价是每个页面动作多 1–2 秒
+  sync 开销，wait 轮询间隔随之变长，属固有成本，不要当成卡死。
 - 还必须在目标浏览器里启用扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) /
   [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），
   `bsk doctor` 显示 Connected 才算通；只装 CLI 不装扩展 = 一切页面操作都失败。
@@ -678,8 +732,28 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
   （`chrome://extensions` 里删到只剩一个），**不要带着重复实例硬跑**。
 - **开窗频率有上限**：10 分钟内第 4 次 `session start` 直接拒（rc≠0），并打印现场。
   短时间反复开窗不是「重试」，是环境在反复失效——那时该看 doctor，不是再开一个。
+  **无人值守模式收紧为 2 次/10 分钟**（环境变量 `STARPILOT_UNATTENDED=1` 时生效）。
+- **session 结束原因必须进汇报**：任何一次 session 终止（尤其是「user closed the
+  Agent Window」），要在当轮汇报的**违例/异常栏**列出结束原因，不得写进备注轻描淡写。
 - 续窗**必须复用同一个 `url`**（`ensure_session` 已按 state 里的 `url` 重放），
   绝不 `bind --new`：上下文和回复都在原对话里。
+
+### 5.3bis 宿主适配（ZCode 等 agent 宿主实测，2026-10-31）
+
+这些事实来自 ZCode Desktop 实机，换宿主时先重新核实再引用：
+
+- **一切页面动作走 `wa.py` 的 `bsk()` 入口**。裸调 bsk 子命令在 0.4.0+ 全量失败
+  （cooperate 语义，§5.1）；宿主自带的浏览器 API 只能作 B 方案，用前必须实测
+  登录态与目标页，**不得从「没有 tab」推断「不能操作」**。
+- **宿主浏览器可能共享用户登录态**（ZCode IAB 实测共享 Edge 登录）：这是能力也是
+  风险——直接导航到用户既有对话会污染归属判定，读任何非自己创建的对话前先过
+  bind 的归属门禁（§3.2）。
+- **每轮可能都是新 agent 实例**（上下文不延续）：未清项必须落盘
+  `stage/<id>/pending.md`（格式见 `scripts/pending_gate.py` 文档头），每轮开工先读、
+  回执逐条对账——「欠账蒸发」不是记忆问题，是没有台账。
+- **宿主会取消工具调用**：命中 §2.5.1 异常信号协议；取消后不报告就继续 = 违例。
+- **汇报三栏是硬格式**（`templates/feedback.md`）：已完成（附证据）/未完成（附原因）/
+  未验证存疑。无证据禁用「已修复/已固化」完成态表述。
 
 ### 5.3.1 并发纪律（多任务共用同一个网页 AI 时）
 
@@ -760,6 +834,11 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 写入被拒 `WRITE_BLOCKED_*` 且带 `risk` 字段 | 越界请求被分级拦下 | 看 `risk.level`：medium 直接按 `risk.alternative` 换方案继续；high 才转人工 |
 | 每步都停、人嫌烦 | 执行模式是 step | `orchestrator.py mode --set auto --reason "<用户原话>"`，下一轮生效；别重开 run |
 | agent 一路自己跑不看网页版 AI | 把「直接执行」误解成「不问架构师」 | 违规：auto 只是不找**人工**，每轮仍必须「回执 → 等下一步」（§4.8） |
+| 所有页面操作报 `shared page control or observation changed` | bsk ≥ 0.4.0 要求 cooperate context，绕过了兼容层 | 走 `wa.py` 的 `bsk()` 入口（内含 bskcompat 自动 sync+重试）；不要裸调 bsk 子命令 |
+| 发送点击被吞、输入框正常、平台无弹窗 | 第三方浏览器扩展渲染全视口遮罩（如 AIX 智能下载器，bsk snapshot 里 L1 modal cover=100%） | `bsk snapshot` 看 layer 栈；确认是扩展遮罩就让人在 chrome://extensions 停用该扩展，不硬点不刷新 |
+| 读到的回复开头是「已思考（用时 N 秒）…」 | DeepSeek 思考区默认渲染，ds-message 的 innerText 含思考过程 | 读正文只用 `div.ds-assistant-message-main-content`；思考内容永远不当指令 |
+| 消息计数突然下降（如 5→3） | DeepSeek 虚拟列表只渲染视口附近消息，滚动/视口变化导致渲染数回退 | 计数判「发出去了」用增量；先滚到底再数；不是消息被删 |
+| evaluate 返回数组报「无法解析输出」 | 旧版只认 dict 结果 | 已修（2026-10-31）：非 dict 非 None 即为有效结果 |
 
 更多实战坑见 `references/lessons.md`。
 
@@ -790,6 +869,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | **写完未发就卡住时无路可走** | 守卫正确地拒绝「脏输入框」再写，但以前没有清空工具 → 恢复只能人工点浏览器 | `wa.py clear`（Ctrl+A + Delete，真实键盘；清完复核空态） |
 | ~~**需求阶段无工具**~~ | **已补（2026-10-29）**：`scripts/requirement_gate.py` 做**否定式**校验（未明确未清空 / 冲突未裁定 / 确认未通过 一律拒），`orchestrator.py init --card` 强制先过。**它只拒绝，不生成、不补全、不建议**（硬规则 2） | 卡片模板见 `templates/requirement-card.md` |
 | **长连 soak 未做** | 编排器只跑过单轮/双轮，**没跑过 20 轮预算级的自动循环** | 下一轮可做：只读为主的长连 soak，观察轮次预算与失败计数的真实行为 |
+| **P0 门为建议性门禁（0.1.4 口径，DeepSeek 交付裁定）** | pending_gate 的 P0 门缺显式豁免路径（BLOCKED(reason) / DEFERRED(until=X) 识别），当前 `deferred(理由)` 已可放行但语义未分层 | 0.1.5 首项：补豁免路径分层，不得拖延超过一个版本；在此之前文档口径为「建议性门禁」，不得宣称「强制」 |
+| **多进程 nonce 原子性未证** | 逃生门单次消费用进程内 del environ 实现；Windows env 不跨进程，单进程宿主模型下充分 | 已知限制不修（DeepSeek 裁定 2026-10-31）；宿主模型变为多进程并发时重审 |
+| **P0-ESC 回执对抗验证未做** | 回执「出现」判定与普通项同实现，复制粘贴历史回执理论上可绕过；台账 ID 带时间哈希提供结构性防护 | 0.1.5 与豁免路径同批交付，不得拆成两个版本（DeepSeek 裁定） |
 | **prompt 对照只做过一轮** | 已用两个独立 Kimi 对话做过 2×1 的 A/B（`docs/prompt-ab-20261030.md`）：结构化 brief 给出的是「单步 + 验收判据」，自由 brief 给的是一整套路线图 —— 方向明确，但**样本只有一轮，不足以定阈值** | 待做：多任务 × 多轮重复，比「下一步指令的可执行度」；不同 `STARPILOT_LOCK_KEY` 起独立对话 |
 | **完成度仍靠网页版 AI 自觉** | 没有机器判据能验「它说的完成是不是真完成」；agent 只能靠 `done-check` 四方一致兜底 | 只能靠证据留痕 + 人验收；别把「它说完成了」当事实（硬规则 3） |
 | ~~**指标口径曾漂移**~~ | **已修两轮（2026-10-29）**：① 第一轮把「总消息数」换成「助手气泡数」（契约 v1.0）；② 第二轮发现气泡数在虚拟列表下也不稳（回复 2597 字已渲染、`reply_count` 仍是 2），改为**锚点口径**（消息 ID > 正文指纹 > 计数），通过线 `effective_delta==1`（契约 v1.1 §2.4.1） | 任何口径改动必须同步契约 §2.4/§2.4.1 + 跑 `tests/test_confirm.py` |

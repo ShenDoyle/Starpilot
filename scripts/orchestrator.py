@@ -794,6 +794,44 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
             step["action"] = "need_prompt"
             step["stop"] = True
             return step
+        # ---- 未清项两道门（2026-10-31「欠账蒸发」审计后新增）----
+        # ① P0 门：清单里有 open 的 P0 项且本轮 prompt 未引用处理 → 拒进本轮
+        # ② 回执完整性门：每条 open 项必须在 prompt 里显式出现并带状态标记
+        # （只要求「出现」，不要求「成功」——如实报 ❌ 合格，隐身不合格）
+        try:
+            import pending_gate
+            ppath = pending_gate.pending_path_for(
+                root, st.get("stage_id") or "", st.get("run_id") or "")
+            if os.path.exists(ppath):
+                with open(pf, encoding="utf-8") as f:
+                    _ptext = f.read()
+                _pok, _preason = pending_gate.check_p0_gate(ppath, _ptext)
+                if not _pok:
+                    st["last_guard_failure"] = {"reason": _preason,
+                                                "checkpoint": "pending_p0_gate"}
+                    save_run_state(root, st)
+                    journal(root, st, {"action": "pending_gate", "result": "fail",
+                                       "gate": "p0", "reason": _preason})
+                    step["action"] = "pending_p0_gate_failed"
+                    step["detail"] = _preason
+                    step["stop"] = True
+                    return step
+                _rok, _rreason, _rmiss = pending_gate.check_receipt(ppath, _ptext)
+                if not _rok:
+                    _rdetail = _rreason + "：" + ", ".join(_rmiss)
+                    st["last_guard_failure"] = {"reason": _rdetail,
+                                                "checkpoint": "receipt_gate"}
+                    save_run_state(root, st)
+                    journal(root, st, {"action": "pending_gate", "result": "fail",
+                                       "gate": "receipt", "missing": _rmiss})
+                    step["action"] = "receipt_gate_failed"
+                    step["detail"] = _rdetail
+                    step["stop"] = True
+                    return step
+                journal(root, st, {"action": "pending_gate", "result": "ok"})
+        except Exception as _pgerr:  # 门自身坏了不许卡死主流程，但要留痕
+            journal(root, st, {"action": "pending_gate", "result": "error",
+                               "error": str(_pgerr)[:200]})
         rc, res = run_gate(root, ["plan", "--file", pf, "--stage", st.get("stage_id", "")],
                            {"STARPILOT_WRITE_MODE": "dry_run"},
                            state=wa_state_path(root, a.state))

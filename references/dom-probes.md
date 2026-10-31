@@ -161,3 +161,31 @@
    否则 `last_len` 会把按钮字算进去，`wait` 永远等不到「文本稳定」。
 
 接入完整流程（选平台 → 四步接入 → 记忆自测）见 `references/web-ai-platforms.md`。
+
+---
+
+## DeepSeek（2026-10-31 实机复测，bsk 0.4.0）
+
+> 编辑器是 textarea 不是 contenteditable；正文与思考区分离；类名带混淆哈希。
+
+```js
+// 编辑器：写入必须 select + insertText，长度读 .value
+const ta = document.querySelector('textarea');            // placeholder「给 DeepSeek 发送消息」
+ta.focus(); document.execCommand('insertText', false, '...'); len = ta.value.length;
+
+// 发送按钮：div 不是 button；空输入带 --disabled 变体
+div.ds-button--primary.ds-button--circle                  // 生成中同一按钮变形，无独立 stop 类
+
+// 助手正文（不含思考区）——读指令只认这个
+div.ds-assistant-message-main-content
+// ⚠️ div.ds-message 的 innerText 以「已思考（用时 N 秒）」开头，含完整思考过程，不能当正文
+
+// 思考区（默认渲染）
+div.ds-think-content
+
+// 滚动容器（虚拟列表）：先滚到底再计数；渲染数随视口回退（5→3）不是丢消息
+div.ds-virtual-list
+
+// 混淆哈希类（d29f3d7d/_63c77b1/_52c986b…）随时会变，禁止进选择器；
+// 「深度思考/智能搜索」开关是纯 SPAN 混淆类无 aria，无法用稳定选择器定位
+```

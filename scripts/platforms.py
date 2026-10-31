@@ -243,17 +243,32 @@ PLATFORMS = {
         "label": "DeepSeek",
         "home": "https://chat.deepseek.com",
         "verified": True,
-        "notes": "2026-10-29 实测（登录态、发送、等待、读取全链路跑通）。"
+        "notes": "2026-10-29 首测，2026-10-31 复测（登录态、新建对话、发送、等待、读取全链路跑通）。"
                  "**编辑器 = textarea**（placeholder「给 DeepSeek 发送消息」，无 id；"
                  "不是 contenteditable，所以 Range 圈内容会抛错、innerText 恒为空 —— "
                  "必须用 el.select() + insertText，长度读 el.value）；"
                  "**发送按钮 = div.ds-button--primary.ds-button--circle**（不是 button），"
                  "空输入时带 `ds-button--disabled` 类（BEM 变体，旧 isDisabled 正则认不出来）；"
                  "**助手正文 = div.ds-assistant-message-main-content**（不含「已思考」折叠区）；"
+                 "⚠️ 思考区 = div.ds-think-content，**默认渲染**且 div.ds-message 的 innerText "
+                 "**包含思考过程**（实测开头就是「已思考（用时 N 秒）…」）——读正文必须用 "
+                 "ds-assistant-message-main-content，绝不能用 ds-message 的 innerText 当指令；"
                  "**全部消息 = div.ds-message**；**用户消息 = div.ds-message:not(:has(.ds-assistant-message-main-content))**；"
                  "**滚动容器 = div.ds-virtual-list（虚拟列表）**：只渲染视口附近的消息，"
-                 "所以计数口径是「当前渲染出的气泡数」，必须先滚到底再计数；"
-                 "地址形态 /a/chat/s/<uuid>。",
+                 "计数口径是「当前渲染出的气泡数」，必须先滚到底再计数；"
+                 "且**渲染数会随视口回退**（实测同轮 5→3），计数下降不是消息被删；"
+                 "**类名含混淆哈希**（如 d29f3d7d / _63c77b1 / _52c986b），随时会变，"
+                 "任何选择器都只能锚定 ds-* 前缀的语义类，禁止引用哈希类；"
+                 "「深度思考/智能搜索」开关 = 纯 SPAN（混淆类，无 aria），不能用稳定选择器定位，"
+                 "需要切档时让人在页面上点，或按文本内容定位并自担改版风险；"
+                 "**生成中**：发送/停止是同一个 circle 按钮变形（未见独立 stop 类），"
+                 "stop 选择器在 DeepSeek 上未验证命中 —— 等待判定以「末条文本两次采样一致 + "
+                 "输入框可用」为主信号，stop 只作辅助；"
+                 "地址形态 /a/chat/s/<uuid>。"
+                 "另：用户浏览器装了「AIX智能下载器」等第三方扩展时，会渲染**全视口遮罩层**"
+                 "（bsk snapshot 里表现为 L1 modal cover=100%），可能吃掉点击——"
+                 "发送被吞且页面无平台弹窗时，先查扩展遮罩（按 bsk snapshot 的 layer 判断），"
+                 "让人关掉该扩展再继续。",
         "url_pattern": r"/(a/chat/s|chat)/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chat.deepseek.com/a/chat/s/<uuid>；需确认可刷新复现。",
         "write_method": "exec",

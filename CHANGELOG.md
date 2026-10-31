@@ -83,3 +83,49 @@
 **已知缺口**：升级包没有签名和哈希校验；prompt A/B 只做过 2×1 轮；auto 模式没跑过跨天长任务；Claude 平台未标定。完整清单见 `SKILL.md` §8。
 
 **从开发期版本迁过来**：开发期最后编号是 `2.3.4`，公开版从 `0.1.0` 重算，升级器的「远端 > 本地」判据会认为不必升级。用 `python scripts/upgrade.py --to-latest --force` 重装一次即可，`runtime/`、`state/`、`stage/` 不会被覆盖。
+## 0.1.4（2026-10-31，ZCode 宿主服从性针对性优化）
+
+### 变更
+- 新增 §2.0 INIT 硬前置门（绑定/需求提交/留档/执行模式四项缺一禁止执行动作）
+- 新增 §2.5.1 无人值守异常信号协议（记录→暂停→优先报告，禁止忽略）
+- §5.3 窗口纪律：无人值守开窗上限收紧为 2 次/10 分钟（STARPILOT_UNATTENDED=1）；session 结束原因进汇报违例栏
+- ORCHESTRATOR_REQUIRED 熔断：工作区有编排 run 时 wa.py send 直接拒绝（rc=7）
+- 逃生门 STARPILOT_ALLOW_DIRECT_SEND 单次消费、理由必填、强制落账 P0-ESC 违例条目
+- bsk 版本变更首查提示；回执证据段增加「版本核对」行
+- pending_gate 未清项两道门（P0 门 + 回执完整性门）接入 orchestrator READY
+- templates/feedback.md 首段强制三栏台账对账表
+- §5.3bis 宿主适配节（ZCode 实测事实）；lessons 新增 6 条
+- bsk 0.4.0 兼容层 scripts/bskcompat.py（cooperate 上下文自动补齐）
+
+### 强制声明 A（交付裁定，2026-10-31 DeepSeek）
+0.1.4 的 P0 门为建议性门禁，非机器强制。P0 项无法被「引用处理」时（依赖阻塞/外部等待），agent 当前无豁免路径，可能被卡死或诱导伪造引用。豁免路径（BLOCKED/DEFERRED 分层）为 0.1.5 首项，不得拖延超过一个版本。
+
+### 强制声明 B（交付裁定，2026-10-31 DeepSeek）
+逃生门 STARPILOT_ALLOW_DIRECT_SEND 为单次消费、理由必填、强制落账。同进程第二次直发被拒。真实浏览器直发链路未在本版验证（避免制造真实违例），熔断逻辑由单测覆盖。
+
+### 已知限制（0.1.5 待办锁定）
+- 多进程 nonce 原子性未证：单次消费用进程内 del environ 实现，单进程宿主模型下充分，写为已知限制不修（DeepSeek 裁定）
+- P0-ESC 回执对抗验证未做：与 0.1.5 豁免路径同批交付，不得拆成两个版本
+- 回执模板待加「禁止重复粘贴」提示（0.1.5）
+
+## 0.1.5（2026-10-31，IAB 传输层 + 0.1.4 锁定项同批交付）
+
+### 变更
+- **传输层抽象**（用户裁定：ZCode 中星舵默认自带浏览器，不依赖 bsk）：
+  `STARPILOT_TRANSPORT=iab` 时页面动作走 op 队列（`scripts/transport.py`），
+  node 侧 `scripts/iab-worker.mjs` 驱动 ZCode 自带浏览器（Playwright/cua，isTrusted）；
+  bsk 变为可选依赖（`STARPILOT_TRANSPORT=bsk` 默认不变）；用户需在自带浏览器登录一次
+- pending_gate：**BLOCKED(reason) 豁免路径**——P0 门放行但 BLOCKED 项必须在回执三栏出现（豁免不隐身）
+- templates/feedback.md：新增「禁止重复粘贴」提示（0.1.4 交付轮实测踩坑）
+- 0.1.4 锁定项兑现：P0 门豁免路径 + P0-ESC 对抗验证（stale-id 测试）同批交付，无版本拖延
+
+### 测试
+- 新增 6 条（BLOCKED 豁免/对抗 stale-id/op 队列往返/无 worker 超时/参数翻译/iab 路由短路），全量 356 通过
+
+### 已知限制（0.1.5 实测，诚实申报）
+- **IAB 传输的 e2e 部分验证**：op 队列/路由/navigate/fill/evaluate/发送链路已跑通
+  （worker 消费 60+ op 零失败，fill 实测到达编辑器）；但「goto 对话 URL 后内容区
+  挂载」当晚在实测中失效（msgs=0，侧栏点击不导航，bsk 传输同样命中——判定为
+  DeepSeek 平台侧行为，非传输层缺陷）。IAB 传输标记为**实验性**，默认仍为 bsk；
+  生产使用前需在平台正常时段重验。
+- 等待期间必须由 agent 持续运行 worker（每次 MCP 调用是全新内核）。

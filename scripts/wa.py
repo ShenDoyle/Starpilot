@@ -61,17 +61,48 @@ def bsk_path() -> str:
     )
 
 
-BSK = bsk_path()
+def _transport_is_iab() -> bool:
+    try:
+        import transport
+        return transport.current_transport() == "iab"
+    except Exception:
+        return False
+
+
+# 传输层为 iab 时不要求 bsk（自带浏览器驱动）；bsk 传输才需要可执行文件
+BSK = "" if _transport_is_iab() else bsk_path()
 
 
 def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, str]:
+    """底层 bsk 调用统一入口。
+
+    **传输层抽象（0.1.5）**：STARPILOT_TRANSPORT=iab 时页面动作改走 IAB op 队列
+    （scripts/transport.py + scripts/iab-worker.mjs，驱动 ZCode 自带浏览器，
+    不需要 bsk）；默认 bsk 传输行为与 0.1.4 完全一致（cooperate 上下文由
+    bskcompat 自动补齐）。
+    """
+    import transport
+    if transport.current_transport() == "iab":
+        action, params = transport.parse_bsk_args(args)
+        if action is None:
+            return 0, "", ""   # iab 传输下无对应的本地命令（doctor/browsers 等）按健康空值处理
+        if action == "noop":
+            return 0, '{"id": "iab", "browser": "iab"}', ""
+        return transport.call(action, params, timeout=timeout)
+    import bskcompat
+    bskcompat.set_bin(BSK)
+    rc, out, err = bskcompat.run(_bsk_raw, args, timeout)
+    if check and rc != 0:
+        raise SystemExit("bsk 失败 rc=%s\n%s" % (rc, (err or out)[:600]))
+    return rc, out, err
+
+
+def _bsk_raw(args: list, timeout: int) -> tuple[int, str, str]:
     try:
         p = subprocess.run([BSK] + args, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return 124, "", "bsk 超时（%ss）：%s" % (timeout, " ".join(args[:2]))
-    if check and p.returncode != 0:
-        raise SystemExit("bsk 失败 rc=%s\n%s" % (p.returncode, (p.stderr or p.stdout)[:600]))
     return p.returncode, p.stdout or "", p.stderr or ""
 
 
@@ -213,6 +244,8 @@ def _norm_session(s: dict) -> dict:
 
 
 def list_sessions() -> list:
+    if _transport_is_iab():
+        return [{"id": "iab", "browser": "iab", "window": ""}]
     rc, out, _ = bsk(["session", "list", "--json"])
     if rc != 0:
         return []
@@ -285,6 +318,13 @@ def instance_report(browsers: list | None = None) -> dict:
     同 label 出现多次 = 同一浏览器装了多份。label 为空的多个实例只算「无法区分」，
     不当成重复 —— 那可能只是两个没起名字的 profile。
     """
+    if _transport_is_iab():
+        # IAB 由宿主托管：无扩展/实例概念，直接健康
+        return {"count": 1, "duplicates": [], "unresponsive": [], "unique": True,
+                "healthy": True,
+                "instances": [{"id": "iab", "name": "iab", "label": "IAB",
+                               "ext": "", "sessions": 0, "unresponsive": False,
+                               "skew": False}]}
     bs = list_browsers() if browsers is None else browsers
     groups = {}
     for b in bs:
@@ -404,6 +444,13 @@ def navigate_soft(sid: str, url: str, timeout: int = 180):
 
 
 def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
+    if _transport_is_iab():
+        # IAB 传输：无窗口生命周期，直接复用宿主浏览器；绑定了地址就导航过去
+        bound = st.get("url") or ""
+        if bound:
+            navigate_soft("iab", bound)
+            time.sleep(2)
+        return "iab"
     sid = st.get("session") or ""
     browser = st.get("browser") or os.environ.get("WA_BROWSER", "")
     # 开窗前先体检。重复安装的扩展会让「发送」和「读回」落在不同实例上，
@@ -499,8 +546,20 @@ def evaluate(js: str, sid: str, timeout: int = 60):
                 data = {"raw": val}
         else:
             data = val
+    if isinstance(data, str):
+        # IAB 传输（0.1.5）：worker 把 evaluate 结果整包序列化成字符串回传，
+        # 二次解 JSON 还原真实对象；解不开才降级为 {"raw": ...}
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {"raw": data}
     if not isinstance(data, dict):
-        return False, "无法解析 evaluate 输出：%s" % s[:300]
+        # JS 表达式合法地返回数组/标量也是有效结果（2026-10-31 实测：
+        # 返回按钮属性数组被误判为「无法解析」，把工具自检错误当成了页面故障）。
+        # 调用方按需取字段；只有 None 才算真的解析失败。
+        if data is None:
+            return False, "无法解析 evaluate 输出：%s" % s[:300]
+        return True, data
     return True, data
 
 
@@ -879,6 +938,51 @@ def cmd_send(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
     p = platforms.get(a.platform or st.get("platform"))
+    # ---- ORCHESTRATOR_REQUIRED 熔断（2026-10-31 服从性审计新增）----
+    # 工作区里存在编排 run（state/current）时，直接 CLI 发送 = 绕过写闸门与
+    # journal，属硬规则违例。必须走 orchestrator.py loop（→ write_gate 出
+    # 授权单 → 真实写 → 核验）。
+    # 逃生门（2026-10-31 DeepSeek 裁定改为「有代价的显式声明」，0.1.4）：
+    #   · 单次消费——env 值即理由，读后立即清除，同进程第二次直发仍被拒；
+    #   · 理由必填——env 为空值视为未声明，拒绝；
+    #   · 强制落账——放行时向未清项台账追加 P0-ESC 条目（deferred(违例)），
+    #     该条目必须在回执三栏「违例/异常」栏出现（pending_gate.check_receipt 强制），
+    #     隐身不报 = 回执不合格——堵死「违例隐身」模式。
+    root = os.path.dirname(path) or "."
+    cur_ptr = os.path.join(root, "state", "current")
+    if os.path.exists(cur_ptr):
+        _esc = os.environ.get("STARPILOT_ALLOW_DIRECT_SEND", "")
+        if not _esc.strip():
+            print("ORCHESTRATOR_REQUIRED：本工作区有编排 run（state/current 存在），"
+                  "禁止用 wa.py send 直接发送（会绕过写闸门/journal/幂等守卫）。\n"
+                  "  正路：python scripts/orchestrator.py loop --once --file <反馈文件>\n"
+                  "  逃生门（单次消费，理由必填）：STARPILOT_ALLOW_DIRECT_SEND='<理由>' 重跑；"
+                  "放行会落账 P0-ESC 违例条目，必须在回执三栏报备", file=sys.stderr)
+            return 7
+        del os.environ["STARPILOT_ALLOW_DIRECT_SEND"]  # 单次消费：用完即焚
+        try:
+            import pending_gate as _pg
+            _led = _pg.pending_path_for(root, "", "")
+            _ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            _eid = "P0-ESC-%s" % hashlib.sha256(
+                ("%s|%s" % (_ts, st.get("url") or "")).encode("utf-8")).hexdigest()[:8]
+            _line = ("- [P0][%s] direct_send 绕过编排器直发 | deferred(违例：%s "
+                     "target=%s reason=%s；必须在回执三栏报备) | 来源:escape_hatch\n"
+                     % (_eid, _ts, hashlib.sha256(
+                         (st.get("url") or "").encode("utf-8")).hexdigest()[:12],
+                         _esc.strip()))
+            _head = "" if os.path.exists(_led) else "# 未清项清单\n"
+            os.makedirs(os.path.dirname(_led), exist_ok=True)
+            with open(_led, "a", encoding="utf-8") as _f:
+                if _head:
+                    _f.write(_head)
+                _f.write(_line)
+            print("违例放行（单次）：本次发送绕过编排器，已落账 %s 条目 %s。"
+                  "该条目必须在回执三栏「违例/异常」栏出现，隐身不报 = 回执不合格。"
+                  % (_led, _eid), file=sys.stderr)
+        except Exception as _esc_err:
+            print("警告：逃生门落账失败（%s）——违例未留痕，请人工补记。" % _esc_err,
+                  file=sys.stderr)
     if not st.get("url"):
         print("尚未绑定对话：先跑 wa.py bind <url>", file=sys.stderr)
         return 2
@@ -1543,7 +1647,7 @@ def cmd_stop(a) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description="网页版 AI 循环桥接命令")
     ap.add_argument("--state", help="state 文件路径（默认 ./%s）" % STATE_NAME)
     ap.add_argument("--platform", help="网页 AI 平台 key（默认读 state，缺省 %s）" % platforms.DEFAULT_PLATFORM)
@@ -1626,7 +1730,32 @@ def main() -> int:
     p = add_pl(sub.add_parser("stop", help="停止 session"))
     p.set_defaults(func=cmd_stop)
 
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+
+    # ---- bsk 版本变更首查（2026-10-31 服从性审计新增）----
+    # 版本与 skill 记录不一致时，第一动作是读变更说明，而不是按旧假设调用。
+    # 只提示不拦截：变更内容需要人/agent 判断，机器只能发现「变了」。
+    if a.cmd in ("bind", "send", "wait", "read", "probe", "triage", "clear") \
+            and not _transport_is_iab():
+        try:
+            _rc, _out, _err = _bsk_raw(["--version"], 15)
+            _ver = (_out or _err).strip().split()[-1] if (_out or _err).strip() else ""
+            _st_path = state_path(getattr(a, "state", None))
+            if os.path.exists(_st_path):
+                _st = load_state(_st_path)
+                _known = _st.get("bsk_version") or ""
+                if _ver and _known and _ver != _known:
+                    print("提示：bsk 版本已从 %s 变为 %s（state 记录）。触页面 API 可能有"
+                          "破坏性变更（如 0.3→0.4 的 cooperate 上下文）。第一动作应是"
+                          "读该版本变更说明，而不是按旧假设调用；确认兼容后跑 "
+                          "`python scripts/wa.py state` 会随下一次 bind/send 更新记录。"
+                          % (_known, _ver), file=sys.stderr)
+                if _ver and _ver != _known:
+                    _st["bsk_version"] = _ver
+                    save_state(_st_path, _st)
+        except Exception:
+            pass  # 版本提示失败不阻断主流程
+
     return a.func(a)
 
 

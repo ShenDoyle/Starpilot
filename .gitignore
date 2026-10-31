@@ -32,3 +32,4 @@ dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+.wa-state.json.progress.json
