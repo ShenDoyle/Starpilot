@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/Tencent/BrowserSkill"><img alt="Core dependency: bsk" src="https://img.shields.io/badge/Core%20dependency-bsk-2f75f0"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.2%20preview-6b7280">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.6%20preview-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -204,7 +204,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 330 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 381 tests, stdlib only
 python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```

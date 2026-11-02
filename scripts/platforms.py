@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 
 
 def _css(cands):
@@ -1362,3 +1363,49 @@ def js_scroll(p):
   return JSON.stringify({ scrolled: !!sc });
 })()
 """ % (_JS_PICK, _css(s["scroll"]))
+
+
+# ---------------------------------------------- CLI：内置浏览器模式的规格出口（0.1.6）
+#
+# builtin 后端下脚本不碰浏览器，发送/读取/分诊由 agent 用自己的浏览器工具执行；
+# 选择器、URL 形态、三时钟参数仍以本文件为唯一来源：
+#   python scripts/platforms.py list
+#   python scripts/platforms.py spec chatgpt --json
+
+def _cli(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="platforms.py",
+        description="平台规格查询（builtin 后端的单一来源；bsk 模式请用 wa.py）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="列出平台 key 与标签")
+    sp = sub.add_parser("spec", help="输出平台完整规格（URL 形态 / 选择器 / 三时钟参数）")
+    sp.add_argument("platform")
+    sp.add_argument("--json", action="store_true", help="机器读 JSON（缺省人读分节）")
+    a = ap.parse_args(argv)
+
+    if a.cmd == "list":
+        for k in sorted(PLATFORMS):
+            print("%s\t%s%s" % (k, PLATFORMS[k].get("label", k),
+                                "" if PLATFORMS[k].get("verified") else "\t(未实测)"))
+        return 0
+
+    p = get(a.platform)
+    if a.json:
+        print(json.dumps(p, ensure_ascii=False, indent=2, default=repr))
+        return 0
+    print("平台：%s（%s）%s" % (p["key"], p.get("label", p["key"]),
+                               "已实测" if p.get("verified") else "未实测——首次使用先人工核对页面"))
+    for sec, keys in (("URL", ("home", "new_chat_url", "url_pattern")),
+                      ("时钟", ("ttft_s", "stall_s")),
+                      ("选择器", ("sel",))):
+        vals = {k: p[k] for k in keys if k in p}
+        if vals:
+            print("\n[%s]" % sec)
+            for k, v in vals.items():
+                print("  %s = %s" % (k, v))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_cli())

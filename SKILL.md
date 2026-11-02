@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.5"
+version: "0.1.6"
 ---
 
 # 星舵 Starpilot
@@ -48,7 +48,7 @@ Agent 的价值在**执行与如实回报**，不在替用户和网页版 AI 做
 ## 0.1 来源与升级（用户说「升到最新版」就照这里做）
 
 - **仓库**：<https://github.com/ShenDoyle/Starpilot>（MIT，`ShenDoyle/Starpilot`，主分支 `main`）
-- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.5）。版本只从 `SKILL.md` 读，不从别处猜。
+- **当前版本**：见本文件 front-matter 的 `version`（现在 0.1.6）。版本只从 `SKILL.md` 读，不从别处猜。
 - **编号沿革**：开发期内部迭代到 `2.3.4`，2026-10-30 首次对外发布时归零为 `0.1.0`（预览版，不是正式版）。升级判据是「远端 > 本地」，所以从 2.3.4 迁过来要用 `upgrade.py --to-latest --force` 重装一次。
 - **升级入口**：`scripts/upgrade.py`（纯标准库，不需要 git，也不需要用户手动下载）
 
@@ -79,6 +79,48 @@ python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份
 | 升级后必须汇报三件套 | ① 版本 `旧 → 新`；② 用的哪个源（直连还是哪个镜像，多少 ms）；③ 自检结果（`Ran N tests / OK`） |
 | 宿主缓存 | skill 目录被宿主加载过就要重载一次 skill 才生效，须在汇报里提醒用户 |
 | 失败 | rc=1 时**不换第三种办法硬试**（硬规则 4）：把失败输出原样给用户 + 回滚命令，停下 |
+
+---
+
+## 0.2 首次激活：装不装 bsk，弹窗问一次（浏览器后端选择）
+
+**背景**：很多宿主 agent 自带浏览器能力，bsk 不是唯一路径。星舵有两种浏览器后端：
+
+| 后端 | 是什么 | 得到什么 | 失去什么 |
+|---|---|---|---|
+| `bsk`（默认推荐） | 装 bsk CLI + 浏览器扩展 | 全自动：orchestrator loop、写闸门、自动续窗、三时钟、平台占用锁 | 要装两个依赖 |
+| `builtin` | 用 agent **内置浏览器**，不装任何东西 | 手动规程（`references/builtin-mode.md`），判据照用 | 无状态机、无写闸门、无平台锁（边界见该文 §E） |
+
+> **与 IAB 传输层的关系（0.1.5/0.1.6）**：ZCode 宿主还有第三条路——
+> `STARPILOT_TRANSPORT=iab`（§5.1），那是**脚本侧**的 op 队列传输（仍是 wa.py 自动跑，
+> 实验性）；`builtin` 是 **agent 侧**手动规程。两者都不装 bsk。宿主支持 IAB 时优先试 IAB
+> （保留自动化），不支持或不稳（§5.1 列了已知失效）再回退 builtin。
+
+**流程（只在「bsk 没有 + 用户没选过」时走，config 记过就永远不再问）**：
+
+1. `python scripts/env.py --json` → 看 `backend` 与 `needs_decision`。
+2. `needs_decision: true` → 用宿主的**按钮弹窗**（WorkBuddy 是 AskUserQuestion；其他宿主用等效交互）问**一次**：
+
+   > 星舵需要一个浏览器来跟网页版 AI 对话。装 bsk 依赖，还是直接用你的内置浏览器？
+   > - **安装 bsk（推荐）**——全自动循环，需在浏览器启用 BrowserSkill 扩展
+   > - **用我的内置浏览器**——不装任何依赖，按手动规程执行（`references/builtin-mode.md`）
+
+3. 用户选完**立即记录**（不重复问）：
+
+   ```bash
+   python scripts/env.py --set-backend bsk       # 或 builtin
+   ```
+
+   记录动作写一行进 journal（谁选的、什么时候、选了什么）。
+4. 选 `bsk` → 接着 `python scripts/env.py --install`（§5.1），扩展开关仍要用户点一次；
+   选 `builtin` → 什么都不装，BIND 与 LOOP 按 `references/builtin-mode.md` 的规程走，
+   选择器与三时钟参数用 `python scripts/platforms.py spec <平台>` 取。
+5. `backend` 已经是 `bsk` 或 `builtin` → 直接按对应模式开工，**不再弹窗**。
+
+用户明确说「别问我 / 直接用 X」时，跳过弹窗直接 `--set-backend X`，同样留痕。
+
+> 为什么只问一次：这是环境配置不是业务决策，反复问只会训练用户无脑点确认。
+> 之后想换后端，用户明说即可（`--set-backend` 随时可改）。
 
 ---
 
@@ -271,8 +313,12 @@ transcript 里找到**原话出处**：
 ## 3. BIND：接入网页版 AI
 
 > **先自检环境，缺什么自己装**（细则见 §5.1）：
-> `python scripts/env.py --json` → rc=0 才往下走；rc=4 照 `actions` 修（缺 bsk 就 `--install`）；
-> rc=5 说明自动安装失败，把输出贴给用户，别带着坏环境硬跑。
+> `python scripts/env.py --json` → rc=0 才往下走；rc=4 照 `actions` 修（后端未定先走 §0.2 弹窗，
+> 缺 bsk 就 `--install`）；rc=5 说明自动安装失败，把输出贴给用户，别带着坏环境硬跑。
+>
+> **backend = builtin 的从这里分流**：脚本不碰浏览器，绑定 / 发送 / 等待 / 分诊全部按
+> `references/builtin-mode.md` 的规程由 agent 用内置浏览器执行；本章其余小节以 bsk 为准
+> （判据相同，手不同）。选择器与三时钟参数：`python scripts/platforms.py spec <平台>`。
 
 ### 3.0 先定平台（选型不是随手挑的）
 
@@ -614,7 +660,11 @@ python scripts/orchestrator.py decide \
 
 ### 5.1 依赖：缺什么自己装，别让用户先装
 
-前置只有两个：**`bsk`（核心依赖）** 和 **Python 3.9+**。两个都由 **agent 自己装**，装不上才回来找用户。
+前置只有两个：**Python 3.9+** 和**一条浏览器通路**。通路三条（§0.2 弹窗定，只问一次）：
+**bsk**（默认推荐，全自动）、**agent 内置浏览器**（`references/builtin-mode.md`，不装依赖）、
+**IAB 传输层**（`STARPILOT_TRANSPORT=iab`，见下方 0.1.5 小节，实验性）。
+后端选定后 bsk 相关步骤只在 `bsk` 模式适用；`builtin` 模式下 wa.py 的浏览器类命令会以
+rc=6 拒绝并提示规程位置——这是设计行为，不是故障。
 
 **开工前自检一次（第 1 轮之前，别每轮都跑）**
 
@@ -718,7 +768,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
 | `wa.py triage [--relocate]` | 卡住判定：只读页面，判风控/漂移/假生成/选择器失效/没发出去，给下一步。`--relocate` 用备用读法复探（不刷新） |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
-| `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk（§5.1） |
+| `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、浏览器后端（bsk / builtin）、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk；`--set-backend` 记录 §0.2 的用户选择 |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
 
 ### 5.3 会话纪律
@@ -817,7 +867,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论；换平台前先跑 `templates/web-ai-eval.md` |
 | 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI |
 | `msg_count=0` 但页面正常 | 手工 bsk session 顶掉了 state 里的 session | 重新 `wa.py bind <url>` 恢复 |
-| 找不到 bsk | 没装 / 不在 PATH / 扩展没开 | **自己装，别让用户装**：`python scripts/env.py --json` 看现状 → `--install`（官方脚本，用户级）；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
+| 找不到 bsk | 没装 / 不在 PATH / 扩展没开 / **后端是 builtin（设计如此）** | 先看 `env.py --json` 的 `backend`：`builtin` 下 wa.py 浏览器命令 rc=6 属正常，按 `references/builtin-mode.md` 手动执行；`bsk` 后端才自己装：`--install`（官方脚本，用户级）；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
 | 发送后输入框空了、页面却没有新会话 | 平台侧限流/拒绝（Kimi 会弹「和Kimi聊天的人太多了」弹窗） | 先关弹窗、确认模型档位，再按 §4.1 的三重判据重发；仍不行按硬规则 4 停下转交 |
 | 输入框内容删不掉、重写变追加 | 受控编辑器忽略 `execCommand('delete')`／`paste` 是追加 | 用 Range 圈定内容 + `execCommand('insertText')` 覆盖；Kimi 已按此配置 |
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
@@ -857,10 +907,11 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 ---
 
-## 8. 已知缺口（v0.1.2 现状，别假装有）
+## 8. 已知缺口（v0.1.6 现状，别假装有）
 
 | 缺口 | 现状 | 补法 |
 |---|---|---|
+| **builtin 后端只有手动规程** | 0.1.6 新增的内置浏览器模式：绑定/发送/等待/分诊由 agent 按规程手动执行（`references/builtin-mode.md`），**没有** orchestrator 状态机、写闸门、平台占用锁、自动续窗，也不写 `.wa-state.json` | 给 wa.py 加 `--record` 系列参数：由 agent 报告探测结果、脚本负责 state/闸门/锁 |
 | ~~**无 orchestrator**~~ | **已补（2026-10-29）**：`scripts/orchestrator.py` 落地 14 态状态机 + 守卫迁移 + 轮次预算 + 崩溃恢复（`loop --resume` 只复核 DOM、绝不重发），实测证据见 `runs/20261029T042822-recovery2` | — |
 | ~~**写侧未落地**~~ | **已补（2026-10-29）**：`scripts/write_gate.py` 落地「缺省 dry_run + 必须批准 + 单条真实写 + 写后核验」，真实写在 Kimi 上跑通（`reply_count_delta=1`） | — |
 | ~~**知识回流靠自觉**~~ | **已补（2026-10-29）**：`orchestrator.py close --stage <id> --require-lessons` 强制把 lesson 候选并进 `references/lessons.md` 附录，验收看 `candidates=merged=appendix_added` 与 `lessons_pending=0` | — |
@@ -885,6 +936,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 ## 参考
 
 - `references/protocol.md` — state 结构、反馈模板、多轮上下文压缩规则
+- `references/builtin-mode.md` — 内置浏览器模式规程（builtin 后端：绑定 / 发送 / 等待 / 分诊的 agent 手动版）
 - `references/web-ai-platforms.md` — 平台选型分级、「断片」三种机制、接入六步（页面侦察 / 平台定义 / probe / 等待与读取信号标定）
 - `references/dom-probes.md` — DOM 判定片段（复制即用）
 - `references/process-charter.md` — 人类流程总纲（六阶段 + 流程红线 R1~R14）

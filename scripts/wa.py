@@ -1647,6 +1647,32 @@ def cmd_stop(a) -> int:
     return 0
 
 
+# ---------------------------------------------- builtin 后端守卫（0.1.6）
+#
+# builtin 后端 = 脚本不碰浏览器，发送/读取/分诊由 agent 用自己的浏览器工具按
+# references/builtin-mode.md 执行。只在 config 明确记了 builtin 时拦截——
+# 「bsk 没装」走各命令自己的报错，不在这里替用户做决定。
+
+BROWSER_CMDS = frozenset({"bind", "probe", "clear", "send", "wait", "read",
+                          "triage", "doctor", "stop"})
+
+
+def builtin_guard(cmd):
+    """builtin 后端下浏览器类命令直接拒。返回拦截说明（str）或 None。"""
+    if cmd not in BROWSER_CMDS:
+        return None
+    try:
+        import env as _env  # 同目录，env.py 无副作用
+        if _env.resolve_backend(env=os.environ) != "builtin":
+            return None
+    except Exception:
+        return None  # 判不了就不拦，让命令自己走原有路径
+    return ("builtin 浏览器后端已启用（%s）：wa.py 不再直接操控浏览器。\n"
+            "本命令（%s）由 agent 用内置浏览器按规程手动执行：references/builtin-mode.md。\n"
+            "要切回 bsk：python scripts/env.py --set-backend bsk && python scripts/env.py --install"
+            % (_env.config_path(), cmd))
+
+
 def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description="网页版 AI 循环桥接命令")
     ap.add_argument("--state", help="state 文件路径（默认 ./%s）" % STATE_NAME)
@@ -1731,6 +1757,11 @@ def main(argv: list | None = None) -> int:
     p.set_defaults(func=cmd_stop)
 
     a = ap.parse_args(argv)
+
+    guard = builtin_guard(a.cmd)
+    if guard:
+        sys.stderr.write(guard + "\n")
+        return 6
 
     # ---- bsk 版本变更首查（2026-10-31 服从性审计新增）----
     # 版本与 skill 记录不一致时，第一动作是读变更说明，而不是按旧假设调用。
