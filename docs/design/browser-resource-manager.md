@@ -253,3 +253,34 @@ DeepSeek 同对话 2 个副本；12/13 落在**用户窗口**（扩展处于共�
 - winlease 新增 9 条（组登记/跨代复用/全局计数/预算）；contract_lint 新增 2 条（裸调必 FAIL / wa.py 豁免）；
 - 全量 503 全绿；修复：acquire 冲突等待预算未接 env 导致用例空等 300s（365s→63s 全量耗时）；
 - 双安装位 import 终验通过。
+
+### 11.7 tab 生命周期闭环（2026-11-02 用户指令 v2：tab 累积修复）
+
+- 打开：`navigate_reuse` 同址复用优先（此前已有）；归属自愈 `heal_window_placement`
+  改为**复用优先**——同址标签 → 空白残留（`_find_blank_tab`）→ 最后才 `tab create`
+  （此前无条件 create，是孤儿标签的直接制造者）；
+- 回收：`reap_own_tabs`（新）——只收**自己会话** Agent Window 内的同地址重复
+  （留最新/活动）与空白残留；`scope=user` 只报告不动（bsk 无权关用户标签，由人处理）；
+  自动接进 ensure_session 两条复用路径，手动入口 `wa.py tab-reap`（--dry-run）；
+- 拦截：`contract_lint.no_raw_tab_ops`——wa.py 之外出现 `["tab","create"/"close"]`
+  即 FAIL（select/list 只读不拦）。
+
+### 11.8 L2 PATH shim 落地（2026-11-02 用户指令「只要使用 bsk，必须遵守规则」）
+
+- 装置：`~/.local/bin/bsk.exe` 改名 `bsk.bin.exe`，原位放 `bsk.cmd`——仅
+  `session start` 路由到 `bsk_shim.py`，其余子命令零开销直通真身；
+- 令牌：wa.py 的 `_bsk_raw` 对 session start 注入 `STARPILOT_WINDOW_GATE=1`
+  （正路已过租约+计数，shim 放行，不二次计数）；
+- 无令牌（非 wa.py 来源）：过全局计数账本（锁目录 `session-starts.json`，与 wa.py
+  同一份）——未超限：记账放行；超限：拒绝（rc=9）并指引走 `wa.py`；
+- 失效语义：shim 自身故障 **fail-open 并告警**（可用性优先；正路侧仍有
+  L3 唯一入口 + lint 双保险）。`env.py --install` 重装 bsk 会还原 exe、绕过 shim，
+  需重跑 shim 安装器。
+
+### 11.9 介入语义修正（2026-11-02 用户裁定）
+
+- `WINDOW_BUSY_HUMAN`（rc=9 报人裁决即停）废止。人工介入=并行监督，不打断执行；
+- 有人值守：等 30s 仍被占 → `WINDOW_BUSY_NOTICE` 提醒人（非阻塞）→ 继续等满
+  轮换预算（600s，与无人值守一致）；等不到才 rc=9 `WINDOW_BUSY`，外层循环重试；
+- 流程纪律固化（SKILL §5.5a/§5.5b）：①星舵持续推进到任务完成（规划/汇报/验收），
+  除非人主动要求停止；②人提出的想法必须原样整体转达 webai 裁决，agent 只补事实。

@@ -477,3 +477,27 @@
 - [L-GRANULARITY-CONTRACT-9d4e07][2026-11-02][O5][用户反馈（执行颗粒度/内置方案）][—][脚本能力齐（三态窗口门/写闸门/triage 九态/租约收割），但文档是叙述式：agent 读完后仍要自己决定「先做什么、判据是什么、失败怎么分派」，不同模型/不同上下文执行出不同结果；平台改版和风控升级这类必然事件没有 runbook，只能现场试][缺的是「执行确定性层」：动作没有四段契约（前置/通路/判据/分支），错误码没有唯一权威表，故障没有分型处置][①动作卡 6 张（bind/send/wait-read/triage/probe/clear），四段式 + 「卡里没写的做法=禁止」；②rc 全表唯一权威（0–9 + 10–15 六态），SKILL §6.1 先按 rc 定位再查现象；③runbook 四份：dom-drift（含 ChatGPT writing-block 真实四坑）/ anti-bot（四型分治，禁止硬刚）/ window-session（归属-会话-渲染三层定位）/ context-loss（漂移≠压缩）；④§5.5 硬边界：动作白名单、判据必须机器可判、预期外只有三个出口、不许用措辞掩盖缺陷；⑤contract_lint.py 五项对账（rc 覆盖/卡四段/runbook 索引/命令真实性/verified 分账），改坏任一处测试即红][tests/test_contract_lint.py 9 条（含副本篡改必 FAIL）；全量 473 OK；lint 首次跑就抓出 4 个平台「标了 verified 却没有 write_verified」的假分账][一切「文档约束行为」的场景；识别特征：文档写了但 agent 还能合法地做出不同结果][回退即回到「每个 agent 一套做法」，偏差无法归因][false][merged]
 - [L-STAGE-VERIFY-GRANULARITY-4b5c21][2026-11-02][O5][dogfood 实测（本轮改造自身撞门）][—][用户选「一次跑完再验」，我按工作量拆了三阶段，结果 stage start S2 被 accepted 门拦住（S1 还 executing），门是对的、拆法是错的——阶段拆分的价值来自中途拦截，放弃拦截后多阶段只剩仪式感，还逼 agent 去绕状态机][把「阶段数」绑在「工作量」上，而不是绑在「验收粒度」上；SKILL §4.0 只写了「大任务必须拆」，没写「一次性验收时怎么拆」][§4.0 新增第 7 条：阶段数由验收粒度决定——逐阶段验收按交付边界拆；一次跑完再验只登记一个阶段；已拆了中途改口不许手改 state，走 decide 留痕 + 并入当前阶段提交][本轮 decide 记录 1 条；SKILL §4.0.7 收编；下次同样场景直接用单阶段][一切「流程要求与用户选择冲突」的场景；识别特征：为了满足状态机而想手改 state][回退即回到「拆了又开不了」的卡死或偷偷绕门][false][merged]
 - [L-TURN-TAKING-GROUP-2e9f44][2026-11-02][O5][用户四条指令（互斥轮换/窗口组/禁无脑重开/全局看门狗）+ L-GRANULARITY 后续][—][原租约模型「冲突即失败」不适合共享实例：无人值守任务会立刻死、有人值守任务收不到提醒；开窗计数存各任务 state 跨任务不可见（现场 10+ 次裸调只记 3 次）；会话归属只存租约文件，release 后「这是组窗口」的事实消失，下一棒只能再开新窗][共享资源的三件事要分层：互斥（租约）、轮换（预算等待+显式让出）、身份（journal 持久登记——租约文件是「现在谁在用」，journal 是「这东西是谁家的」）；频率计数必须放锁目录全局层，且开窗必须收敛到唯一入口否则计数是摆设][①winlease：group()/claim_session 落 journal/drop_session/group_sessions（跨租约世代）/note_start+too_many_starts（锁目录全局）/wait_budget（attended 30s→WINDOW_BUSY_HUMAN，unattended 600s 排队）；②wa.py：ensure_session 组窗口复用+navigate_reuse（tab select 复用同地址标签）+全局计数接入；reap --global（只收本组租约过期的，别组/无主只报告）；③contract_lint.no_raw_session_start：wa.py 外裸调 session start 即 FAIL；④新版同步双安装位（.trae-cn 补 runbooks 目录），互杀根治][测试 503 全绿（+11）；顺带修复 acquire 等待预算未接 env 导致用例空等 300s（全量 365s→63s）][一切「多个 agent/任务共享一个浏览器实例」的场景；识别特征：state 各记各的、互杀、标签堆积][回退即回到冲突即死+互杀+各自开窗][false][merged]
+
+## 附录：tab 累积三因与 L2 shim、介入语义（2026-11-02 v2）
+
+- **现象**：用户反馈「每次沟通都开一个新 tab，之前的不会回收，tab 一直累积」。现场：
+  agent 窗口残留 `about:blank` 孤儿；用户窗口同对话 4 副本。
+- **根因（三条叠加）**：
+  1. `heal_window_placement` misplaced 时**无条件 `tab create`**，create 后导航又落回
+     用户窗口 → 每轮 heal = 新增一个标签，旧的从不回收；
+  2. 会话/任务收口只 stop 会话，自己 agent 窗口里的陈旧标签（重复、空白）无人认领；
+  3. tab 生命周期没有任何「回收」动作——打开有纪律、死後没人收。
+- **处置**：heal 复用优先（同址标签 → 空白残留 → 最后才 create，不留孤儿）；
+  `reap_own_tabs`（只收自己会话：同地址重复留最新 + 空白残留；scope=user 只报告不动）
+  接进 ensure_session 两条复用路径 + 手动入口 `wa.py tab-reap`；
+  `contract_lint.no_raw_tab_ops` 拦裸调 tab create/close；L2 PATH shim（bsk.cmd +
+  bsk_shim.py）拦非 wa.py 来源的 `session start`（无 `STARPILOT_WINDOW_GATE=1` 令牌
+  → 过全局计数，超限拒绝；shim 故障 fail-open 留痕）。
+- **介入语义同轮修正**：用户裁定「人工介入不打断星舵执行」——`WINDOW_BUSY_HUMAN`
+  （rc=9 报人裁决即停）废止；有人值守改为 30s 被占先提醒（`WINDOW_BUSY_NOTICE`，
+  非阻塞）后继续等满轮换预算；除非人主动要求停止，星舵持续推进到任务完成（规划/
+  汇报/验收全链路）。
+- **同轮固化**：流程中人提出的想法/意见/疑问必须原样整体转达 webai，由 webai 出
+  决策与方案，agent 不得自行裁决或只记本地（SKILL §5.5b）。
+- **适用范围**：一切「资源有生命周期但只做了准入、没做回收」的治理；一切
+  「人在场=停下来等人」的误设。

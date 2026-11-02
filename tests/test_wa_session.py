@@ -182,11 +182,17 @@ class TestEnsureSessionGuard(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "state.json")
         self._rm = shutil.rmtree
+        # bypass 用例会真实走 acquire_window：锁目录必须重定向到临时目录，
+        # 否则测试租约会落到真实 ~/.starpilot/locks，污染下一次全量跑
+        # （2026-11-02 全量跑复现：上一轮 run 留下的 win-a1.json 活租约
+        #   让本用例拿到 WindowBusy rc=9 而不是预期的 session start 失败）。
+        os.environ["STARPILOT_LOCK_DIR"] = os.path.join(self.tmp, "locks")
 
     def tearDown(self):
         wa.bsk = self._orig
         self._rm(self.tmp, ignore_errors=True)
         os.environ.pop("WA_ALLOW_DUPLICATE_EXT", None)
+        os.environ.pop("STARPILOT_LOCK_DIR", None)
 
     def _fake(self, args, timeout=120, check=False):
         if args[:2] == ["browsers", "--json"]:

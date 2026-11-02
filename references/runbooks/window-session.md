@@ -119,3 +119,28 @@ bsk navigate --session <new_sid> "<同一个 conv_id 地址>"  # 5) 按 conv_id 
 - 导航前先查同地址标签（`navigate_reuse`），同一对话出现第 2 个标签 = 违例；
 - 一轮做完就 `wa.py lease release`——会话是组的，租约是轮到谁归谁；
 - 全局开窗计数（10 分钟/实例 ≤4 次，跨任务共享）超限时先查环境，不许硬闯。
+
+## 8. 人工介入语义与 tab 生命周期（2026-11-02 用户裁定 v2）
+
+**介入≠打断**：人工介入是并行监督，不是执行暂停。有人值守（`WA_ATTENDED=1`）
+被占时的行为已改——等 30s 仍被占 → `WINDOW_BUSY_NOTICE` **提醒人**（非阻塞，
+报占用者/剩余时间/可选动作），然后**继续等满 600s 轮换预算**；除非人主动要求
+停止，星舵持续推进直到任务完成（规划、完成情况汇报、验收全链路）。
+`WINDOW_BUSY_HUMAN`（rc=9 报人裁决即停）已废止。
+
+**tab 生命周期**（只要使用 bsk，必须遵守）：
+
+| 阶段 | 规则 | 唯一通路 |
+|---|---|---|
+| 打开 | 先查同地址标签，有 → select 复用；无 → 才新开 | `navigate_reuse`（wa.py 内部） |
+| 自愈 | 归属 misplaced 时复用优先：同址标签 → 空白残留 → 最后才 create | `heal_window_placement`（wa.py 内部） |
+| 回收 | 会话复用/续租时自动收：同地址重复（留最新/活动）+ 空白残留 | `reap_own_tabs`（ensure_session 自动）/ `wa.py tab-reap`（手动，--dry-run） |
+| 用户窗口 | scope=user 的标签**只报告不动**，由人关闭 | `window_report` 的 bound_in_user 上报 |
+
+- 脚本层直接 `bsk tab create/close` = 违例（`contract_lint.no_raw_tab_ops` FAIL）。
+- L2 PATH shim 在调用层拦截：非 wa.py 来源的 `bsk session start` 须过全局计数，
+  无 `STARPILOT_WINDOW_GATE=1` 令牌直接拒绝并指引正路（shim 失败时 fail-open
+  并告警——可用性优先，正路那边仍有 L3+计数双保险）。
+
+**人的想法转达**：流程中人提出的想法/意见/疑问（含选型类）必须原样整体转达
+webai，由 webai 出决策与方案；agent 只补事实与现场证据（SKILL §5.5b）。

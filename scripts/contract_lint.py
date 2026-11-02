@@ -64,7 +64,7 @@ def _rc_rows(text: str) -> list:
 
 def _wa_commands(root: str) -> set:
     src = _read(root, os.path.join("scripts", "wa.py"))
-    return set(re.findall(r'sub\.add_parser\(\s*"([a-z_]+)"', src))
+    return set(re.findall(r'sub\.add_parser\(\s*"([a-z\-_]+)"', src))
 
 
 def check(root: str) -> list:
@@ -129,7 +129,7 @@ def check(root: str) -> list:
     m = re.search(r"(?ms)^###\s*5\.5\s.*?(?=^###\s|\Z)", skill)
     if m:
         section = m.group(0)
-    used = set(re.findall(r"wa\.py\s+([a-z_]+)", section))
+    used = set(re.findall(r"wa\.py\s+([a-z\-_]+)", section))
     unknown = sorted(c for c in used if c not in cmds)
     results.append({
         "name": "command_exists",
@@ -188,6 +188,37 @@ def check(root: str) -> list:
         "detail": "开窗唯一入口=wa.py ensure_session，无裸调" if not offenders
         else ("这些文件绕过 wa.py 直接 bsk session start（删掉或改走 wa.py）：%s"
               % offenders),
+    })
+
+    # 7. 禁止裸调开/关 tab（2026-11-02 用户指令「只要使用 bsk，必须遵守
+    #    tab 规则」）。tab 的打开/关闭唯一通路 = wa.py（navigate_reuse /
+    #    heal 复用优先 / reap_own_tabs 回收）。其他文件直接 bsk tab
+    #    create/close = 绕过复用与回收纪律 = 标签堆积的根因，FAIL。
+    tab_offenders = []
+    tab_pat = re.compile(r"\[?[\"']tab[\"']\s*,\s*[\"'](create|close)[\"']")
+    for base in py_roots:
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in ("__pycache__",)]
+            for fn in filenames:
+                if not fn.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                if rel.replace("\\", "/") in ("scripts/wa.py",):
+                    continue
+                try:
+                    src = open(os.path.join(dirpath, fn), encoding="utf-8").read()
+                except Exception:
+                    continue
+                if tab_pat.search(src):
+                    tab_offenders.append(rel.replace("\\", "/"))
+    results.append({
+        "name": "no_raw_tab_ops",
+        "ok": not tab_offenders,
+        "detail": "tab 开/关唯一通路=wa.py，无裸调" if not tab_offenders
+        else ("这些文件绕过 wa.py 直接 bsk tab create/close（改走 wa.py 的"
+              " navigate_reuse / heal / tab-reap）：%s" % tab_offenders),
     })
 
     return results

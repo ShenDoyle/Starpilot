@@ -332,3 +332,118 @@ class TestTabScopeDictFormat(unittest.TestCase):
             rep = wa.tab_scope_report("s1")
         self.assertIsNone(rep["agent"])
         self.assertIsNone(rep["user"])
+
+
+class TestReapOwnTabs(unittest.TestCase):
+    """tab 回收（2026-11-02 用户指令：tab 累积）。只收自己会话 Agent Window 的
+    同地址重复与空白残留；用户窗口（scope=user）一律不碰。"""
+
+    def _run(self, tabs, dry=False):
+        closes = []
+
+        def fake_bsk(args, timeout=30, **kw):
+            if args[:2] == ["tab", "list"]:
+                return 0, json.dumps({"tabs": tabs}), ""
+            if args[:2] == ["tab", "close"]:
+                closes.append(args[4])  # ["tab","close","--session",sid,tab_id]
+                return 0, "{}", ""
+            return 0, "{}", ""
+
+        with mock.patch.object(wa, "bsk", side_effect=fake_bsk):
+            rep = wa.reap_own_tabs("s1", "https://chatgpt.com/c/conv", dry=dry)
+        return rep, closes
+
+    def test_closes_duplicates_and_blanks_keeps_newest(self):
+        tabs = [
+            {"tab_id": 1, "url": "about:blank", "scope": "agent"},
+            {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
+            {"tab_id": 3, "url": "https://chatgpt.com/c/conv", "scope": "agent",
+             "active": True},
+            {"tab_id": 4, "url": "https://other.example/x", "scope": "agent"},
+            {"tab_id": 5, "url": "https://user.example/y", "scope": "user"},
+        ]
+        rep, closes = self._run(tabs)
+        # 空白残留（有正常标签）+ 同地址重复的旧副本被回收；活动副本和独立标签保留
+        self.assertEqual(sorted(closes), ["1", "2"])
+        self.assertEqual(rep["user_scope"], 1)   # 用户标签只报告不动
+        self.assertNotIn("5", closes)
+
+    def test_all_blank_keeps_one(self):
+        tabs = [
+            {"tab_id": 1, "url": "about:blank", "scope": "agent"},
+            {"tab_id": 2, "url": "about:blank", "scope": "agent", "active": True},
+        ]
+        rep, closes = self._run(tabs)
+        self.assertEqual(closes, ["1"])  # 只剩空白页时保留最新一个（导航目标）
+
+    def test_dry_run_closes_nothing(self):
+        tabs = [
+            {"tab_id": 1, "url": "about:blank", "scope": "agent"},
+            {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
+            {"tab_id": 3, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
+        ]
+        rep, closes = self._run(tabs, dry=True)
+        self.assertEqual(closes, [])
+        self.assertEqual(len(rep["closed"]), 2)
+        self.assertTrue(all(c.get("note") == "DRY-RUN" for c in rep["closed"]))
+
+    def test_close_failure_recorded_not_raised(self):
+        def fake_bsk(args, timeout=30, **kw):
+            if args[:2] == ["tab", "list"]:
+                return 0, json.dumps({"tabs": [
+                    {"tab_id": 1, "url": "about:blank", "scope": "agent"},
+                    {"tab_id": 2, "url": "https://x", "scope": "agent"}]}), ""
+            return 1, "", "borrow required"
+
+        with mock.patch.object(wa, "bsk", side_effect=fake_bsk):
+            rep = wa.reap_own_tabs("s1")
+        self.assertEqual(rep["closed"], [])
+        self.assertEqual(len(rep["close_failed"]), 1)
+
+    def test_tab_list_failure_is_reported_not_fatal(self):
+        with mock.patch.object(wa, "bsk", return_value=(1, "", "session gone")):
+            rep = wa.reap_own_tabs("s1")
+        self.assertIn("error", rep)
+        self.assertEqual(rep["closed"], [])
+
+
+class TestHealReuseBeforeCreate(unittest.TestCase):
+    """heal 复用优先（2026-11-02 用户指令）：同址标签 → 空白残留 → 最后才 create。
+    禁止无脑 tab create（历史现场：heal 反复 create 留下 about:blank 孤儿）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path, self.st = _state(self.tmp)
+
+    def _heal(self, find_ret, blank_ret):
+        calls = []
+
+        def fake_bsk(args, timeout=60, **kw):
+            calls.append(args)
+            return 0, "{}", ""
+
+        with mock.patch.object(wa, "window_report",
+                               side_effect=[{"ok": False}, {"ok": True}]), \
+                mock.patch.object(wa, "find_tab_by_url", return_value=find_ret), \
+                mock.patch.object(wa, "_find_blank_tab", return_value=blank_ret), \
+                mock.patch.object(wa, "navigate_soft", return_value=(0, "", "")), \
+                mock.patch.object(wa, "bsk", side_effect=fake_bsk):
+            rep = wa.heal_window_placement(self.st, self.path, "sess1")
+        return rep, calls
+
+    def test_reuse_same_url_tab_no_create(self):
+        rep, calls = self._heal("9", "")
+        self.assertTrue(rep["ok"])
+        self.assertNotIn(["tab", "create", "--session", "sess1"], calls)
+        self.assertIn(["tab", "select", "--session", "sess1", "9"], calls)
+
+    def test_blank_tab_reused_before_create(self):
+        rep, calls = self._heal("", "8")
+        self.assertTrue(rep["ok"])
+        self.assertNotIn(["tab", "create", "--session", "sess1"], calls)
+        self.assertIn(["tab", "select", "--session", "sess1", "8"], calls)
+
+    def test_create_only_as_last_resort(self):
+        rep, calls = self._heal("", "")
+        self.assertTrue(rep["ok"])
+        self.assertIn(["tab", "create", "--session", "sess1"], calls)

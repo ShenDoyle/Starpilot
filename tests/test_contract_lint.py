@@ -45,7 +45,7 @@ class TestRepoContract(unittest.TestCase):
         res = cl.check(ROOT)
         failed = [r for r in res if not r["ok"]]
         self.assertEqual(failed, [], "契约不自洽：%s" % failed)
-        self.assertEqual(len(res), 6, "六项检查都要跑")
+        self.assertEqual(len(res), 7, "七项检查都要跑")
 
 
 class _CopyBase(unittest.TestCase):
@@ -123,3 +123,38 @@ class TestNoRawSessionStart(_CopyBase):
     def test_wa_itself_exempt(self):
         res = {r["name"]: r for r in cl.check(self.tmp)}
         self.assertTrue(res["no_raw_session_start"]["ok"])
+
+
+class TestNoRawTabOps(_CopyBase):
+    """禁止裸调开/关 tab：wa.py 之外出现 bsk tab create/close 必须 FAIL
+    （2026-11-02 用户指令「只要使用 bsk，必须遵守 tab 规则」）。"""
+
+    def test_tab_create_offender_fails(self):
+        offender = os.path.join(self.tmp, "runtime", "wa")
+        os.makedirs(offender, exist_ok=True)
+        with open(os.path.join(offender, "rogue_tab.py"), "w", encoding="utf-8") as f:
+            f.write('import subprocess\nsubprocess.run(["bsk", "tab", "create", "--session", "s"])\n')
+        res = {r["name"]: r for r in cl.check(self.tmp)}
+        self.assertFalse(res["no_raw_tab_ops"]["ok"])
+        self.assertIn("runtime/wa/rogue_tab.py", res["no_raw_tab_ops"]["detail"])
+
+    def test_tab_close_offender_fails_and_wa_exempt(self):
+        offender = os.path.join(self.tmp, "runtime", "wa")
+        os.makedirs(offender, exist_ok=True)
+        with open(os.path.join(offender, "rogue_close.py"), "w", encoding="utf-8") as f:
+            f.write("rc, out, err = bsk(['tab', 'close', '--session', sid, tid])\n")
+        res = {r["name"]: r for r in cl.check(self.tmp)}
+        self.assertFalse(res["no_raw_tab_ops"]["ok"])
+        # wa.py 本身是唯一通路，仓库基线必须干净
+        clean = {r["name"]: r for r in cl.check(ROOT)}
+        self.assertTrue(clean["no_raw_tab_ops"]["ok"])
+
+    def test_tab_select_and_list_not_flagged(self):
+        """只拦 create/close（会改标签集合的写操作）；select/list 是只读或聚焦，不拦。"""
+        offender = os.path.join(self.tmp, "runtime", "wa")
+        os.makedirs(offender, exist_ok=True)
+        with open(os.path.join(offender, "ok_tab.py"), "w", encoding="utf-8") as f:
+            f.write("bsk(['tab', 'select', '--session', sid, tid])\n"
+                    "bsk(['tab', 'list', '--session', sid, '--json'])\n")
+        res = {r["name"]: r for r in cl.check(self.tmp)}
+        self.assertTrue(res["no_raw_tab_ops"]["ok"])

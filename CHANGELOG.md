@@ -2,6 +2,26 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 0.1.6（2026-11-02，窗口/tab 资源治理闭环 + 介入语义修正）
+
+### 变更
+- **tab 生命周期闭环**：heal 复用优先（同址标签 → 空白残留 → 最后才 create，不再无条件 tab create 留孤儿）；新增 `reap_own_tabs`（只收自己会话的同地址重复与空白残留；用户窗口标签只报告不动）自动接进 ensure_session，手动入口 `wa.py tab-reap`（--dry-run）
+- **介入≠打断**：`WINDOW_BUSY_HUMAN`（rc=9 报人裁决即停）废止；有人值守改为 30s 被占先提醒（`WINDOW_BUSY_NOTICE`，非阻塞）后继续等满 600s 轮换预算（2026-11-02 用户裁定：人工介入是并行监督，星舵持续推进到任务完成）
+- **人的想法转达纪律**（SKILL §5.5b）：流程中人提出的想法/意见/疑问必须原样整体转达 webai 裁决，agent 不得自行裁决或只记本地
+- **L2 PATH shim**（tools/install_l2_shim.py）：`bsk.exe`→`bsk.bin.exe` + `bsk.cmd`，仅 session start 过闸（无 `STARPILOT_WINDOW_GATE=1` 令牌 → 全局计数，超限拒绝）；wa.py/env.py 直连真身
+- `contract_lint` 新增 `no_raw_tab_ops`（wa.py 之外禁裸调 tab create/close）；命令提取支持连字符子命令
+- SKILL §5.5 硬边界表扩为窗口/tab 双资源纪律；runbook window-session 新增 §8（tab 生命周期 + 介入语义）
+
+## 0.1.5（2026-11-02，窗口资源治理 v3：轮换协议/窗口组/禁无脑重开/全局看门狗，未单独发版）
+
+### 变更
+- 窗口租约（跨任务互斥，不抢占）：`winlease.py` 租约 + journal 组登记 + fencing token + 进程三元组防 PID 复用
+- 组窗口复用（`STARPILOT_GROUP`）：组内活会话直接认领，在组窗口建自己的 tab，不新开窗口
+- 全局跨任务开窗计数（锁目录 session-starts.json，10 分钟/实例 ≤4 次）
+- `reap --global` 看门狗：按 journal 组登记只收本组租约过期会话，无主/别组只报告
+- `contract_lint.no_raw_session_start`（开窗唯一入口=wa.py）；删除裸调脚本 send_once.py / tab_clean.py
+- `tab_scope_report` dict 形状解析修复（此前永远 unknown，发送屡被拒）
+
 ## 0.1.4（2026-10-31，ZCode 宿主服从性针对性优化）
 
 ### 变更

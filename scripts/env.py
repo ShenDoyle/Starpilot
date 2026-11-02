@@ -53,11 +53,12 @@ def _plat() -> str:
 
 
 def find_bsk(env=None, which=None) -> str:
-    """定位顺序与 wa.py 完全一致：BSK_BIN → PATH → ~/.local/bin。"""
+    """定位顺序与 wa.py 完全一致：BSK_BIN → shim 真身 bsk.bin.exe → PATH → ~/.local/bin。"""
     env = os.environ if env is None else env
     which = shutil.which if which is None else which
     for c in [
         env.get("BSK_BIN") or "",
+        os.path.expanduser("~/.local/bin/bsk.bin.exe"),
         which("bsk") or "",
         os.path.expanduser("~/.local/bin/bsk.exe"),
         os.path.expanduser("~/.local/bin/bsk"),

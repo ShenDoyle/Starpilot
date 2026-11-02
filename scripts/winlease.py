@@ -490,6 +490,11 @@ def too_many_starts(instance: str, window: float = START_WINDOW_S,
 ATTENDED_WAIT_S = 30.0
 UNATTENDED_WAIT_S = 600.0
 ATTENDED_ENV = "WA_ATTENDED"
+# 2026-11-02 用户裁定：人工介入是并行监督，**不打断执行**。有人值守时的
+# 语义变为：等 ATTENDED_NOTIFY_WAIT 仍被占 → 提醒人（WINDOW_BUSY_NOTICE），
+# 然后继续等满 UNATTENDED_WAIT_S 预算；ATTENDED_WAIT_S 从「退出阈值」降级为
+# 「提醒阈值」。轮换总预算 = UNATTENDED_WAIT_S（有人/无人一致）。
+ATTENDED_NOTIFY_WAIT = 30.0
 
 
 def is_attended() -> bool:

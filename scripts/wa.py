@@ -42,7 +42,10 @@ import winlease  # noqa: E402
 
 _CANDIDATES = [
     os.environ.get("BSK_BIN") or "",
-    shutil.which("bsk") or "",
+    # L2 shim（2026-11-02）：装了 shim 时真身改名为 bsk.bin.exe，本脚本直连真身
+    # （自己已有租约+全局计数，不必过 shim；也避免所有调用多一层 cmd.exe 开销）。
+    os.path.expanduser("~/.local/bin/bsk.bin.exe"),
+    shutil.which("bsk"),
     os.path.expanduser("~/.local/bin/bsk.exe"),
     os.path.expanduser("~/.local/bin/bsk"),
 ]
@@ -99,9 +102,17 @@ def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, 
 
 
 def _bsk_raw(args: list, timeout: int) -> tuple[int, str, str]:
+    env = None
+    # L2 shim 通行令牌（2026-11-02 用户指令「只要使用 bsk 必须遵守窗口规则」）：
+    # 本入口开窗已受 ensure_session 的租约+计数约束，向 shim 自证「走的是正路」，
+    # 免得被二道计数。只有 session start 需要令牌；其余子命令不加，避免 env 泄面。
+    if len(args) >= 2 and args[0] == "session" and args[1] == "start":
+        env = dict(os.environ)
+        env["STARPILOT_WINDOW_GATE"] = "1"
     try:
         p = subprocess.run([BSK] + args, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+                           encoding="utf-8", errors="replace", timeout=timeout,
+                           env=env)
     except subprocess.TimeoutExpired:
         return 124, "", "bsk 超时（%ss）：%s" % (timeout, " ".join(args[:2]))
     return p.returncode, p.stdout or "", p.stderr or ""
@@ -637,22 +648,112 @@ def window_report(st: dict, sid: str) -> dict:
     return out
 
 
-def heal_window_placement(st: dict, path: str, sid: str) -> dict:
-    """页面开到用户窗口时的自愈：在 Agent Window 里新开 tab 并把绑定地址迁过去。
+BLANK_URLS = ("about:blank", "chrome://newtab/", "edge://newtab/", "")
 
-    成功 = bound_in_agent 且不再出现在 user scope；失败只报告，不硬来
-    （反复抢页面会打扰用户，修根在扩展设置，见 doctor 输出）。
+
+def _agent_tabs(sid: str, timeout: int = 30) -> list:
+    """本会话可见的标签列表；失败返回 []（调用方自行兜底，不在这里判死）。"""
+    try:
+        rc, out, err = bsk(["tab", "list", "--session", sid, "--json"],
+                           timeout=timeout)
+        if rc:
+            return []
+        return json.loads(out or "{}").get("tabs") or []
+    except Exception:
+        return []
+
+
+def _find_blank_tab(sid: str) -> str:
+    """agent 窗口里的空白标签（历史 tab create 的残留）。返回 tab_id 或 ""。"""
+    for t in _agent_tabs(sid):
+        if t.get("scope") != "user" and (t.get("url") or "").strip() in BLANK_URLS:
+            return str(t.get("tab_id") or "")
+    return ""
+
+
+def reap_own_tabs(sid: str, bound: str = "", dry: bool = False) -> dict:
+    """回收**自己会话** Agent Window 里的陈旧标签（2026-11-02 用户指令：tab 累积）。
+
+    边界（由 bsk `tab close` 双重保证：只关 Agent Window 内的标签）：
+    · 同地址重复（含绑定地址）：保留最新/活动的一个，其余关掉；
+    · 空白页残留：有正常标签时全关；只剩空白页时保留最新一个（新会话的导航目标）；
+    · scope=user 的标签一律**不碰**——数量上报，由人处理（bsk 无权关用户标签）。
+    """
+    rep = {"closed": [], "close_failed": [], "user_scope": 0, "dry": dry}
+    tabs = _agent_tabs(sid)
+    if not tabs:
+        rep["error"] = "tab list 失败或为空（会话可能已失效）"
+        return rep
+    groups = {}
+    for t in tabs:
+        if t.get("scope") == "user":
+            rep["user_scope"] += 1
+            continue
+        u = _norm_url(t.get("url") or "")
+        groups.setdefault(u if u not in BLANK_URLS else "__blank__", []).append(t)
+    close = []
+    has_normal = any(u != "__blank__" for u in groups)
+    for u, ts in groups.items():
+        ts_sorted = sorted(ts, key=lambda t: (bool(t.get("active")),
+                                              t.get("tab_id") or 0))
+        if u == "__blank__" and has_normal:
+            close.extend(ts_sorted)  # 有正常标签在，空白残留全关
+            continue
+        for t in ts_sorted[:-1]:  # 留最新/活动的那个
+            close.append(t)
+    for t in close:
+        tid = str(t.get("tab_id") or "")
+        u = (t.get("url") or "")[:60]
+        if not tid:
+            continue
+        if dry:
+            rep["closed"].append({"tab_id": tid, "url": u, "note": "DRY-RUN"})
+            continue
+        rc, out, err = bsk(["tab", "close", "--session", sid, tid], timeout=30)
+        if rc == 0:
+            rep["closed"].append({"tab_id": tid, "url": u})
+        else:
+            rep["close_failed"].append({"tab_id": tid, "url": u,
+                                        "err": (err or out).strip()[:80]})
+    if rep["closed"]:
+        sys.stderr.write("tab 回收：关闭 %d 个陈旧标签（用户窗口标签 %d 个不动，由人处理）\n"
+                         % (len(rep["closed"]), rep["user_scope"]))
+    return rep
+
+
+def heal_window_placement(st: dict, path: str, sid: str) -> dict:
+    """页面开到用户窗口时的自愈：把绑定地址迁回 Agent Window。
+
+    复用优先（2026-11-02 用户指令：禁止无脑开新标签）——
+    ① agent 窗口已有同址标签 → select + 导航；
+    ② 没有同址但有空白残留 → 导航空白标签；
+    ③ 都没有才 `tab create`（创建后立即导航，不留 about:blank 孤儿）。
+    失败只报告，不硬来（反复抢页面会打扰用户，修根在扩展设置，见 doctor 输出）。
     """
     rep = window_report(st, sid)
     if rep.get("ok") is not False:
         return rep
-    rc, out, err = bsk(["tab", "create", "--session", sid], timeout=60)
-    if rc != 0:
-        rep["heal"] = "tab create 失败：%s" % (err or out).strip()[:150]
-        return rep
-    rc, out, err = navigate_soft(sid, st.get("url") or "")
+    bound = st.get("url") or ""
+    tid = find_tab_by_url(sid, bound)
+    if tid:
+        bsk(["tab", "select", "--session", sid, tid], timeout=30)
+        rc, out, err = navigate_soft(sid, bound)
+        note = "复用同址标签 %s + 重新导航" % tid
+    else:
+        blank = _find_blank_tab(sid)
+        if blank:
+            bsk(["tab", "select", "--session", sid, blank], timeout=30)
+            rc, out, err = navigate_soft(sid, bound)
+            note = "复用空白标签 %s + 导航" % blank
+        else:
+            rc, out, err = bsk(["tab", "create", "--session", sid], timeout=60)
+            if rc != 0:
+                rep["heal"] = "tab create 失败：%s" % (err or out).strip()[:150]
+                return rep
+            rc, out, err = navigate_soft(sid, bound)
+            note = "tab create + 重新导航"
     rep2 = window_report(st, sid)
-    rep2["heal"] = ("tab create + 重新导航%s" % ("成功" if rep2.get("ok") else
+    rep2["heal"] = ("%s%s" % (note, "成功" if rep2.get("ok") else
                     "后仍在用户窗口（扩展 Automation 设置为共享模式？更新扩展或改设置）"))
     if rep2.get("ok") and st is not None:
         st["window_kind"] = "agent"
@@ -776,6 +877,25 @@ def cmd_window(a) -> int:
     return 0
 
 
+def cmd_tab_reap(a) -> int:
+    """回收本会话 Agent Window 的陈旧标签（2026-11-02 用户指令：tab 累积）。
+
+    只收两类：同地址重复（留最新/活动）与空白残留；用户窗口标签只报告不动。
+    ensure_session 的两条复用路径会自动跑本逻辑；这里给手动/巡检用。
+    """
+    path = state_path(a.state)
+    st = load_state(path)
+    sid = st.get("session") or ""
+    if not sid:
+        print("state 里没有会话：先 bind（回收无对象）。", file=sys.stderr)
+        return 2
+    rep = reap_own_tabs(sid, st.get("url") or "",
+                        dry=bool(getattr(a, "dry_run", False)))
+    rep["session"] = sid
+    print(json.dumps(rep, ensure_ascii=False, indent=2))
+    return 0 if not rep.get("error") else 1
+
+
 def cmd_lease(a) -> int:
     """窗口租约子命令：status / list / release / takeover。
 
@@ -884,16 +1004,18 @@ def _supports_isolation(st: dict, sid: str, rep: dict | None = None) -> bool:
 def acquire_window(st: dict, path: str, sid: str = "", rep: dict | None = None) -> str:
     """开窗/写页前取窗口租约。冲突**不抢占**，按值守模式给轮换预算：
 
-    · 有人值守（WA_ATTENDED=1）：短等 30s 仍被占 → WINDOW_BUSY_HUMAN 退出，
-      把现场（谁占着、还剩多久、可选动作）直接报给人，由人裁决。
-    · 无人值守（默认）：长等 600s 轮换排队（对方收口即拿到），等不到才
-      WINDOW_BUSY 退出——agent 的外层循环可以稍后重试，不打扰人。
+    · 有人值守（WA_ATTENDED=1）：短等 30s 仍被占 → **先提醒人**（WINDOW_BUSY_NOTICE，
+      报占用者/剩余时间/可选动作），然后**继续等满轮换预算**——2026-11-02 用户裁定：
+      人工介入是并行监督，**不打断星舵执行**；除非人主动要求停止，流程持续推进到
+      任务完成（规划/进度/验收全链路）。
+    · 无人值守（默认）：静默等满预算。等不到才 WINDOW_BUSY 退出（rc=9）——
+      agent 的外层循环可以稍后重试，不打扰人。
     """
     inst = _instance_id(st, rep)
     own = _win_owner(st, path)
     serial = not _supports_isolation(st, sid or (st.get("session") or ""), rep)
     attended = winlease.is_attended()
-    budget = winlease.wait_budget(attended)
+    budget = winlease.wait_budget(False)   # 轮换预算：有人/无人一致（介入≠打断）
     # 预算覆盖口（测试/运维调参）：STARPILOT_LOCK_WAIT 显式设置时取更小者
     try:
         env_wait = float(os.environ.get("STARPILOT_LOCK_WAIT") or "")
@@ -902,29 +1024,21 @@ def acquire_window(st: dict, path: str, sid: str = "", rep: dict | None = None) 
     if env_wait is not None:
         budget = min(budget, max(0.0, env_wait))
     if serial:
-        # 串行降级（实例不支持多 Agent Window）：本来就要排队，等待预算不高于值守预算
-        budget = min(budget, winlease.SERIAL_DEFAULT_WAIT) if attended else budget
+        # 串行降级（实例不支持多 Agent Window）：本来就要排队
+        budget = min(budget, winlease.SERIAL_DEFAULT_WAIT)
         st["_serial_wait"] = budget
     try:
-        rec = winlease.acquire(inst, own, serial=serial, wait=budget)
-    except winlease.WindowBusy as e:
-        holder = e.holder or {}
-        who = (holder.get("owner") or {}).get("workspace") or "未知工作区"
-        left = round((holder.get("lease_until") or 0) - time.time(), 1)
         if attended:
-            print(json.dumps({
-                "code": "WINDOW_BUSY_HUMAN",
-                "instance": inst,
-                "holder_workspace": who,
-                "holder_lease_left_s": max(0, left),
-                "waited_s": round(e.waited, 1),
-                "message": ("需要人工处理：浏览器实例正被另一个任务占用（%s），"
-                            "等了 %.0fs 仍未释放。可选：①等对方收口；②换一个在线"
-                            "浏览器实例（--browser/WA_BROWSER）；③确认对方已死锁时"
-                            "人工授权 takeover（wa.py lease takeover --confirm）。"
-                            "本工具不抢占。" % (who, e.waited)),
-            }, ensure_ascii=False, indent=2), file=sys.stderr)
-            raise SystemExit(9)
+            try:
+                rec = winlease.acquire(inst, own, serial=serial,
+                                       wait=min(winlease.ATTENDED_NOTIFY_WAIT, budget))
+            except winlease.WindowBusy as e:
+                _notify_busy_human(inst, e)   # 提醒人，但不停：继续等满预算
+                rec = winlease.acquire(inst, own, serial=serial,
+                                       wait=max(0.0, budget - winlease.ATTENDED_NOTIFY_WAIT))
+        else:
+            rec = winlease.acquire(inst, own, serial=serial, wait=budget)
+    except winlease.WindowBusy as e:
         print(json.dumps(e.holder, ensure_ascii=False, indent=2), file=sys.stderr)
         raise SystemExit(9)
     if sid:
@@ -933,6 +1047,25 @@ def acquire_window(st: dict, path: str, sid: str = "", rep: dict | None = None) 
     st["lease_owner"] = own
     save_state(path, st)
     return inst
+
+
+def _notify_busy_human(inst: str, e: "winlease.WindowBusy") -> None:
+    """有人值守时的**非阻塞**提醒：占用现场报给人，流程继续等，不要求人裁决。"""
+    holder = e.holder or {}
+    who = (holder.get("owner") or {}).get("workspace") or "未知工作区"
+    left = round((holder.get("lease_until") or 0) - time.time(), 1)
+    print(json.dumps({
+        "code": "WINDOW_BUSY_NOTICE",
+        "instance": inst,
+        "holder_workspace": who,
+        "holder_lease_left_s": max(0, left),
+        "waited_s": round(e.waited, 1),
+        "message": ("提醒（不打断执行）：浏览器实例正被另一个任务占用（%s），"
+                    "本任务在轮换排队中，等对方收口即自动接手。如需立即介入："
+                    "①让对方任务先收口；②换浏览器实例（--browser/WA_BROWSER）；"
+                    "③确认对方死锁时人工授权 takeover（wa.py lease takeover --confirm）。"
+                    % who),
+    }, ensure_ascii=False, indent=2), file=sys.stderr)
 
 
 def enforce_single_session(keep: str = "", browser: str = "", owner: dict | None = None) -> None:
@@ -1054,6 +1187,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
         if sid in ids:
             winlease.claim_session(inst, sid, own)
             enforce_single_session(sid, browser, own)  # 只清自己名下/无主的
+            reap_own_tabs(sid, st.get("url") or "")    # tab 回收（2026-11-02 用户指令）
             if browser and not st.get("browser"):
                 st["browser"] = browser  # env 给的实例也记下来，下次不必再传
                 save_state(path, st)
@@ -1066,6 +1200,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
             sid = gs[-1]
             winlease.claim_session(inst, sid, own)
             enforce_single_session(sid, browser, own)
+            reap_own_tabs(sid, st.get("url") or "")    # tab 回收（只收本任务名下陈旧标签）
             st["session"] = sid
             if browser and not st.get("browser"):
                 st["browser"] = browser
@@ -2369,6 +2504,12 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--confirm", default="",
                    help="release 必填：人工已确认的说明（谁确认、为什么释放）")
     p.set_defaults(func=cmd_window)
+
+    p = sub.add_parser("tab-reap",
+                       help="回收本会话 Agent Window 的陈旧标签（同地址重复/空白残留）；"
+                            "用户窗口标签只报告不动")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_tab_reap)
 
     p = add_pl(sub.add_parser("lease", help="窗口租约：status/list 只读；release 放自己的；"
                                              "takeover 显式接管（须 --confirm）"))

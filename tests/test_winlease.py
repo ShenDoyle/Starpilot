@@ -272,14 +272,21 @@ class TestGlobalStartCounter(Base):
 
 
 class TestWaitBudget(Base):
-    """轮换预算：有人短等提醒人，无人值守长等排队。"""
+    """轮换预算。2026-11-02 用户裁定：人工介入**不打断执行**——
+    ATTENDED_WAIT_S 降级为「提醒阈值」（ATTENDED_NOTIFY_WAIT），
+    轮换总预算有人/无人一致（UNATTENDED_WAIT_S）。"""
 
     def test_budget_by_mode(self):
+        # wait_budget 保留历史语义（提醒阈值），但 acquire_window 的总预算
+        # 一律用 wait_budget(False)——介入≠打断，只是先提醒再继续等。
         self.assertEqual(winlease.wait_budget(True), 30.0)
         self.assertEqual(winlease.wait_budget(False), 600.0)
+        self.assertEqual(winlease.ATTENDED_NOTIFY_WAIT, 30.0)
 
     def test_attended_from_env(self):
         self.assertFalse(winlease.is_attended())
         with mock.patch.dict(os.environ, {"WA_ATTENDED": "1"}):
             self.assertTrue(winlease.is_attended())
             self.assertEqual(winlease.wait_budget(), 30.0)
+            # 有人值守的轮换预算=无人值守（用户裁定：人工介入不打断）
+            self.assertEqual(winlease.wait_budget(False), 600.0)

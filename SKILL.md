@@ -1042,16 +1042,36 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 **④ 不许用「文档措辞」掩盖执行缺陷**：跑不通就报跑不通；不许把失败写成"受限"、
 "理论上的限制"。不许用「理论上可行」代替实测。这条对应的机器判据是 `wa.py triage` 的 rc——rc 非 0 就是没跑通。
 
-**⑤ 窗口资源纪律（2026-11-02 用户指令固化，违反=违例必须申报）**：
+**⑤ 窗口/tab 资源纪律（2026-11-02 用户指令固化，违反=违例必须申报）**：
+
+> 适用范围：**只要使用 bsk（无论哪个 agent / 哪个项目），必须遵守本表**。
+> 开窗与开 tab 的唯一通路在本 skill 的 `wa.py`；`contract_lint` 与 L2 shim 双层把守。
 
 | 规则 | 内容 |
 |---|---|
-| **开窗唯一入口** | 只许 `wa.py` 的 bind/send/wait（内部自动走 ensure_session 单一入口）。任何脚本直接 `bsk session start` = 绕过全部限制，`contract_lint` 的 `no_raw_session_start` 查到即 FAIL |
+| **开窗唯一入口** | 只许 `wa.py` 的 bind/send/wait（内部自动走 ensure_session 单一入口）。任何脚本直接 `bsk session start` = 绕过全部限制，`contract_lint` 的 `no_raw_session_start` 查到即 FAIL；**L2 PATH shim** 在调用层再拦一道（非 wa.py 来源的开窗请求须过全局计数，无令牌直接拒绝并指引正路） |
+| **tab 打开唯一通路** | tab 只经由 `wa.py` 打开：导航前先查同地址标签（`navigate_reuse`，有 → `tab select` 聚焦复用）；归属自愈（heal）复用优先——同址标签 → 空白残留 → 最后才 `tab create`。脚本层直接 `bsk tab create/close` = 违例（`contract_lint` 的 `no_raw_tab_ops` 查到即 FAIL） |
+| **tab 回收** | 会话复用/续租时自动跑 `reap_own_tabs`：同地址重复（留最新/活动）与空白残留关掉；手动入口 `wa.py tab-reap`（支持 `--dry-run`）。**用户窗口（scope=user）标签只报告不动**——由人关闭，agent 无权碰 |
 | **禁止无脑重开** | 全局跨任务计数（锁目录 `session-starts.json`，10 分钟/实例 ≤4 次）。超限 = 先 `doctor` + `lease status` 查环境，**不是删 state 硬闯**；强行继续仅限用户明示授权 |
-| **窗口组复用** | 所有星舵 agent 共享组名（`STARPILOT_GROUP`，默认 `starpilot`）。实例上已有组内活会话 → 自动认领复用，**在组窗口里建自己的 tab**，不新开窗口 |
-| **tab 复用** | 导航前先查同地址标签（`navigate_reuse`）：有 → `tab select` 聚焦复用；同一对话出现第 2 个标签 = 违例。重复标签堆积是风控诱因（2026-11-02 现场：同对话 5 副本） |
-| **轮换纪律** | 实例被占时不抢占：有人值守（`WA_ATTENDED=1`）短等 30s → `WINDOW_BUSY_HUMAN` 把现场报给人裁决；无人值守（默认）长等 600s 轮换排队。一轮结束 → `wa.py lease release` 让出实例（会话保留给下一棒） |
+| **窗口组复用** | 所有星舵 agent 共享组名（`STARPILOT_GROUP`，默认 `starpilot`）。实例上已有组内活会话 → 自动认领复用，**在组窗口里建自己的 tab**，不新开窗口。同一对话出现第 2 个标签 = 违例；重复标签堆积是风控诱因（2026-11-02 现场：同对话 5 副本） |
+| **轮换纪律（介入≠打断）** | 实例被占时不抢占：等 30s 仍被占 → 有人值守先**提醒人**（`WINDOW_BUSY_NOTICE`，非阻塞）后**继续等满轮换预算**，无人值守静默排队；总预算 600s（`STARPILOT_LOCK_WAIT` 可调），等不到 rc=9 退出由外层循环稍后重试。一轮结束 → `wa.py lease release` 让出实例（会话保留给下一棒） |
 | **全局看门狗** | `wa.py reap --global`：不读 state 文件，按 journal 组登记收割**本组**租约过期的会话；无主/别组会话只报告绝不动手 |
+
+**⑤a 人工介入语义（2026-11-02 用户裁定，固化）**：
+
+- 人工介入是**并行监督**，不是执行暂停。除非人主动要求停止，星舵持续推进直到任务
+  完成——**包括项目规划、完成情况汇报、最后的验收**，全程由星舵驱动，不因人的在场
+  而停下来等确认。
+- 人的在场改变的是「信息流向」：重要现场（窗口被占、连续失败、需要授权）**提醒人**，
+  但流程继续；人随时可以插话纠偏，纠偏按 ⑤a 下一条处理。
+
+**⑤b 人的想法必须整体转达 webai（2026-11-02 用户裁定，固化）**：
+
+- 流程中**人提出的任何想法/意见/偏好/疑问**（含技术选型类，如「这个问题用 X 会不会
+  更好」），本地 agent **不得自行裁决或只记本地**——必须在下一轮发送中**原样、整体**
+  转达给 webai，由 webai 出决策与方案；agent 只补事实与现场证据，不替 webai 拍板。
+- 例外仅一条：该点已被 webai 先行裁定覆盖（须引用裁定原文行号/落点），否则一律转达。
+- 转达落账：写进下一轮发送正文，journal 记 `{"action":"relay_human_input"}`。
 
 **⑥ 契约自洽由脚本守**：
 
@@ -1059,9 +1079,10 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 0 即契约不自洽
 ```
 
-它查六件事：rc 表覆盖 `platforms.STALL_*` 全部态、动作卡四段齐全、runbook 索引链接存在、
+它查七件事：rc 表覆盖 `platforms.STALL_*` 全部态、动作卡四段齐全、runbook 索引链接存在、
 硬边界表列出的命令在 `wa.py` 里真实存在、`verified` 与 `write_verified` 分账未被混用、
-`no_raw_session_start`（仓库内禁止绕过 wa.py 直接开窗）。
+`no_raw_session_start`（仓库内禁止绕过 wa.py 直接开窗）、
+`no_raw_tab_ops`（仓库内禁止绕过 wa.py 直接开/关 tab）。
 
 ---
 
