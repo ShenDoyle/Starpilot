@@ -25,6 +25,8 @@ ALTERNATIVES = {
     "duplicate": "确认平台是否已收到（probe 的 reply_count）；要重发就换一条独立表述，别原样重发",
     "prompt_drift": "重新 dry-run 一次生成新计划，让批准跟着新正文走；不要复用旧批准硬发",
     "platform_mismatch": "计划是给另一个平台做的：回到原平台继续，或对新平台重新 dry-run",
+    "window_unverified": "人工确认当前窗口归属后 `wa.py window release --confirm '<说明>'` "
+                         "释放窗口，重新 bind（自带归属探测）后再走闸门；本类拦截无参数可越过",
 }
 
 
@@ -50,6 +52,7 @@ REASON_HUMAN = {
     "duplicate": "这条内容已经发过一次了",
     "prompt_drift": "正文和计划里的不一样（被改过）",
     "platform_mismatch": "计划是给另一个平台做的",
+    "window_unverified": "浏览器窗口归属还没确认（探不到或开错窗口）",
 }
 
 
@@ -104,4 +107,7 @@ def classify(kind: str, **ctx) -> dict:
         return _result("high", False, "prompt_drift", ALTERNATIVES["prompt_drift"])
     if kind == "platform_mismatch":
         return _result("high", False, "platform_mismatch", ALTERNATIVES["platform_mismatch"])
+    if kind == "window_unverified":
+        return _result("high", False, "window_unverified",
+                       ALTERNATIVES["window_unverified"])
     return _result("high", False, kind)

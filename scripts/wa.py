@@ -583,9 +583,17 @@ def heal_window_placement(st: dict, path: str, sid: str) -> dict:
 #   verified  已验证页面在本会话 Agent Window        → 放行
 #   misplaced 已确认页面不在（用户窗口/自愈失败）      → 一律禁止
 #   unknown   探不到（tab list 失败/扩展无响应）       → 禁止进入受保护操作
-# 受保护操作 = 向页面写入（send：打错窗口 = 往用户窗口打字）。只读操作（probe/read/
-# triage）不受此门约束。逃生阀 WA_ALLOW_UNVERIFIED_WINDOW='<理由>'：单次消费 +
-# 强制落账 P0-ESC（与 ORCHESTRATOR_REQUIRED 逃生门同一模式），不是静默降级。
+# 受保护操作 = 向页面写入（send/clear：打错窗口 = 往用户窗口打字）。只读操作
+# （probe/read/triage）不受此门约束。
+#
+# 逃生阀已删除（2026-11-02 GPT 复审阶段一裁定）：unknown/misplaced 一律拒绝，
+# 无环境变量 / 调试参数 / 隐藏入口可越过。人工接管走显式流程：
+#   wa.py window status   —— 看当前三态与判定时间（只读诊断，不受门约束）
+#   wa.py window release --confirm '<人已确认>' —— 停会话（释放窗口）+ 清缓存，
+#                            必须人工确认后重新 bind（bind 自带归属探测）
+# 绕过入口盘点（阶段一）：STARPILOT_ALLOW_DIRECT_SEND 只豁免编排器熔断，
+# 其后的窗口门照常执行，不构成窗口验证绕过；IAB 传输无窗口概念，是传输形态
+# 而非参数绕过。
 
 WINDOW_CHECK_TTL_S = 300
 
@@ -611,11 +619,18 @@ def window_verified(st: dict, path: str, sid: str, attempts: int = 3) -> str:
 
 
 def require_window_verified(st: dict, path: str, sid: str):
-    """send 前强制校验。返回 (ok, 拒绝说明)。None/False 不放行（GPT P0 裁定）。"""
+    """send/clear 前强制校验。返回 (ok, 拒绝说明)。
+
+    GPT 复审阶段一裁定：unknown/misplaced 一律拒绝，逃生阀已删除——没有
+    会话 = 归属未知，同样拒绝；无任何环境变量 / 参数可越过本门。
+    """
     if _transport_is_iab():
         return True, ""
     if not sid:
-        return True, ""  # 没会话的发送会在 ensure_session 自己失败，不归这门管
+        # 没有会话就没有归属可言：unknown 即拒绝（此前放行给 ensure_session
+        # 兜底是隐式信任，复审后改为显式拒绝，堵住「无会话直发」入口）。
+        return False, ("state 里没有会话（session 为空）——归属无从谈起，"
+                       "按 unknown 拒绝。先跑 wa.py bind 重新绑定。")
     checked_at = float(st.get("window_checked_at") or 0)
     fresh = (st.get("window_verified") in ("verified", "misplaced")
              and time.time() - checked_at < WINDOW_CHECK_TTL_S)
@@ -623,44 +638,59 @@ def require_window_verified(st: dict, path: str, sid: str):
     if v == "verified":
         save_state(path, st)
         return True, ""
-    esc = os.environ.get("WA_ALLOW_UNVERIFIED_WINDOW", "")
-    if esc.strip():
-        del os.environ["WA_ALLOW_UNVERIFIED_WINDOW"]  # 单次消费：用完即焚
-        _ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        _eid = "P0-ESC-%s" % hashlib.sha256(
-            ("%s|%s" % (_ts, st.get("url") or "")).encode("utf-8")).hexdigest()[:8]
-        root = os.path.dirname(path) or "."
-        try:
-            import pending_gate as _pg
-            _led = _pg.pending_path_for(root, "", "")
-            _head = "" if os.path.exists(_led) else "# 未清项清单\n"
-            os.makedirs(os.path.dirname(_led), exist_ok=True)
-            with open(_led, "a", encoding="utf-8") as _f:
-                _f.write(_head + ("- [P0][%s] unverified_window_send 归属未验证（%s）仍发送"
-                                  " | deferred(违例：%s target=%s reason=%s；"
-                                  "必须在回执三栏报备) | 来源:escape_hatch\n"
-                                  % (_eid, v, _ts, hashlib.sha256(
-                                      (st.get("url") or "").encode("utf-8")
-                                  ).hexdigest()[:12], esc.strip())))
-        except Exception:
-            pass
-        sys.stderr.write("警告：窗口归属未验证（%s）仍发送——已落账 %s，须在回执三栏报备\n"
-                         % (v, _eid))
-        save_state(path, st)
-        return True, ""
     save_state(path, st)
     if v == "misplaced":
         why = ("页面被确认开在本会话 Agent Window 之外（自愈失败）。往用户窗口打字 = "
-               "直接干扰人用电脑，禁止发送。修根：更新 BrowserSkill 扩展 ≥0.4.0、"
-               "把扩展 Automation 设置从「共享标签页」改为允许独立 Agent Window，"
-               "或 rebind。")
+               "直接干扰人用电脑，禁止发送。人工接管（显式流程，无环境变量可越过）："
+               "①人确认当前窗口归属 → ②`wa.py window release --confirm '<确认说明>'`"
+               "停会话释放窗口 → ③重新 `wa.py bind`（bind 自带归属探测）。")
     else:
         why = ("无法确认窗口归属（tab list 探不到：扩展无响应/版本过旧）。"
-               "归属未知 ≠ 归属正确，禁止发送。处置：跑 wa.py doctor 看扩展状态，"
-               "或重新 bind。")
-    why += ("\n  逃生阀（单次消费，理由必填，落账 P0-ESC）："
-            "WA_ALLOW_UNVERIFIED_WINDOW='<理由>' 重跑")
+               "归属未知 ≠ 归属正确，禁止发送。处置：跑 wa.py doctor 看扩展状态；"
+               "需人工接管时走显式流程 `wa.py window release --confirm '<确认说明>'` "
+               "后重新 bind——本门没有环境变量逃生阀（GPT 复审阶段一裁定）。")
     return False, why
+
+
+def cmd_window(a) -> int:
+    """窗口归属子命令：status（只读诊断）/ release（显式人工接管）。"""
+    path = state_path(a.state)
+    st = load_state(path)
+    if a.window_cmd == "status":
+        sid = st.get("session") or ""
+        info = {"window_verified": st.get("window_verified"),
+                "window_checked_at": st.get("window_checked_at"),
+                "session": sid, "url": st.get("url"),
+                "note": "status 是只读诊断，不受窗口门约束"}
+        if sid and not st.get("window_checked_at"):
+            v = window_verified(st, path, sid)
+            info["window_verified"] = v
+            save_state(path, st)
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0
+    # release：显式人工接管——停会话（释放窗口）+ 清归属缓存，必须带确认说明
+    conf = (a.confirm or "").strip()
+    if not conf:
+        print("WINDOW_RELEASE_REQUIRES_CONFIRM：release 必须带 "
+              "--confirm '<人工已确认的说明>'（谁确认的、为什么释放）。\n"
+              "  本命令会停掉当前会话并清除归属缓存，之后必须重新 bind。",
+              file=sys.stderr)
+        return 6
+    sid = st.get("session") or ""
+    stopped = ""
+    if sid:
+        try:
+            bsk(["session", "stop", sid], timeout=30)
+            stopped = sid
+        except Exception as e:
+            stopped = "stop 失败(%s)" % e
+    for k in ("window_verified", "window_checked_at"):
+        st.pop(k, None)
+    save_state(path, st)
+    print(json.dumps({"ok": True, "released_session": stopped,
+                      "confirm": conf, "next": "重新 wa.py bind（自带归属探测）"},
+                     ensure_ascii=False, indent=2))
+    return 0
 
 
 def enforce_single_session(keep: str = "", browser: str = "") -> None:
@@ -1167,6 +1197,12 @@ def cmd_clear(a) -> int:
     st = load_state(path)
     touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
+    # clear 也是页面写路径（打错窗口 = 清掉用户正在输入的内容），同受窗口门约束
+    # （GPT 复审阶段一：受保护操作 = 向页面写入，不止 send）。
+    _wok, _why = require_window_verified(st, path, st.get("session") or "")
+    if not _wok:
+        print("WINDOW_UNVERIFIED：窗口归属未确认，拒绝清空。\n  " + _why, file=sys.stderr)
+        return 6
     sid = ensure_session(st, path)
     res = clear_editor(p, sid)
     res["platform"] = p["key"]
@@ -1216,6 +1252,8 @@ def cmd_send(a) -> int:
     #   · 强制落账——放行时向未清项台账追加 P0-ESC 条目（deferred(违例)），
     #     该条目必须在回执三栏「违例/异常」栏出现（pending_gate.check_receipt 强制），
     #     隐身不报 = 回执不合格——堵死「违例隐身」模式。
+    #   · 本逃生门只豁免「编排器熔断」，不豁免其后的窗口归属三态门——
+    #     即使直发放行，window unknown/misplaced 照样 rc=6（复审阶段一盘点结论）。
     root = os.path.dirname(path) or "."
     cur_ptr = os.path.join(root, "state", "current")
     if os.path.exists(cur_ptr):
@@ -1257,7 +1295,7 @@ def cmd_send(a) -> int:
 
     # ---- 窗口归属三态门（2026-11-02 GPT 审计 P0：null 不得放行）----
     # send 是写路径：打错窗口 = 往用户正在用的窗口打字。归属 unknown/misplaced
-    # 一律拒绝；逃生门单次消费 + 落账 P0-ESC，与上方熔断逃生门同一模式。
+    # 一律拒绝，逃生阀已删除（复审阶段一裁定）——人工接管走 wa.py window release。
     _wok, _why = require_window_verified(st, path, st.get("session") or "")
     if not _wok:
         print("WINDOW_UNVERIFIED：窗口归属未确认，拒绝发送。\n  " + _why, file=sys.stderr)
@@ -2000,6 +2038,12 @@ def main(argv: list | None = None) -> int:
 
     p = add_pl(sub.add_parser("clear", help="清空输入框（不发送）：给「写完未发」的恢复态用"))
     p.set_defaults(func=cmd_clear)
+
+    p = sub.add_parser("window", help="窗口归属：status 只读诊断 / release 显式人工接管")
+    p.add_argument("window_cmd", choices=["status", "release"])
+    p.add_argument("--confirm", default="",
+                   help="release 必填：人工已确认的说明（谁确认、为什么释放）")
+    p.set_defaults(func=cmd_window)
 
     p = add_pl(sub.add_parser("send", help="发送一条消息"))
     p.add_argument("--file")

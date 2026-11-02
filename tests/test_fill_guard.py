@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -188,7 +189,12 @@ class TestWriteWhitelistIsShared(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.d, True)
         self.state = os.path.join(self.d, ".wa-state.json")
         with open(self.state, "w", encoding="utf-8") as f:
-            json.dump({"url": "https://example.com/x", "platform": "claude"}, f)
+            # 归属预置为 verified：本用例专测写路径白名单，别让窗口门（复审
+            # 阶段一新增，无会话=unknown 先拒）抢在前面把断言变成 rc=6
+            json.dump({"url": "https://example.com/x", "platform": "claude",
+                       "session": "sess1",
+                       "window_verified": "verified",
+                       "window_checked_at": time.time()}, f)
 
     def test_cli_refuses_unverified_write_method(self):
         """claude 的 write_allowed 是空的 → CLI 也不许写。

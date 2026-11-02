@@ -859,6 +859,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `wa.py unlock` | 清残留的 state 写锁（O_EXCL 锁 + 死进程接管） |
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
+| `wa.py window status\|release` | 窗口归属显式接管：status 只读看三态；release 须 `--confirm '<人工确认说明>'`，停会话清归属缓存后重新 bind（无环境变量逃生阀） |
 | `wa.py triage [--relocate]` | 卡住判定：只读页面，判风控/漂移/假生成/选择器失效/没发出去，给下一步。`--relocate` 用备用读法复探（不刷新） |
 | `orchestrator.py scope --rounds N --deliverables N --modules N` | 定格任务范围预估（一次定格；改要 `--revise-reason`，audit 单列 scope_revised） |
 | `orchestrator.py stage add\|start\|accept\|list` | 阶段状态机 pending→executing→submitted→accepted；未 accepted 不许开下一阶段 |
@@ -878,7 +879,9 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 - **归属是三态，不是布尔（2026-11-02 GPT 审计 P0）**：`window.verified` =
   `verified` / `misplaced` / `unknown`。**unknown 不得当成通过**：探不到（扩展无响应、
   tab list 失败）与确认开错窗口一样不许写——send 会以 rc=6 `WINDOW_UNVERIFIED` 拒绝。
-  判定结果带时间戳（TTL 300s），过期的 verified 会重新探测。
+  判定结果带时间戳（TTL 300s），过期的 verified 会重新探测。**本门无环境变量
+  逃生阀**（GPT 复审阶段一删除 WA_ALLOW_UNVERIFIED_WINDOW）；人工接管走显式
+  流程 `wa.py window release --confirm '<说明>'` → 重新 bind；clear 同受此门约束。
 - **窗口租约 + 自动收割（2026-11-02 新增）**：每条浏览器命令都会续租
   （`lease_until = now + idle_close_s`，缺省 900 秒，config `idle_close_s` 或
   `WA_IDLE_CLOSE_S` 可调）；**bind 成功后立即启动收割器**（后台任务常驻）：
@@ -982,7 +985,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | `probe` 报 `editor: false` | 平台改版，选择器失效 | **这不是平台「断片」**，是 DOM 变了 → 回填 `platforms.py` 的 `sel` |
 | 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论；换平台前先跑 `templates/web-ai-eval.md` |
 | 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI |
-| `WINDOW_UNVERIFIED`（send rc=6） | 窗口归属 unknown/misplaced：探不到或确认不在 Agent Window | **不许发**（打错窗口 = 往用户窗口打字）。`wa.py doctor` 看 `window_verified`；修扩展 ≥0.4.0 / 改 Automation 设置 / 重新 bind。用户明示可越过时：`WA_ALLOW_UNVERIFIED_WINDOW='<理由>'`（单次消费 + 落账 P0-ESC） |
+| `WINDOW_UNVERIFIED`（send/clear rc=6） | 窗口归属 unknown/misplaced：探不到或确认不在 Agent Window | **不许发**（打错窗口 = 往用户窗口打字）。`wa.py doctor` 看 `window_verified`；修扩展 ≥0.4.0 / 改 Automation 设置 / 重新 bind。**无环境变量逃生阀**（GPT 复审阶段一已删除）；人工接管走显式流程：`wa.py window status`（只读）→ `wa.py window release --confirm '<人工确认说明>'`（停会话清缓存）→ 重新 bind |
 | `stage start` 被拒（blocked_by） | 上一阶段还停在 submitted，没收 accepted | 让 web_ai 或用户 `stage accept <id> --by web_ai --evidence '<依据>'` 后再 start；收口 ≠ 验收通过 |
 | `decisions.py check` 返回 6 | 无记录 / 只是倾向（tentative）/ 事实已变 | 重新发裁定申请（`templates/web-ai-decision.md`），拿到明确「批准 A」再动手；软话不算授权 |
 | `msg_count=0` 但页面正常 | 手工 bsk session 顶掉了 state 里的 session | 重新 `wa.py bind <url>` 恢复 |

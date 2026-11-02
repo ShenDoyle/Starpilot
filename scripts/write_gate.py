@@ -134,6 +134,8 @@ BLOCK_CODES = {
     "WRITE_BLOCKED_WRITE_METHOD": "写入路径不在该平台已实测的白名单里",
     "WRITE_BLOCKED_GUARD": "DOM 守卫不过（编辑器不干净 / 有弹窗遮罩 / 不能发送 / 地址漂移）",
     "WRITE_BLOCKED_DUPLICATE": "同指纹已发过，禁止重复发送",
+    "WRITE_BLOCKED_WINDOW_UNVERIFIED": "窗口归属未验证（unknown/misplaced），禁止真实写"
+    "（复审阶段一：闸门写路径与 wa.py send 同受窗口门约束，无逃生阀）",
 }
 
 
@@ -711,6 +713,15 @@ def cmd_send(a) -> int:
                        risk=riskmod.classify("prompt_drift"))
 
     sid = wa.ensure_session(st, wa_state_path(root, a.state))
+    # ---- 窗口归属三态门（复审阶段一新增）----
+    # 本函数是编排器真实写的执行体，此前不走 wa.py cmd_send，窗口门被整个绕过
+    # （阶段一绕过入口盘点发现的第三个入口）。同样 fail-closed：unknown/misplaced
+    # 一律拦截，无环境变量逃生阀；人工接管走 wa.py window release → rebind。
+    _wok, _wwhy = wa.require_window_verified(st, wa_state_path(root, a.state), sid)
+    if not _wok:
+        return blocked("WRITE_BLOCKED_WINDOW_UNVERIFIED", _wwhy,
+                       {"approval_id": a.approval},
+                       risk=riskmod.classify("window_unverified"))
     snap = dom_snapshot(p, sid)
     ok, why = guard_ok(snap, url)
     if not ok:
