@@ -884,6 +884,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
 | `wa.py window status\|release` | 窗口归属显式接管：status 只读看三态；release 须 `--confirm '<人工确认说明>'`，停会话清归属缓存后重新 bind（无环境变量逃生阀） |
+| `wa.py lease status\|list` / `release` / `takeover` | **窗口占用租约**：status/list 只读看实例归谁；release 释放自己的（别人的一律拒）；takeover 须 `--confirm '<谁授权、为什么对方已不在>'`，覆盖活租约并落 journal |
 | `wa.py triage [--relocate]` | 卡住判定：只读页面，判风控/漂移/假生成/选择器失效/没发出去，给下一步。`--relocate` 用备用读法复探（不刷新） |
 | `orchestrator.py scope --rounds N --deliverables N --modules N` | 定格任务范围预估（一次定格；改要 `--revise-reason`，audit 单列 scope_revised） |
 | `orchestrator.py stage add\|start\|accept\|list` | 阶段状态机 pending→executing→submitted→accepted；未 accepted 不许开下一阶段 |
@@ -919,6 +920,18 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
   现状查看：`wa.py doctor` 的 `lease` 块；手动收一次：`wa.py reap --once`（--dry-run 先看）。
 - 任务结束才 `session stop`；中途停止会丢 Agent Window 状态。
 - 同一时刻只允许一个 session 操作该对话，避免双写。
+- **窗口占用租约（跨任务互斥，2026-11-02 新增）**：上面那条 `lease_until` 管的是
+  「本任务闲置多久收窗」，**这条管的是「这个浏览器实例现在归谁」**——两码事，别混。
+  一个浏览器实例 = 一份租约文件（`~/.starpilot/locks/win-<实例>.json`，跨项目可见）：
+  - **有主（心跳新鲜）就拒绝**：rc=9 `WINDOW_BUSY`，打印持有者工作区/平台/剩余秒数。
+    不抢占、不清理对方的会话——2026-11-02 现场：另一任务的 state 没记 `browser`，
+    旧逻辑 `if browser and ...` 过滤全失效，把本项目刚开的会话 60 秒内停掉，双方都不知情。
+  - **只清自己名下的会话**：`enforce_single_session` / `reap` 现在会查会话的归属声明，
+    别人的活会话跳过并打印原因。
+  - **无法真隔离就降级串行**：实例探不到 `tab list --scope`（扩展 <0.4.0）时自动进入
+    串行模式，有界等待（`STARPILOT_SERIAL_WAIT`，缺省 120s），等不到照样 rc=9，不硬挤。
+  - 诊断与接管：`wa.py lease status|list`（只读）、`wa.py stop`（顺带释放自己的租约）、
+    `wa.py lease takeover --confirm '<谁授权、为什么对方已不在>'`（覆盖活租约并落 journal）。
 - **一个浏览器只留一份 BrowserSkill 扩展**。同一个 Chrome 里装了两份以上，bsk 会报多个
   实例：发送落在实例 A、读回却查实例 B，表现就是「发得出去、永远读不到回复」，每次重试
   再开一个新窗口。开窗前跑一次 `wa.py doctor`，`duplicates` 非空就先让人清
@@ -1027,16 +1040,28 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 表内没有，且涉及方案/范围/架构 | **先裁定后动手**（`templates/web-ai-decision.md`），禁止先斩后奏 |
 
 **④ 不许用「文档措辞」掩盖执行缺陷**：跑不通就报跑不通；不许把失败写成"受限"、
-不许用「理论上可行」代替实测。这条对应的机器判据是 `wa.py triage` 的 rc——rc 非 0 就是没跑通。
+"理论上的限制"。不许用「理论上可行」代替实测。这条对应的机器判据是 `wa.py triage` 的 rc——rc 非 0 就是没跑通。
 
-**⑤ 契约自洽由脚本守**：
+**⑤ 窗口资源纪律（2026-11-02 用户指令固化，违反=违例必须申报）**：
+
+| 规则 | 内容 |
+|---|---|
+| **开窗唯一入口** | 只许 `wa.py` 的 bind/send/wait（内部自动走 ensure_session 单一入口）。任何脚本直接 `bsk session start` = 绕过全部限制，`contract_lint` 的 `no_raw_session_start` 查到即 FAIL |
+| **禁止无脑重开** | 全局跨任务计数（锁目录 `session-starts.json`，10 分钟/实例 ≤4 次）。超限 = 先 `doctor` + `lease status` 查环境，**不是删 state 硬闯**；强行继续仅限用户明示授权 |
+| **窗口组复用** | 所有星舵 agent 共享组名（`STARPILOT_GROUP`，默认 `starpilot`）。实例上已有组内活会话 → 自动认领复用，**在组窗口里建自己的 tab**，不新开窗口 |
+| **tab 复用** | 导航前先查同地址标签（`navigate_reuse`）：有 → `tab select` 聚焦复用；同一对话出现第 2 个标签 = 违例。重复标签堆积是风控诱因（2026-11-02 现场：同对话 5 副本） |
+| **轮换纪律** | 实例被占时不抢占：有人值守（`WA_ATTENDED=1`）短等 30s → `WINDOW_BUSY_HUMAN` 把现场报给人裁决；无人值守（默认）长等 600s 轮换排队。一轮结束 → `wa.py lease release` 让出实例（会话保留给下一棒） |
+| **全局看门狗** | `wa.py reap --global`：不读 state 文件，按 journal 组登记收割**本组**租约过期的会话；无主/别组会话只报告绝不动手 |
+
+**⑥ 契约自洽由脚本守**：
 
 ```bash
 python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 0 即契约不自洽
 ```
 
-它查五件事：rc 表覆盖 `platforms.STALL_*` 全部态、动作卡四段齐全、runbook 索引链接存在、
-硬边界表列出的命令在 `wa.py` 里真实存在、`verified` 与 `write_verified` 分账未被混用。
+它查六件事：rc 表覆盖 `platforms.STALL_*` 全部态、动作卡四段齐全、runbook 索引链接存在、
+硬边界表列出的命令在 `wa.py` 里真实存在、`verified` 与 `write_verified` 分账未被混用、
+`no_raw_session_start`（仓库内禁止绕过 wa.py 直接开窗）。
 
 ---
 
@@ -1055,7 +1080,7 @@ python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 
 | 6 | 窗口门 / 写闸门 / 裁定无效 / 白名单外写 | agent | 见下方 `WINDOW_UNVERIFIED`、`WRITE_BLOCKED_*`、`decisions check` 三行 |
 | 7 | 有 run 却直发 | agent | 改走 `loop --once`；**不许**用 `STARPILOT_ALLOW_DIRECT_SEND` 绕过 |
 | 8 | 写路径不在白名单 | agent | `runbooks/dom-drift.md` 标定写路径后再写 |
-| 9 | 平台锁被占 | agent | 等对方收口；确认残留才 `plock --release` |
+| 9 | 资源被占：平台锁 `LOCK_BUSY` / 窗口占用租约 `WINDOW_BUSY` | agent | 看 `code` 字段：平台锁 → 等对方收口，确认残留才 `plock --release`；窗口租约 → `wa.py lease status` 看持有者，**不抢**，等 / 换实例 / 人工授权后 `lease takeover` |
 | 10 | 风控 / 验证码 / 掉登录 | **人** | `runbooks/anti-bot.md`（分四型，别一律重试） |
 | 11 | 对话漂移 | agent | `runbooks/context-loss.md` §2.1 `rebind` |
 | 12 | 假生成（流死了） | agent | 按一次停止再重发；`runbooks/` 无独立文件，见本表下行「停止按钮还在」 |
@@ -1074,6 +1099,7 @@ python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 
 | `probe` 报 `editor: false` | 平台改版，选择器失效 | **这不是平台「断片」**，是 DOM 变了 → 走 `runbooks/dom-drift.md` 重标定（15 分钟四步），**不是**换平台 |
 | 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论（`runbooks/context-loss.md` §2.2）；换平台前先跑 `templates/web-ai-eval.md` |
 | 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI（`runbooks/context-loss.md` §2.3） |
+| `WINDOW_BUSY`（bind/send/clear rc=9） | 这个浏览器实例被另一个**活**任务占着（窗口占用租约未过期） | **不抢、不停对方的会话**。输出里有持有者工作区/平台/剩余秒数：①等它收口；②换一个实例做真隔离（`--browser <id>` / `WA_BROWSER`，先 `wa.py doctor` 看在线实例）；③确认对方进程已死且人工授权 → `wa.py lease takeover --confirm '<说明>'`。查询：`wa.py lease status\|list` |
 | `WINDOW_UNVERIFIED`（send/clear rc=6） | 窗口归属 unknown/misplaced：探不到或确认不在 Agent Window | **不许发**（打错窗口 = 往用户窗口打字）。`wa.py doctor` 看 `window_verified`；修扩展 ≥0.4.0 / 改 Automation 设置 / 重新 bind。**无环境变量逃生阀**（GPT 复审阶段一已删除）；人工接管走显式流程：`wa.py window status`（只读）→ `wa.py window release --confirm '<人工确认说明>'`（停会话清缓存）→ 重新 bind |
 | `stage start` 被拒（blocked_by） | 上一阶段还停在 submitted，没收 accepted | 让 web_ai 或用户 `stage accept <id> --by web_ai --evidence '<依据>'` 后再 start；收口 ≠ 验收通过 |
 | `decisions.py check` 返回 6 | 无记录 / 只是倾向（tentative）/ 事实已变 | 重新发裁定申请（`templates/web-ai-decision.md`），拿到明确「批准 A」再动手；软话不算授权 |

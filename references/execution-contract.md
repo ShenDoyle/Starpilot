@@ -67,6 +67,7 @@
 - [ ] 已定平台（`references/web-ai-platforms.md` 选型表；不随手挑）
 - [ ] 已登录（未登录时 `probe` 会 `login_required`，别在这之后才发现）
 - [ ] 整个项目**只允许一条活跃对话**；要新开必须走 `bind --new` 且仅限第 1 轮
+- [ ] 浏览器实例**没被别的任务占着**（`wa.py lease status` 看 `state`；busy 就先等或换实例，**不许** `lease takeover` 抢活租约）
 
 **唯一通路**
 ```bash
@@ -83,6 +84,7 @@ python scripts/wa.py bind <URL> --reuse-existing  # 明确沿用同一条
 **失败分支**
 | 现象 | 含义 | 下一步 |
 |---|---|---|
+| rc=9 `WINDOW_BUSY` | 实例被另一个活任务占着 | 等它收口 / 换在线实例 `--browser`；确认对方已死且人工授权才 `lease takeover --confirm` |
 | rc=6 `WINDOW_UNVERIFIED` | 归属未知/开错窗口 | `wa.py window status` 看三态 → 人工确认后 `window release --confirm` → 重新 bind |
 | `editor: false` | 平台改版，选择器失效 | → `runbooks/dom-drift.md`（不是换平台） |
 | `login_required` | 掉登录态 | 停下找人登录；不要用脚本模拟登录 |
@@ -122,7 +124,8 @@ python scripts/wa.py send --file <正文文件>
 |---|---|---|
 | rc=7 `ORCHESTRATOR_REQUIRED` | 有 run 却直发 | 改走 `loop --once`；**不许**用 `STARPILOT_ALLOW_DIRECT_SEND` 绕过 |
 | rc=6 `WINDOW_UNVERIFIED` | 归属未确认 | CARD-bind 的失败分支 |
-| rc=9 | 平台锁被别的任务占 | 等对方收口；确认是残留锁才 `plock --release` |
+| rc=9 `LOCK_BUSY` | 平台锁被别的任务占 | 等对方收口；确认是残留锁才 `plock --release` |
+| rc=9 `WINDOW_BUSY` | 浏览器实例被别的活任务占（窗口占用租约） | 不抢；等 / 换实例；确需接管走 `wa.py lease takeover --confirm '<说明>'` |
 | rc=8 `WRITE_BLOCKED_*` 白名单 | 写入路径未实测 | 走 `runbooks/dom-drift.md` 标定写路径后再写 |
 | `fill_focus_lost` / 写入字数不符 | 受控编辑器抢焦点/超时 | 先 `probe` 读字数：**已写入就别重写**；不符才重写一次 |
 | rc=14 `send_not_taken` | 字还在框里，消息数没涨 | 先 `triage` 看有无弹窗/遮罩，再按分支处置，**不连点** |
@@ -233,7 +236,7 @@ python scripts/wa.py clear
 | 6 | wa / 闸门 | 窗口门拒 / 写闸门拒 / 裁定无效 / 白名单外写路径 | agent：看具体 code |
 | 7 | wa send | 有 run 却直发（`ORCHESTRATOR_REQUIRED`） | agent：改走 loop |
 | 8 | wa send | 写路径不在平台白名单 | agent：重标定写路径 |
-| 9 | wa | 平台占用锁被别人持有 | agent：等；残留锁才 plock |
+| 9 | wa | 资源被占：`LOCK_BUSY`（平台占用锁）或 `WINDOW_BUSY`（窗口占用租约） | agent：看 `code`。锁 → 等，残留才 `plock --release`；租约 → `wa.py lease status` 看持有者，**不抢**（等 / 换实例 / 人工授权后 takeover） |
 | 10 | wa triage | 风控 / 验证码 / 掉登录 | **人**：`runbooks/anti-bot.md` |
 | 11 | wa triage | 对话漂移（不在绑定对话上） | agent：`runbooks/context-loss.md` |
 | 12 | wa triage | 假生成（流死了 UI 没复位） | agent：停一次再发 |

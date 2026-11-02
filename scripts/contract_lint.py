@@ -158,6 +158,38 @@ def check(root: str) -> list:
               % (leak or "无", no_ts or "无")),
     })
 
+    # 6. 禁止裸调开窗（2026-11-02 用户指令「禁止无脑重复打开新窗口」）
+    #    开窗唯一入口 = scripts/wa.py 的 ensure_session（那里有全局跨任务频率计数、
+    #    组窗口复用、窗口租约）。任何其他 .py 直接 bsk session start = 绕过所有限制
+    #    = 2026-11-02 现场 13 个标签堆积的直接根因，FAIL。
+    offenders = []
+    py_roots = [os.path.join(root, "scripts"), os.path.join(root, "runtime")]
+    pat = re.compile(r"\[?\(?[\"']session[\"']\s*,\s*[\"']start[\"']")
+    for base in py_roots:
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in ("__pycache__",)]
+            for fn in filenames:
+                if not fn.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                if rel.replace("\\", "/") in ("scripts/wa.py",):
+                    continue
+                try:
+                    src = open(os.path.join(dirpath, fn), encoding="utf-8").read()
+                except Exception:
+                    continue
+                if pat.search(src):
+                    offenders.append(rel.replace("\\", "/"))
+    results.append({
+        "name": "no_raw_session_start",
+        "ok": not offenders,
+        "detail": "开窗唯一入口=wa.py ensure_session，无裸调" if not offenders
+        else ("这些文件绕过 wa.py 直接 bsk session start（删掉或改走 wa.py）：%s"
+              % offenders),
+    })
+
     return results
 
 

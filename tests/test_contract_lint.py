@@ -45,7 +45,7 @@ class TestRepoContract(unittest.TestCase):
         res = cl.check(ROOT)
         failed = [r for r in res if not r["ok"]]
         self.assertEqual(failed, [], "契约不自洽：%s" % failed)
-        self.assertEqual(len(res), 5, "五项检查都要跑")
+        self.assertEqual(len(res), 6, "六项检查都要跑")
 
 
 class _CopyBase(unittest.TestCase):
@@ -106,3 +106,20 @@ class TestDetectsBreakage(_CopyBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNoRawSessionStart(_CopyBase):
+    """禁止裸调开窗：wa.py 之外出现 bsk session start 必须FAIL（2026-11-02）。"""
+
+    def test_offender_fails(self):
+        offender = os.path.join(self.tmp, "runtime", "wa")
+        os.makedirs(offender, exist_ok=True)
+        with open(os.path.join(offender, "rogue.py"), "w", encoding="utf-8") as f:
+            f.write('import subprocess\nsubprocess.run(["bsk", "session", "start", "--no-focus"])\n')
+        res = {r["name"]: r for r in cl.check(self.tmp)}
+        self.assertFalse(res["no_raw_session_start"]["ok"])
+        self.assertIn("runtime/wa/rogue.py", res["no_raw_session_start"]["detail"])
+
+    def test_wa_itself_exempt(self):
+        res = {r["name"]: r for r in cl.check(self.tmp)}
+        self.assertTrue(res["no_raw_session_start"]["ok"])

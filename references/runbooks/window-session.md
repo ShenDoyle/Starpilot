@@ -40,7 +40,27 @@ python scripts/wa.py doctor                 # window.ok / window_kind
 | 总是读不到回复 + 一堆标签页 | `doctor.duplicates` 非空（同浏览器多份扩展） | 让人在扩展页删到只留一份 → `doctor` 确认 `ok:true` |
 | 租约过期但窗口还挂着 | `doctor.lease.left_s <= 0` | `wa.py reap --once`（常驻用 `--watch`） |
 | 另一个任务在抢同一平台 | `wa.py plock` 显示他人持有 | 双方都停；错开平台或 `STARPILOT_LOCK_KEY`；**不自动重绑** |
+| **另一个任务在抢同一浏览器实例** | `wa.py lease status` → `state: busy`，`owner` 是别人的工作区 | **不抢**：等它收口 / 换在线实例 `--browser` / 确认对方已死且人工授权 → `lease takeover --confirm '<说明>'`。详见 §3.1 |
+| **某个会话突然消失、自己没停过** | `session list` 里没了，`lease status` 的 `sessions` 也没记它 | 对方用的是**旧版**（无租约）：它的 `enforce_single_session` 会清掉同实例所有会话。处置：让对方升级/同步安装位，或换实例；本方重 `bind` 同一 url 复接 |
+| 租约过期但窗口还挂着 | `doctor.lease.left_s <= 0` | `wa.py reap --once`（常驻用 `--watch`） |
 | `bind` 反复被拒 rc≠0 | 会话反复失效 | 停下来看 `doctor` + 最近一次 `wait` 的 `stage`，别用重试掩盖 |
+
+### 3.1 多任务共用一台浏览器：租约的三条边界
+
+2026-11-02 现场：任务 A（本项目，13:40:56 开 `wibt`）被任务 B（另一个工作区，
+13:40:57 开 `dxfp`）在 60 秒内顶掉；B 的 state 里**没有 `browser` 字段**，旧清理逻辑
+`if browser and ...` 的过滤因此全失效，把**所有实例**上所有会话都停了。双方事后都不知情。
+
+| 边界 | 规则 | 判据 |
+|---|---|---|
+| 归属 | 一个浏览器实例只归一个**活**租约；心跳新鲜即「有主」 | `wa.py lease status` → `state: busy` / `remaining` |
+| 清理 | 只停**自己名下**的会话；别人的活会话跳过并打印原因 | 输出里出现「跳过清理：会话 X 被另一个活任务声明」 |
+| 接管 | 只能显式 `takeover --confirm`，覆盖活租约并落 journal | `~/.starpilot/locks/win-<实例>.journal.jsonl` |
+| 降级 | 实例探不到 `tab list --scope`（扩展 <0.4.0）→ 自动串行，有界等待 `STARPILOT_SERIAL_WAIT`（缺省 120s），等不到仍 rc=9 | 输出 `WINDOW_BUSY` + `waited` |
+
+**诊断顺序**（不要跳步）：`wa.py lease list`（全局谁占了什么）→ `wa.py lease status`
+（当前实例细节）→ `wa.py doctor`（实例/扩展/会话）→ 再决定等、换实例还是找人接管。
+
 
 ## 4. L3 渲染层（渲染器卡死）
 
@@ -77,3 +97,25 @@ bsk navigate --session <new_sid> "<同一个 conv_id 地址>"  # 5) 按 conv_id 
 - ❌ 渲染卡死就反复 `Ctrl+R`（可能连带杀掉生成中的回复，且掩盖真实原因）
 - ❌ 会话丢了就开新对话（= 丢上下文；除非走 `rebind` 正式流程）
 - ❌ 多份扩展并存时继续跑（发送在 A、读回在 B，所有判据都失真）
+- ❌ 抢占别人的窗口租约、或停掉别人名下的会话（对方正跑到一半，你停的是别人的现场）
+
+## 7. 多任务轮换协议（2026-11-02 用户指令）
+
+一台浏览器 = 一份租约（锁目录共享）。谁都能用，但**一次只有一个**在用：
+
+```
+任务 A：acquire → 干活（send/read）→ lease release（会话保留）
+任务 B：          └── 等 A 释放后拿到租约 → 复用同一个组窗口 → 干活 → release
+```
+
+| 你的状态 | 被占时怎么办 |
+|---|---|
+| 有人值守（`WA_ATTENDED=1`） | 等 30s；仍被占 → `WINDOW_BUSY_HUMAN`（rc=9），**把现场报给人**：谁占着、还剩多久、可选动作。由人裁决 |
+| 无人值守（默认） | 等 600s 轮换排队（对方 release 即拿到）；等不到 → `WINDOW_BUSY`（rc=9）退出，外层循环稍后重试，**不打扰人** |
+
+铁律：
+
+- 拿到租约后**先复用组窗口**（journal 登记的组内活会话），在里面建/复用自己的 tab；
+- 导航前先查同地址标签（`navigate_reuse`），同一对话出现第 2 个标签 = 违例；
+- 一轮做完就 `wa.py lease release`——会话是组的，租约是轮到谁归谁；
+- 全局开窗计数（10 分钟/实例 ≤4 次，跨任务共享）超限时先查环境，不许硬闯。

@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confirm  # noqa: E402
 import platforms  # noqa: E402
 import statelock  # noqa: E402
+import winlease  # noqa: E402
 
 # ---------------------------------------------------------------- bsk 定位
 
@@ -465,6 +466,73 @@ def cmd_reap(a) -> int:
             return found
         return [state_path(getattr(a, "state", None))]
 
+    def _global_audit() -> dict:
+        """L1 全局看门狗（2026-11-02 用户指令）：不依赖任何任务的 state 文件。
+
+        直接问 bsk 要全部活会话，对照各实例 journal 的组登记：
+          · 组内声明 + 租约过期（stale）→ 收割（对方任务已死，会话成残留）
+          · 组内声明 + 租约活 → 跳过（对方正在干活）
+          · 无登记（其他 skill / 人工开的）→ **只报告，绝不动手**——本工具的
+            清理边界止于自己组的名下，别组的会话死活不归它管。
+        另做标签审计：活会话里同地址重复标签 >1 → 报告（不动手，标签属于活会话）。
+        """
+        rep = {"reaped": [], "skipped_live": [], "unclaimed": [],
+               "dup_tabs": [], "dry_run": dry}
+        try:
+            sessions = list_sessions()
+        except Exception as e:
+            rep["error"] = "list_sessions 失败：%s" % e
+            return rep
+        # journal 登记总表：sid -> (instance, live_lease)
+        claims = {}
+        for st_info in winlease.list_all():
+            inst = st_info.get("instance") or "default"
+            for sid, meta in winlease.journal_claims(inst).items():
+                claims.setdefault(sid, (inst, bool(meta.get("live_lease"))))
+        for s in sessions:
+            sid = s.get("id") or s.get("session") or ""
+            if not sid:
+                continue
+            inst, live = claims.get(sid, ("", False))
+            if not inst:
+                rep["unclaimed"].append({"sid": sid,
+                                         "browser": s.get("browser") or ""})
+                continue
+            if live:
+                rep["skipped_live"].append(sid)
+                continue
+            if dry:
+                rep["reaped"].append({"sid": sid, "instance": inst,
+                                      "note": "DRY-RUN：租约过期，将收割"})
+                continue
+            rc, out, err = bsk(["session", "stop", sid], timeout=60)
+            winlease.drop_session(inst, sid,
+                                  winlease.make_owner(workspace=os.getcwd(),
+                                                      note="reap --global"),
+                                  reason="reap --global 租约过期回收")
+            rep["reaped"].append({"sid": sid, "instance": inst,
+                                  "rc": rc, "err": (err or out).strip()[:120]})
+        # 标签审计：只对「活会话」报告重复（同地址 >1）
+        for sid in rep["skipped_live"]:
+            try:
+                rc, out, err = bsk(["tab", "list", "--session", sid, "--json"],
+                                   timeout=30)
+                if rc:
+                    continue
+                tabs = json.loads(out or "{}").get("tabs") or []
+                seen = {}
+                for t in tabs:
+                    u = _norm_url(t.get("url") or "")
+                    if not u or t.get("scope") == "user":
+                        continue
+                    seen[u] = seen.get(u, 0) + 1
+                for u, n in seen.items():
+                    if n > 1:
+                        rep["dup_tabs"].append({"sid": sid, "url": u[:80], "n": n})
+            except Exception:
+                continue
+        return rep
+
     def _sweep() -> int:
         reaped = 0
         for p in _targets():
@@ -485,17 +553,30 @@ def cmd_reap(a) -> int:
                       % (int(-left), p, sid))
                 reaped += 1
                 continue
+            # 双保险：会话若被另一个活任务的窗口租约声明，绝不收割
+            _own = _win_owner(st, p)
+            _inst = st.get("window_instance") or st.get("browser") or "default"
+            _ok, _why = winlease.may_stop_session(_inst, sid, _own)
+            if not _ok:
+                print("跳过收割：%s 的会话 %s %s" % (p, sid, _why))
+                continue
             rc, out, err = bsk(["session", "stop", sid], timeout=60)
             now = time.time()
             st["session"] = ""
             st["reaped_at"] = now
             st.pop("lease_until", None)
             save_state(p, st)
+            winlease.drop_session(_inst, sid, _own, reason="reap 闲置回收")
+            winlease.release(_inst, _own, reason="reap 闲置回收")
             reaped += 1
             print("已收割：%s session=%s（rc=%d %s）"
                   % (p, sid, rc, (err or out).strip()[:120]))
         return reaped
 
+    if getattr(a, "global_scan", False) and not watch:
+        rep = _global_audit()
+        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        return 0
     if not watch:
         n = _sweep()
         print("收割完成：%d 个%s" % (n, "（dry-run）" if dry else ""))
@@ -693,20 +774,187 @@ def cmd_window(a) -> int:
     return 0
 
 
-def enforce_single_session(keep: str = "", browser: str = "") -> None:
-    """窗口纪律（硬规则）：**同一浏览器实例**内任何时刻只允许一个会话/Agent Window。
+def cmd_lease(a) -> int:
+    """窗口租约子命令：status / list / release / takeover。
 
-    只停 browser 指定实例上、keep 之外的所有会话（连同其 Agent Window）。
-    **其他实例上的会话不归本工具管，绝不误杀。**
-    防止：死会话续期开新窗口不关旧窗口、临时巡检会话用完不收 → 窗口堆积。
+    status   只读：这个实例被谁占着、还剩多久
+    list     只读：所有实例的租约一览
+    release  释放**自己的**租约（不是自己的一律拒绝）
+    takeover 显式人工接管：必须 --confirm 说明（谁授权、为什么对方已经不在了），落 journal
     """
+    sub = getattr(a, "lease_cmd", "status")
+    path = state_path(a.state)
+    st = load_state(path)
+    own = _win_owner(st, path)
+    if sub == "list":
+        rows = winlease.list_all()
+        print(json.dumps({"leases": rows, "me": own}, ensure_ascii=False, indent=2))
+        return 0
+    inst = (getattr(a, "instance", "") or "").strip() or _instance_id(st)
+    if sub == "status":
+        print(json.dumps(dict(winlease.status(inst), me=own,
+                              may_stop=["只有自己名下的会话可被清理"]),
+                         ensure_ascii=False, indent=2))
+        return 0
+    if sub == "release":
+        ok = winlease.release(inst, own, reason=getattr(a, "confirm", "") or "")
+        if not ok:
+            cur = winlease.status(inst)
+            print(json.dumps({"ok": False, "code": "LEASE_NOT_MINE",
+                              "holder": cur.get("owner"),
+                              "hint": "不是自己名下的租约不许释放；对方已确认死亡时用 "
+                                      "`lease takeover --confirm '<说明>'`"},
+                             ensure_ascii=False, indent=2), file=sys.stderr)
+            return 9
+        print(json.dumps({"ok": True, "released": inst}, ensure_ascii=False))
+        return 0
+    # takeover
+    conf = (getattr(a, "confirm", "") or "").strip()
+    if not conf:
+        print("LEASE_TAKEOVER_REQUIRES_CONFIRM：必须 --confirm '<谁授权、为什么接管>'。\n"
+              "  接管会覆盖一个仍活着的租约，对方的会话可能被孤立——只能用于确认对方已死。",
+              file=sys.stderr)
+        return 6
+    rec = winlease.acquire(inst, own, takeover_reason=conf)
+    print(json.dumps({"ok": True, "instance": inst,
+                      "took_over_from": rec.get("takeover_from"),
+                      "reason": conf,
+                      "next": "对方会话未被停止（本工具不替人杀别人的窗口），需要时人工关"},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def _win_owner(st: dict, path: str) -> dict:
+    """本任务的窗口租约身份：工作区 + run_id（同工作区不同 run 也算不同任务）。"""
+    ws = os.path.dirname(os.path.abspath(path)) or "."
+    run_id = st.get("run_id") or os.environ.get("STARPILOT_RUN_ID", "") or ""
+    return winlease.make_owner(workspace=ws, run_id=run_id,
+                               platform=st.get("platform") or "")
+
+
+def _instance_id(st: dict, rep: dict | None = None) -> str:
+    """解析当前任务用哪个浏览器实例。
+
+    优先级：state.browser → WA_BROWSER → 唯一在线实例 → "default"。
+    为什么要兜到「唯一在线实例」：2026-11-02 实测另一个任务的 state 里根本没有
+    `browser` 字段，于是它的清理逻辑 `if browser and ...` 过滤全失效，停掉了
+    所有实例上所有会话。实例未知不等于「无实例」，必须解析出来。
+    """
+    b = (st.get("browser") or os.environ.get("WA_BROWSER", "") or "").strip()
+    if b:
+        return b
+    try:
+        rep = rep or instance_report()
+        insts = rep.get("instances") or []
+        if len(insts) == 1:
+            iid = insts[0].get("instance_id") or insts[0].get("id") or ""
+            if iid:
+                st["browser"] = iid          # 解析出来就记住，别每次都猜
+                return iid
+    except Exception:
+        pass
+    return "default"
+
+
+def _supports_isolation(st: dict, sid: str, rep: dict | None = None) -> bool:
+    """该实例能不能同时开多个独立 Agent Window（真隔离）。
+
+    判据：`bsk tab list --scope agent` 可用（扩展 ≥0.4.0 才有 scope）。探不到就按
+    扩展版本判；都判不出 → False（保守：宁可串行排队，也不并发抢同一块屏幕）。
+    """
+    if sid:
+        rc, out, err = bsk(["tab", "list", "--session", sid,
+                            "--scope", "agent", "--json"], timeout=30)
+        if rc == 0:
+            return True
+    try:
+        rep = rep or instance_report()
+        iid = _instance_id(st, rep)
+        for it in rep.get("instances") or []:
+            if (it.get("instance_id") or it.get("id")) == iid:
+                ver = str(it.get("extension_version") or "0.0").split(".")
+                return (int(ver[0]), int(ver[1] if len(ver) > 1 else 0)) >= (0, 4)
+    except Exception:
+        pass
+    return False
+
+
+def acquire_window(st: dict, path: str, sid: str = "", rep: dict | None = None) -> str:
+    """开窗/写页前取窗口租约。冲突**不抢占**，按值守模式给轮换预算：
+
+    · 有人值守（WA_ATTENDED=1）：短等 30s 仍被占 → WINDOW_BUSY_HUMAN 退出，
+      把现场（谁占着、还剩多久、可选动作）直接报给人，由人裁决。
+    · 无人值守（默认）：长等 600s 轮换排队（对方收口即拿到），等不到才
+      WINDOW_BUSY 退出——agent 的外层循环可以稍后重试，不打扰人。
+    """
+    inst = _instance_id(st, rep)
+    own = _win_owner(st, path)
+    serial = not _supports_isolation(st, sid or (st.get("session") or ""), rep)
+    attended = winlease.is_attended()
+    budget = winlease.wait_budget(attended)
+    # 预算覆盖口（测试/运维调参）：STARPILOT_LOCK_WAIT 显式设置时取更小者
+    try:
+        env_wait = float(os.environ.get("STARPILOT_LOCK_WAIT") or "")
+    except ValueError:
+        env_wait = None
+    if env_wait is not None:
+        budget = min(budget, max(0.0, env_wait))
+    if serial:
+        # 串行降级（实例不支持多 Agent Window）：本来就要排队，等待预算不高于值守预算
+        budget = min(budget, winlease.SERIAL_DEFAULT_WAIT) if attended else budget
+        st["_serial_wait"] = budget
+    try:
+        rec = winlease.acquire(inst, own, serial=serial, wait=budget)
+    except winlease.WindowBusy as e:
+        holder = e.holder or {}
+        who = (holder.get("owner") or {}).get("workspace") or "未知工作区"
+        left = round((holder.get("lease_until") or 0) - time.time(), 1)
+        if attended:
+            print(json.dumps({
+                "code": "WINDOW_BUSY_HUMAN",
+                "instance": inst,
+                "holder_workspace": who,
+                "holder_lease_left_s": max(0, left),
+                "waited_s": round(e.waited, 1),
+                "message": ("需要人工处理：浏览器实例正被另一个任务占用（%s），"
+                            "等了 %.0fs 仍未释放。可选：①等对方收口；②换一个在线"
+                            "浏览器实例（--browser/WA_BROWSER）；③确认对方已死锁时"
+                            "人工授权 takeover（wa.py lease takeover --confirm）。"
+                            "本工具不抢占。" % (who, e.waited)),
+            }, ensure_ascii=False, indent=2), file=sys.stderr)
+            raise SystemExit(9)
+        print(json.dumps(e.holder, ensure_ascii=False, indent=2), file=sys.stderr)
+        raise SystemExit(9)
+    if sid:
+        winlease.claim_session(inst, sid, own)
+    st["window_instance"] = inst
+    st["lease_owner"] = own
+    save_state(path, st)
+    return inst
+
+
+def enforce_single_session(keep: str = "", browser: str = "", owner: dict | None = None) -> None:
+    """窗口纪律：同一浏览器实例内只留一个会话——**但只清自己名下的**。
+
+    2026-11-02 现场事故：原实现只要 `keep` 之外就 stop，而 `browser` 为空时连
+    「其他实例不动」的过滤都失效（另一个任务的 state 没记 browser），结果把本项目
+    刚开的会话在 60 秒内停掉，双方都无从知情。现在：会话若被另一个**活**租约声明，
+    一律不动——清理的边界止于自己的租约。
+    """
+    inst_hint = (browser or "").strip()
     try:
         for s in list_sessions():
             sid = s.get("id") or s.get("session") or ""
             if not sid or sid == keep:
                 continue
-            if browser and (s.get("browser") or "") != browser:
+            inst = (s.get("browser") or inst_hint or "default")
+            if inst_hint and (s.get("browser") or "") not in ("", inst_hint):
                 continue  # 其他实例的会话不动
+            if owner is not None:
+                ok, why = winlease.may_stop_session(inst, sid, owner)
+                if not ok:
+                    sys.stderr.write("跳过清理：会话 %s %s\n" % (sid, why))
+                    continue
             bsk(["session", "stop", sid], timeout=30)
     except Exception:
         pass
@@ -735,6 +983,48 @@ def navigate_soft(sid: str, url: str, timeout: int = 180):
     return rc2, out2, ((err2 or out2).strip()[:300] + " | 首次(load)：%s" % first)
 
 
+def _norm_url(u: str) -> str:
+    u = (u or "").split("#", 1)[0].strip()
+    return u[:-1] if u.endswith("/") else u
+
+
+def find_tab_by_url(sid: str, url: str, timeout: int = 30) -> str:
+    """在会话的 Agent Window 里找已开着的同地址标签。返回 tab_id 或 ""。
+
+    背景（2026-11-02 现场）：同一对话被 navigate 了 5 次 = 用户窗口里 5 个重复
+    标签——每次重试都新开标签是风控诱因，也是「浏览器不像人」的直接证据。
+    """
+    try:
+        rc, out, err = bsk(["tab", "list", "--session", sid, "--json"],
+                           timeout=timeout)
+        if rc:
+            return ""
+        d = json.loads(out or "{}")
+        target = _norm_url(url)
+        for t in d.get("tabs") or []:
+            if _norm_url(t.get("url") or "") == target and t.get("scope") != "user":
+                return str(t.get("tab_id") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+def navigate_reuse(sid: str, url: str, timeout: int = 180):
+    """导航但**优先复用同地址标签**：先 tab select 聚焦再导航（导航作用于活动 tab）。
+
+    返回 (rc, out, err, reused)。找不到同地址标签才走普通导航（新标签）。
+    """
+    tid = find_tab_by_url(sid, url)
+    if not tid:
+        rc, out, err = navigate_soft(sid, url, timeout=timeout)
+        return rc, out, err, False
+    bsk(["tab", "select", "--session", sid, tid], timeout=30)
+    rc, out, err = navigate_soft(sid, url, timeout=timeout)
+    if rc != 0:
+        rc, out, err = navigate_soft(sid, url, timeout=timeout)  # select 未生效则原样重试
+    return rc, out, err, True
+
+
 def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     if _transport_is_iab():
         # IAB 传输：无窗口生命周期，直接复用宿主浏览器；绑定了地址就导航过去
@@ -750,24 +1040,49 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     rep = instance_report()
     if rep["duplicates"] and not os.environ.get("WA_ALLOW_DUPLICATE_EXT"):
         raise SystemExit(duplicate_hint(rep))
+    # ---- 窗口租约（跨任务隔离）----
+    # 冲突 → SystemExit(9) WINDOW_BUSY，绝不抢占、绝不清理别人的会话。
+    # 必须在 enforce_single_session / session start 之前拿到，否则就可能已经动手了。
+    inst = acquire_window(st, path, sid=sid, rep=rep)
+    if not browser and inst != "default":
+        browser = inst
+    own = _win_owner(st, path)
+    ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
     if sid and not renew:
-        ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
         if sid in ids:
-            enforce_single_session(sid, browser)  # 清掉同实例的旁支会话（如临时巡检窗口）
+            winlease.claim_session(inst, sid, own)
+            enforce_single_session(sid, browser, own)  # 只清自己名下/无主的
             if browser and not st.get("browser"):
                 st["browser"] = browser  # env 给的实例也记下来，下次不必再传
                 save_state(path, st)
             return sid
-    if _too_many_starts(st):
+    # 组窗口复用（2026-11-02 用户指令）：实例上已经有**组内**活会话（journal 登记、
+    # 租约仍活），直接认领复用——新任务在这个窗口里建自己的 tab，不新开窗口。
+    if not renew and (not sid or sid not in ids):
+        gs = [s for s in winlease.group_sessions(inst) if s in ids]
+        if gs:
+            sid = gs[-1]
+            winlease.claim_session(inst, sid, own)
+            enforce_single_session(sid, browser, own)
+            st["session"] = sid
+            if browser and not st.get("browser"):
+                st["browser"] = browser
+            save_state(path, st)
+            sys.stderr.write("复用组窗口会话 %s（实例 %s），未新开窗口。\n" % (sid, inst))
+            return sid
+    # 禁止无脑重开（2026-11-02 用户指令）：全局跨任务计数（锁目录共享），
+    # 裸调绕不过——所有走 wa.py 的开窗都记在同一个账本上。
+    g_many, g_n, g_max = winlease.too_many_starts(inst)
+    if g_many or _too_many_starts(st):
         raise SystemExit(
-            "10 分钟内已经开了 %d 次窗口（每次重绑都会新开一个）。这不是正常的重试节奏，"
-            "说明会话在反复失效或实例在反复切换。\n"
-            "先跑 `python scripts/wa.py doctor` 看：实例是否重复安装、是否失联、state 里的 "
-            "session/browser 是否还存在。\n"
-            "确认环境没问题要强行继续，就删掉 state 里的 session_start_at 再试一次。"
-            % len(st.get("session_start_at") or []))
-    # 开新会话前：先收掉目标实例上的旧会话/旧窗口（其他实例的会话不动）
-    enforce_single_session("", browser)
+            "禁止开窗：10 分钟内该实例已被开过 %d 次窗口（全局跨任务计数，上限 %d）。"
+            "反复重开不是正常的重试节奏——会话在反复失效或实例在反复切换。\n"
+            "先跑 `python scripts/wa.py doctor` 看环境；用 `wa.py lease status` 看"
+            "是不是别的任务占着。确认环境没问题要强行继续：仅限用户明示授权，"
+            "删掉锁目录 session-starts.json 里该实例的计数后重试。"
+            % (max(g_n, len(st.get("session_start_at") or [])), g_max))
+    # 开新会话前：收掉**本任务名下**的旧会话（别人的活会话一律不动，见 enforce）
+    enforce_single_session("", browser, own)
     # 多浏览器（用户可能同时开多个 Edge profile）：state.browser 优先，其次 WA_BROWSER env
     args = ["session", "start", "--no-focus"]
     if browser:
@@ -788,9 +1103,11 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
         sid = m[-1] if m else ""
     if not sid:
         raise SystemExit("拿不到 session id。原始输出：%s" % out[:400])
-    enforce_single_session(sid, browser)  # 双保险：新会话留下，同实例其余全收
-    _note_session_start(st)               # 记下开窗时间：短时间反复开窗要能被拦住
+    enforce_single_session(sid, browser, own)  # 双保险：新会话留下，本任务其余全收
+    _note_session_start(st)               # 本任务自己的计数（保留，双保险）
+    winlease.note_start(inst)             # 全局跨任务计数：所有走本入口的开窗都记账
     st["session"] = sid
+    winlease.claim_session(inst, sid, own)  # 向其他任务公告：这个会话有主，别停
     if browser:
         # 把实例记进 state：下次不用再靠 WA_BROWSER 环境变量，
         # 多浏览器在线时也不会因为「猜不出实例」而 bind 失败。
@@ -799,7 +1116,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     place_window(sid)
     bound = st.get("url") or ""
     if bound:
-        rc, out, err = navigate_soft(sid, bound)
+        rc, out, err, _reused = navigate_reuse(sid, bound)
         if rc == 0:
             time.sleep(3)
     return sid
@@ -1131,7 +1448,7 @@ def cmd_bind(a) -> int:
     st = load_state(path)
     st["platform"] = p["key"]
     sid = ensure_session(st, path)
-    rc, out, err = navigate_soft(sid, url)
+    rc, out, err, _reused = navigate_reuse(sid, url)
     nav_note = "" if rc == 0 else (err or out).strip()[:300]
     time.sleep(3)
     ok, data = read_state(p, sid)
@@ -1971,11 +2288,17 @@ def cmd_stop(a) -> int:
     sid = st.get("session")
     if sid:
         bsk(["session", "stop", sid], timeout=60)
+        winlease.drop_session(st.get("window_instance") or _instance_id(st),
+                              sid, _win_owner(st, path), reason="wa.py stop")
         st["session"] = ""
         save_state(path, st)
         print("已停止 session %s" % sid)
     else:
         print("没有记录中的 session")
+    # 停窗即释放本任务的窗口租约：让别人能立刻接手，不必等 TTL 过期
+    inst = st.get("window_instance") or _instance_id(st)
+    if winlease.release(inst, _win_owner(st, path), reason="wa.py stop"):
+        print("已释放窗口租约（%s）" % inst)
     return 0
 
 
@@ -2045,6 +2368,13 @@ def main(argv: list | None = None) -> int:
                    help="release 必填：人工已确认的说明（谁确认、为什么释放）")
     p.set_defaults(func=cmd_window)
 
+    p = add_pl(sub.add_parser("lease", help="窗口租约：status/list 只读；release 放自己的；"
+                                             "takeover 显式接管（须 --confirm）"))
+    p.add_argument("lease_cmd", choices=["status", "list", "release", "takeover"])
+    p.add_argument("--instance", default="", help="浏览器实例 id（缺省按 state 解析）")
+    p.add_argument("--confirm", default="", help="takeover 必填：谁授权、为什么对方已不在")
+    p.set_defaults(func=cmd_lease)
+
     p = add_pl(sub.add_parser("send", help="发送一条消息"))
     p.add_argument("--file")
     p.add_argument("--text")
@@ -2101,6 +2431,9 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--interval", type=int, default=60, help="watch 模式扫描间隔秒（缺省 60）")
     p.add_argument("--scan", default="", help="扫描目录下所有 %s（多任务并收）" % STATE_NAME)
     p.add_argument("--dry-run", action="store_true", help="只报告将收割哪些，不动手")
+    p.add_argument("--global", dest="global_scan", action="store_true",
+                   help="L1 全局看门狗：不读 state 文件，直接对 bsk 全部活会话按"
+                        " journal 组登记判定；只收自己组内租约过期的，无主会话只报告")
     p.set_defaults(func=cmd_reap)
 
     a = ap.parse_args(argv)
