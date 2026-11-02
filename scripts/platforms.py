@@ -135,6 +135,7 @@ PLATFORMS = {
         # 2367 字全文写入、指纹 6/6 命中、点击后地址出现 /c/<uuid>。
         # 它是「写没问题」，不等于「整条 loop 可自动跑」（计数口径还没重标定）。
         "write_verified": True,
+        "write_verified_at": "2026-11-02",
         "notes": "2026-11-02 DOM 改版：editor/send 已回填实测值且写路径复测通过；"
                  "assistant 计数选择器待重标定（role 属性消失），整链路口径的 verified 保持 false。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
@@ -207,6 +208,8 @@ PLATFORMS = {
         # 在有登录态时会重定向到「最近一次对话」，用它当入口等于没有新开。
         "new_chat_url": "https://gemini.google.com/app",
         "verified": True,
+        "write_verified": True,
+        "write_verified_at": "2026-10-29",
         "notes": "2026-10-29 实测（登录态、写入、发送、等待、读取全链路）。"
                  "**编辑器是 Quill（div.ql-editor）**，这是最大的坑："
                  "`execCommand('insertText')` 会把字塞进 DOM（`innerText` 读到 15 字），"
@@ -261,6 +264,8 @@ PLATFORMS = {
         "label": "DeepSeek",
         "home": "https://chat.deepseek.com",
         "verified": True,
+        "write_verified": True,
+        "write_verified_at": "2026-10-31",
         "notes": "2026-10-29 首测，2026-10-31 复测（登录态、新建对话、发送、等待、读取全链路跑通）。"
                  "**编辑器 = textarea**（placeholder「给 DeepSeek 发送消息」，无 id；"
                  "不是 contenteditable，所以 Range 圈内容会抛错、innerText 恒为空 —— "
@@ -312,6 +317,8 @@ PLATFORMS = {
         "home": "https://www.kimi.com",
         "new_chat_url": "https://www.kimi.com/",
         "verified": True,
+        "write_verified": True,
+        "write_verified_at": "2026-10-29",
         "notes": "2026-10-29 实测（首轮新建对话打通）。"
                  "编辑器 = div.chat-input-editor（Lexical：span[data-lexical-text]）；"
                  "发送按钮 = div.send-button-container（**不是 button**，空输入时带 .disabled 类）；"
@@ -371,6 +378,8 @@ PLATFORMS = {
         # 首页 /chat/ 就是新对话入口（无 id），发第一条后自动跳 /chat/<数字id>
         "new_chat_url": "https://www.doubao.com/chat/",
         "verified": True,
+        "write_verified": True,
+        "write_verified_at": "2026-10-29",
         "notes": "2026-10-29 实测（登录态、写入、发送、等待、读取全链路）。"
                  "**编辑器 = Tiptap ProseMirror（div.tiptap.ProseMirror）**："
                  "execCommand('insertText') **有效**——与 Gemini 的 Quill 不同，字能进 model"

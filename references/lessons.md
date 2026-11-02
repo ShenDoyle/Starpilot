@@ -463,3 +463,16 @@
 > SKILL §5.3 / §6 / 命令表、tests/test_window_gate.py（11→18 条）。
 
 - [L-WINDOW-NO-ESCAPE-3f8b12][2026-11-02][O5][GPT 复审阶段一（原文：删除 WA_ALLOW_UNVERIFIED_WINDOW，排查其他绕过入口）][—][逃生阀=环境变量钥匙：任何能设 env 的进程（或被诱导的 agent）都能在归属未知时把字打进用户窗口；且人工接管混在「重跑时带个 env」里，没有独立的暂停/释放/确认动作][逃生阀是 P0-ESC 模式的惯性复用——「有代价的显式声明」适合低危豁免，不适合「往用户窗口打字」这类不可逆写][①require_window_verified 删逃生分支，unknown/misplaced 一律拒绝；②无会话=unknown 拒绝（原来放行给 ensure_session 兜底，属隐式信任）；③clear 同受门（它清的是可能属于用户的输入框）；④绕过入口盘点：编排器真实写走 write_gate.execute_send 完全绕过窗口门 → cmd_send 插入同门（WRITE_BLOCKED_WINDOW_UNVERIFIED + risk window_unverified high）；STARPILOT_ALLOW_DIRECT_SEND 只豁免编排熔断、其后窗口门照跑（注释明示）；send --force 只跳过幂等守卫不跳窗口门；IAB 是传输形态非参数绕过；⑤新增 wa.py window status（只读）/ release --confirm（停会话+清缓存+指引 rebind）显式接管流程][tests/test_window_gate.py 18 条（env 无效力且不落账 / 无会话拒绝 / clear 受门 / write_gate 受门含 verified 放行 / release 须 confirm / status 只读）；全量 464 OK][一切「逃生门模式」的新增申请；识别特征：想用 env 给不可逆写开口子][回退即回到「env=万能钥匙」，人工接管无痕][false][merged]
+
+## 附录：执行颗粒度改造——动作卡 / runbook / 硬边界（2026-11-02）
+
+> 来源：用户反馈「skill 流程颗粒度要重做，保证不同 agent 执行时不因预期外偏差踩坑，
+> 真遇到问题（GPT 页面改版、反爬升级）要有内置方案」。诊断证据：SKILL 1080 行、
+> §6 故障表 30 行只有一句话处置；rc=10–15 语义只存在于 `wa.py:1522` 注释，
+> SKILL 里 rc=11/13/14/15 零次出现；`platforms.py` 九个 STALL_* 态只覆盖四个处置；
+> DOM 改版只有「回填 sel」一句，实测摸索两小时。对应 `references/execution-contract.md`、
+> `references/runbooks/*.md`(4)、SKILL §4.0.7 / §5.5 / §6、`scripts/contract_lint.py`、
+> `tests/test_contract_lint.py`(9)。
+
+- [L-GRANULARITY-CONTRACT-9d4e07][2026-11-02][O5][用户反馈（执行颗粒度/内置方案）][—][脚本能力齐（三态窗口门/写闸门/triage 九态/租约收割），但文档是叙述式：agent 读完后仍要自己决定「先做什么、判据是什么、失败怎么分派」，不同模型/不同上下文执行出不同结果；平台改版和风控升级这类必然事件没有 runbook，只能现场试][缺的是「执行确定性层」：动作没有四段契约（前置/通路/判据/分支），错误码没有唯一权威表，故障没有分型处置][①动作卡 6 张（bind/send/wait-read/triage/probe/clear），四段式 + 「卡里没写的做法=禁止」；②rc 全表唯一权威（0–9 + 10–15 六态），SKILL §6.1 先按 rc 定位再查现象；③runbook 四份：dom-drift（含 ChatGPT writing-block 真实四坑）/ anti-bot（四型分治，禁止硬刚）/ window-session（归属-会话-渲染三层定位）/ context-loss（漂移≠压缩）；④§5.5 硬边界：动作白名单、判据必须机器可判、预期外只有三个出口、不许用措辞掩盖缺陷；⑤contract_lint.py 五项对账（rc 覆盖/卡四段/runbook 索引/命令真实性/verified 分账），改坏任一处测试即红][tests/test_contract_lint.py 9 条（含副本篡改必 FAIL）；全量 473 OK；lint 首次跑就抓出 4 个平台「标了 verified 却没有 write_verified」的假分账][一切「文档约束行为」的场景；识别特征：文档写了但 agent 还能合法地做出不同结果][回退即回到「每个 agent 一套做法」，偏差无法归因][false][merged]
+- [L-STAGE-VERIFY-GRANULARITY-4b5c21][2026-11-02][O5][dogfood 实测（本轮改造自身撞门）][—][用户选「一次跑完再验」，我按工作量拆了三阶段，结果 stage start S2 被 accepted 门拦住（S1 还 executing），门是对的、拆法是错的——阶段拆分的价值来自中途拦截，放弃拦截后多阶段只剩仪式感，还逼 agent 去绕状态机][把「阶段数」绑在「工作量」上，而不是绑在「验收粒度」上；SKILL §4.0 只写了「大任务必须拆」，没写「一次性验收时怎么拆」][§4.0 新增第 7 条：阶段数由验收粒度决定——逐阶段验收按交付边界拆；一次跑完再验只登记一个阶段；已拆了中途改口不许手改 state，走 decide 留痕 + 并入当前阶段提交][本轮 decide 记录 1 条；SKILL §4.0.7 收编；下次同样场景直接用单阶段][一切「流程要求与用户选择冲突」的场景；识别特征：为了满足状态机而想手改 state][回退即回到「拆了又开不了」的卡死或偷偷绕门][false][merged]

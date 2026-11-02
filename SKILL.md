@@ -367,6 +367,9 @@ python scripts/wa.py platforms        # 看支持哪些平台、哪些已实测
 
 ### 3.2 绑定对话（只绑定一次）
 
+> **动作契约**：`references/execution-contract.md` §2 `CARD-bind`——前置断言三条、
+> 通过判据三条（`editor:true` / `conv_id` 一致 / `window.verified`）、失败分支按 rc 分派。
+
 ```bash
 python scripts/wa.py bind "https://chatgpt.com/c/<conversation-id>" --platform chatgpt
 ```
@@ -441,8 +444,20 @@ gemini.google.com 在登录态下会重定向回最近一次对话，等于没�
    由网页版 AI 改表，agent 不自己合并。
 6. **审计兜底**：`orchestrator.py audit` 把「实际已达阈值但 stages 为空」判
    `undeclared_complexity` → verdict FAIL。少报轮数骗不过 audit。
+7. **阶段数由「验收粒度」决定，不由「工作量」决定**（2026-11-02 实战补充）：
+   - 用户要**逐阶段验收** → 按交付边界拆多个阶段（默认）。
+   - 用户明确选**一次跑完再验** → **只登记一个阶段**（哪怕内含 8 个交付物）。
+     理由：拆阶段的价值 100% 来自「中途拦截」，放弃了拦截就只剩状态机仪式感；
+     硬登记多阶段会立刻撞上 `stage start` 的 accepted 门，把 agent 逼去绕状态机。
+   - 已经拆了多阶段、用户中途改成一次性验收 → **不许手改 state 绕门**，也不许
+     假装逐阶段验收。正确做法：`decide` 记一条自主决定（用户裁定原文 + 合并理由），
+     把后续交付并入当前阶段提交，并在报告里说明「S2/S3 保留 pending 作后续占位」。
 
 ### 4.1 发送（一次只发一件事）
+
+> **动作契约优先**：本节的规范由 `references/execution-contract.md` §3 `CARD-send` 定义
+> （前置断言 / 唯一通路 / 通过判据 / 失败分支）。本节只讲「为什么」；两处不一致时以卡为准，
+> 并立刻修 SKILL 这段（不许留两套说法）。
 
 ```bash
 python scripts/wa.py send --file <本轮反馈文件.md> --platform chatgpt
@@ -459,6 +474,9 @@ python scripts/wa.py send --file <本轮反馈文件.md> --platform chatgpt
   三者都不满足 = **没发出去**，别记 turn、别等回复，先查页面弹窗。
 
 ### 4.2 等待回复完成（DOM 判定，不用截图）
+
+> **动作契约**：`references/execution-contract.md` §4 `CARD-wait-read`（含「回复数正好 +1」
+> 与思考区排除口径）；卡住时走 §5 `CARD-triage`。
 
 ```bash
 python scripts/wa.py wait --timeout 900 --platform chatgpt
@@ -477,12 +495,18 @@ python scripts/wa.py wait --timeout 900 --platform chatgpt
 
 ### 4.3 读取与执行
 
+> **动作契约**：`references/execution-contract.md` §4 `CARD-wait-read`（读取判据）
+> 与 §1.2 禁止清单（不许用截图/时间当证据）。
+
 1. 读末条 AI 回复全文，落盘到 `runtime/wa/turn-<n>.md`（原文不改写）。
 2. 拆出「要做什么」+「验收标准」+「禁止事项」。
 3. **按它说的做，不加戏**。它说要跑 A，你就跑 A；不要顺手把 B 也做了。
 4. 执行中每个关键结论都要留下证据（命令、输出、文件路径、数字）。
 
 ### 4.4 失败处理：两次原则
+
+> **动作契约**：失败先走 `wa.py triage` 拿 rc（`references/execution-contract.md` §5），
+> rc 决定分支——**不是所有失败都该重试**（rc=10 重试 = 加剧风控）。
 
 ```
 同一目标第 1 次失败 → 自己排查，换一种**同类**方法再试一次
@@ -972,9 +996,74 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 
 **缺什么要补，补完回填这张表。**
 
+### 5.5 执行颗粒度硬边界（2026-11-02 新增）
+
+> 目的：**同一个任务，不同 agent（不同模型/不同上下文/不同心情）执行出来必须一样。**
+> 靠"写得更细"不够——要把自由度收窄到「只有一条路可走」。
+
+**① 动作白名单**：6 类动作只许走脚本，禁止手搓（唯一例外：`references/builtin-mode.md`
+的 builtin 手动通路，须在日志标 `backend=builtin`）：
+
+| 动作 | 唯一入口 |
+|---|---|
+| 接入对话 | `wa.py bind` / `orchestrator.py bind` |
+| 写入并发送 | `orchestrator.py loop --once`（有 run）/ `wa.py send`（无 run） |
+| 等回复 / 读回复 | `wa.py wait` / `wa.py read` |
+| 卡住判定 | `wa.py triage` |
+| 状态探测 | `wa.py probe` / `wa.py doctor` |
+| 清空输入框 | `wa.py clear` |
+
+细到四段（前置断言/唯一通路/通过判据/失败分支）见 `references/execution-contract.md`。
+
+**② 判据必须机器可判**：任何「完成/成功」结论都要能指到字段名（`msg_count` 增量、
+`conv_id`、`prompt_sha256`、`window.verified`）。指不到字段 = 没判据 = 不许报完成。
+
+**③ 遇到预期外情况的分岔只有三种出口**（不许有第四种）：
+
+| 情况 | 出口 |
+|---|---|
+| 表内已知（rc 表 / 故障表 / runbook 覆盖） | 按对应分支处置，**不即兴** |
+| 表内没有，但属于纯执行细节（换个选择器等价的写法） | 可以自己试**一次**，试完把做法与判据写进 lessons |
+| 表内没有，且涉及方案/范围/架构 | **先裁定后动手**（`templates/web-ai-decision.md`），禁止先斩后奏 |
+
+**④ 不许用「文档措辞」掩盖执行缺陷**：跑不通就报跑不通；不许把失败写成"受限"、
+不许用「理论上可行」代替实测。这条对应的机器判据是 `wa.py triage` 的 rc——rc 非 0 就是没跑通。
+
+**⑤ 契约自洽由脚本守**：
+
+```bash
+python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 0 即契约不自洽
+```
+
+它查五件事：rc 表覆盖 `platforms.STALL_*` 全部态、动作卡四段齐全、runbook 索引链接存在、
+硬边界表列出的命令在 `wa.py` 里真实存在、`verified` 与 `write_verified` 分账未被混用。
+
 ---
 
-## 6. 故障速查
+## 6. 故障速查（两步：先查 rc，再查现象）
+
+### 6.1 第一步：按分诊码定位（rc 是机器给的，最可信）
+
+拿到 rc 就先查这张表，**不要凭现象猜**。rc 全表与语义的唯一权威是
+`references/execution-contract.md` §8；本表是处置版。
+
+| rc | 含义 | 谁该动 | 处置 |
+|---|---|---|---|
+| 2 | 尚未绑定 | agent | `wa.py bind <url>`；有 run 时用 `orchestrator.py bind` |
+| 4 | 页面探不通 | agent | `doctor` → 会话没了就 `bind` 同一 url（**不是**开新对话） |
+| 5 | 编排器守卫拒绝 | agent | 看 `reason`/`error_code`：plan/stage/approve 各自有分支 |
+| 6 | 窗口门 / 写闸门 / 裁定无效 / 白名单外写 | agent | 见下方 `WINDOW_UNVERIFIED`、`WRITE_BLOCKED_*`、`decisions check` 三行 |
+| 7 | 有 run 却直发 | agent | 改走 `loop --once`；**不许**用 `STARPILOT_ALLOW_DIRECT_SEND` 绕过 |
+| 8 | 写路径不在白名单 | agent | `runbooks/dom-drift.md` 标定写路径后再写 |
+| 9 | 平台锁被占 | agent | 等对方收口；确认残留才 `plock --release` |
+| 10 | 风控 / 验证码 / 掉登录 | **人** | `runbooks/anti-bot.md`（分四型，别一律重试） |
+| 11 | 对话漂移 | agent | `runbooks/context-loss.md` §2.1 `rebind` |
+| 12 | 假生成（流死了） | agent | 按一次停止再重发；`runbooks/` 无独立文件，见本表下行「停止按钮还在」 |
+| 13 | 选择器失效（改版） | agent | `runbooks/dom-drift.md`（15 分钟重标定流程） |
+| 14 | 发送没生效 | agent | 先看弹窗/遮罩，再重发一次；`runbooks/` 见 `anti-bot` §2.2 |
+| 15 | 平台静默拒绝 | agent | 换平台或冷却；`runbooks/anti-bot.md` §2.4 |
+
+### 6.2 第二步：按现象查（拿不到 rc 时用）
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -982,9 +1071,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 发送后出现两条相同提问 | 未确认上轮结束就重发 | 停止，告知用户，后续按 §4.1 校验 |
 | 等待一直不结束 | 页面报错但无提示 | 读 console/DOM 错误节点，按 §4.4 |
 | URL 变成 `/` 或 `/new` | 页面跳转 | 立刻停，回绑地址 |
-| `probe` 报 `editor: false` | 平台改版，选择器失效 | **这不是平台「断片」**，是 DOM 变了 → 回填 `platforms.py` 的 `sel` |
-| 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论；换平台前先跑 `templates/web-ai-eval.md` |
-| 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI |
+| `probe` 报 `editor: false` | 平台改版，选择器失效 | **这不是平台「断片」**，是 DOM 变了 → 走 `runbooks/dom-drift.md` 重标定（15 分钟四步），**不是**换平台 |
+| 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论（`runbooks/context-loss.md` §2.2）；换平台前先跑 `templates/web-ai-eval.md` |
+| 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI（`runbooks/context-loss.md` §2.3） |
 | `WINDOW_UNVERIFIED`（send/clear rc=6） | 窗口归属 unknown/misplaced：探不到或确认不在 Agent Window | **不许发**（打错窗口 = 往用户窗口打字）。`wa.py doctor` 看 `window_verified`；修扩展 ≥0.4.0 / 改 Automation 设置 / 重新 bind。**无环境变量逃生阀**（GPT 复审阶段一已删除）；人工接管走显式流程：`wa.py window status`（只读）→ `wa.py window release --confirm '<人工确认说明>'`（停会话清缓存）→ 重新 bind |
 | `stage start` 被拒（blocked_by） | 上一阶段还停在 submitted，没收 accepted | 让 web_ai 或用户 `stage accept <id> --by web_ai --evidence '<依据>'` 后再 start；收口 ≠ 验收通过 |
 | `decisions.py check` 返回 6 | 无记录 / 只是倾向（tentative）/ 事实已变 | 重新发裁定申请（`templates/web-ai-decision.md`），拿到明确「批准 A」再动手；软话不算授权 |
@@ -994,9 +1083,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 输入框内容删不掉、重写变追加 | 受控编辑器忽略 `execCommand('delete')`／`paste` 是追加 | 用 Range 圈定内容 + `execCommand('insertText')` 覆盖；Kimi 已按此配置 |
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
 | 某任务回复加载不出 / 对话被跳到别处 | **另一任务在同一平台抢会话**（多任务并发打架） | 双方都停：`wa.py plock` 看谁在用；错开平台或浏览器 profile（`STARPILOT_LOCK_KEY`）后再继续；被抢的任务按 URL 漂移守卫停下，**不要自动跳转、不要自动重绑** |
-| 总是读不到回复，且开了一堆标签页 | **同一浏览器装了多份 BrowserSkill**（bsk 报多个实例）：发送在 A、读回在 B | `wa.py doctor` 看 `duplicates`；`chrome://extensions` 里删到只留一份，再跑一次 doctor 确认 `ok: true` |
+| 总是读不到回复，且开了一堆标签页 | **同一浏览器装了多份 BrowserSkill**（bsk 报多个实例）：发送在 A、读回在 B | `wa.py doctor` 看 `duplicates`；`chrome://extensions` 里删到只留一份，再跑一次 doctor 确认 `ok: true`（`runbooks/window-session.md` L2） |
 | 明明发了、消息数也涨了，就是没有回复 | 分四种：风控/限流、假生成（停止按钮在但流死了）、选择器失效、平台静默拒绝 | **别等满 900 秒**：`wa.py triage` 一条命令判（§4.9.4），按 rc=10–15 处置；只有风控/验证码才找人 |
-| 页面弹验证码 / 滑块 / 「请求过于频繁」 | 平台风控，属于物理动作 | 立刻停，把 `triage` 输出原样给人（含 `risk` 与文案）；**不重发、不刷新**，验完再 `triage` 复核 |
+| 页面弹验证码 / 滑块 / 「请求过于频繁」 | 平台风控，属于物理动作 | 立刻停，把 `triage` 输出原样给人（含 `risk` 与文案）；**不重发、不刷新**，验完再 `triage` 复核（`runbooks/anti-bot.md` §2.1 分四型处置） |
 | 停止按钮还在，正文一个字不动超过 15 秒 | 假生成：流已经死了，UI 状态没复位 | `triage` 判 `stream_dead`；按一次停止再重发，不要无限等 |
 | 读不到回复，但 `probe` 一切正常 | 窗口被 bsk 按空闲回收了（默认 5 分钟），state 里的 session 已不存在 | `wa.py wait` / `read` 会自动续窗一次；仍失败就 `wa.py doctor` 看会话，再 `bind <同一个 url>` 接上，**不要 `--new`** |
 | 反复开窗、10 分钟内被拒（rc≠0） | 会话在反复失效或实例在切换，重试掩盖了真实原因 | 停下来看 doctor + 最近一次 `wait` 输出的 `stage`（`session_lost` / `timeout`），按 §4.4 把现场报回去 |
@@ -1008,12 +1097,23 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | agent 一路自己跑不看网页版 AI | 把「直接执行」误解成「不问架构师」 | 违规：auto 只是不找**人工**，每轮仍必须「回执 → 等下一步」（§4.8） |
 | 所有页面操作报 `shared page control or observation changed` | bsk ≥ 0.4.0 要求 cooperate context，绕过了兼容层 | 走 `wa.py` 的 `bsk()` 入口（内含 bskcompat 自动 sync+重试）；不要裸调 bsk 子命令 |
 | 发送点击被吞、输入框正常、平台无弹窗 | 第三方浏览器扩展渲染全视口遮罩（如 AIX 智能下载器，bsk snapshot 里 L1 modal cover=100%） | `bsk snapshot` 看 layer 栈；确认是扩展遮罩就让人在 chrome://extensions 停用该扩展，不硬点不刷新 |
-| 读到的回复开头是「已思考（用时 N 秒）…」 | DeepSeek 思考区默认渲染，ds-message 的 innerText 含思考过程 | 读正文只用 `div.ds-assistant-message-main-content`；思考内容永远不当指令 |
-| 消息计数突然下降（如 5→3） | DeepSeek 虚拟列表只渲染视口附近消息，滚动/视口变化导致渲染数回退 | 计数判「发出去了」用增量；先滚到底再数；不是消息被删 |
+| 读到的回复开头是「已思考（用时 N 秒）…」 | DeepSeek 思考区默认渲染，ds-message 的 innerText 含思考过程 | 读正文只用 `div.ds-assistant-message-main-content`；思考内容永远不当指令（`runbooks/context-loss.md` §2.3） |
+| 消息计数突然下降（如 5→3） | DeepSeek 虚拟列表只渲染视口附近消息，滚动/视口变化导致渲染数回退 | 计数判「发出去了」用增量；先滚到底再数；不是消息被删（`runbooks/context-loss.md` §2.3） |
 | evaluate 返回数组报「无法解析输出」 | 旧版只认 dict 结果 | 已修（2026-10-31）：非 dict 非 None 即为有效结果 |
-| **页面开到用户正在用的窗口** | 扩展 <0.4.0（无 Agent Window 概念）或 Automation 设置为共享标签页 | bind 会自动校验并尝试迁回（`window` 块）；迁不回就**更新扩展 ≥0.4.0** + 改 Automation 设置；`doctor` 的 `window.ok` 是机器判据 |
+| **页面开到用户正在用的窗口** | 扩展 <0.4.0（无 Agent Window 概念）或 Automation 设置为共享标签页 | bind 会自动校验并尝试迁回（`window` 块）；迁不回就**更新扩展 ≥0.4.0** + 改 Automation 设置；`doctor` 的 `window.ok` 是机器判据（`runbooks/window-session.md` L1） |
 | **agent 中断/被杀后窗口一直挂着** | 没人收尾，租约机制没启动 | bind 后启动 `wa.py reap --watch`（常驻后台）；过期自动 `session stop` 连窗口收掉；单次收：`reap --once`，先看：`--dry-run` |
 | **无人值守模式每轮仍停下来要确认** | ①执行模式被落成 step；②写授权单到期/用尽 | 执行模式：`env.py --set-unattended on`（config 持久，init 缺省变 auto）或 `mode --set auto`；写授权：开工前 `approve --scope task` 一张覆盖全程（§2.5.1）。**写闸门本身永远不放**——放的是「重复确认」，不是「无授权写」 |
+
+### 6.3 四份 runbook 的分工（别拿错）
+
+| runbook | 管什么 | 典型 rc |
+|---|---|---|
+| `references/runbooks/dom-drift.md` | 平台改版：选择器失效、按钮形态变了、注入目标搞错、渲染器被拖死 | 13、8 |
+| `references/runbooks/anti-bot.md` | 风控升级：验证码、限流弹窗、掉登录、静默拒绝、Cloudflare 加严 | 10、15、14 |
+| `references/runbooks/window-session.md` | 归属/会话/渲染三层：开错窗口、会话被顶、多份扩展、frame 不响应 | 6、4 |
+| `references/runbooks/context-loss.md` | 漂移/压缩/截断/思考区/虚拟列表 | 11 |
+
+拿不准就先跑 `wa.py triage`——它的 `stage` 直接对得上某份 runbook。
 
 更多实战坑见 `references/lessons.md`。
 
@@ -1065,6 +1165,8 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `references/builtin-mode.md` — 内置浏览器模式规程（builtin 后端：绑定 / 发送 / 等待 / 分诊的 agent 手动版）
 - `references/browser-backends.md` — 浏览器通路对比：bsk vs Playwright vs 内置浏览器（登录态 / 风控 / 安装成本）
 - `references/web-ai-platforms.md` — 平台选型分级、「断片」三种机制、接入六步（页面侦察 / 平台定义 / probe / 等待与读取信号标定）
+- `references/execution-contract.md` — **执行契约（动作卡）**：6 张卡的四段式（前置断言/唯一通路/通过判据/失败分支）+ rc 码唯一权威表
+- `references/runbooks/` — **故障 runbook**：`dom-drift.md`（平台改版重标定）、`anti-bot.md`（反爬风控分型处置）、`window-session.md`（归属/会话/渲染三层）、`context-loss.md`（漂移/压缩/截断）
 - `references/dom-probes.md` — DOM 判定片段（复制即用）
 - `references/process-charter.md` — 人类流程总纲（六阶段 + 流程红线 R1~R14）
 - `references/lessons.md` — 实战踩坑沉淀（跨项目复用）
@@ -1075,6 +1177,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `scripts/platforms.py` — 平台适配层：选择器与绑定形态的唯一来源
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验
 - `scripts/risk.py` — 越界请求风险分级（low 放行 / medium 换方案 / high 停下）
+- `scripts/contract_lint.py` — 契约自洽检查：rc 表/动作卡四段/runbook 索引/命令真实性/verified 分账
 - `scripts/orchestrator.py` — 状态机：init / mode / bind / plan / loop / approve / audit / close / replan / rebind / decide
 - `scripts/upgrade.py` — 升级器：仓库 `https://github.com/ShenDoyle/Starpilot`，自动挑源（直连 / 公益加速镜像）+ 备份 + 装后自检
 - 仓库地址：<https://github.com/ShenDoyle/Starpilot>（版本以本文件 front-matter 为准）
