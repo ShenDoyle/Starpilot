@@ -309,3 +309,24 @@ class TestClearAlsoGated(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTabScopeDictFormat(unittest.TestCase):
+    """回归：bsk tab list 实际返回 {"tabs":[...]}，旧代码当 list 解析 → 永远 unknown
+    （2026-11-02 现场：发送被 unknown 拒绝，绑定标签明明在 agent 窗口）。"""
+
+    def test_scope_report_accepts_dict_shape(self):
+        fake = {"tabs": [
+            {"tab_id": 1, "url": "https://x/c/conv", "scope": "agent"},
+            {"tab_id": 2, "url": "https://other", "scope": "user"},
+        ]}
+        with mock.patch.object(wa, "bsk", return_value=(0, json.dumps(fake), "")):
+            rep = wa.tab_scope_report("s1")
+        self.assertEqual(rep["agent"], ["https://x/c/conv"])
+        self.assertEqual(rep["user"], ["https://other"])
+
+    def test_scope_report_none_only_when_truly_bad(self):
+        with mock.patch.object(wa, "bsk", return_value=(0, "not-json", "")):
+            rep = wa.tab_scope_report("s1")
+        self.assertIsNone(rep["agent"])
+        self.assertIsNone(rep["user"])

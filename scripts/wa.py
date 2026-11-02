@@ -609,6 +609,8 @@ def tab_scope_report(sid: str) -> dict:
             data = json.loads(out or "[]")
         except Exception:
             return None
+        if isinstance(data, dict):          # bsk 实际返回 {"tabs":[...]}（2026-11-02 实测）
+            data = data.get("tabs") or []
         if isinstance(data, list):
             return [t.get("url") or "" for t in data if isinstance(t, dict)]
         return None
