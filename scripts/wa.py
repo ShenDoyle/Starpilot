@@ -576,6 +576,93 @@ def heal_window_placement(st: dict, path: str, sid: str) -> dict:
     return rep2
 
 
+# ---------------------------------------------- 窗口归属三态门（2026-11-02 GPT 审计 P0）
+#
+# GPT 2026-11-02 审计裁定：window.ok=null 不得放行受保护操作——「无法确认归属」
+# 既不是成功也不是可接受的默认态。三态语义：
+#   verified  已验证页面在本会话 Agent Window        → 放行
+#   misplaced 已确认页面不在（用户窗口/自愈失败）      → 一律禁止
+#   unknown   探不到（tab list 失败/扩展无响应）       → 禁止进入受保护操作
+# 受保护操作 = 向页面写入（send：打错窗口 = 往用户窗口打字）。只读操作（probe/read/
+# triage）不受此门约束。逃生阀 WA_ALLOW_UNVERIFIED_WINDOW='<理由>'：单次消费 +
+# 强制落账 P0-ESC（与 ORCHESTRATOR_REQUIRED 逃生门同一模式），不是静默降级。
+
+WINDOW_CHECK_TTL_S = 300
+
+
+def window_verified(st: dict, path: str, sid: str, attempts: int = 3) -> str:
+    """归属三态判定（探测重试 + 自愈一次）。结果写回 state 并带时间戳。"""
+    if _transport_is_iab():
+        return "iab"  # IAB 传输无窗口概念，不受此门约束
+    v = "unknown"
+    for i in range(attempts):
+        rep = window_report(st, sid)
+        if rep.get("ok") is True:
+            v = "verified"
+            break
+        if rep.get("ok") is False:
+            rep = heal_window_placement(st, path, sid)  # 自愈一次再复检
+            v = "verified" if rep.get("ok") is True else "misplaced"
+            break
+        time.sleep(1.5 * (i + 1))  # None：扩展可能还在注册，退避重试
+    st["window_verified"] = v
+    st["window_checked_at"] = time.time()
+    return v
+
+
+def require_window_verified(st: dict, path: str, sid: str):
+    """send 前强制校验。返回 (ok, 拒绝说明)。None/False 不放行（GPT P0 裁定）。"""
+    if _transport_is_iab():
+        return True, ""
+    if not sid:
+        return True, ""  # 没会话的发送会在 ensure_session 自己失败，不归这门管
+    checked_at = float(st.get("window_checked_at") or 0)
+    fresh = (st.get("window_verified") in ("verified", "misplaced")
+             and time.time() - checked_at < WINDOW_CHECK_TTL_S)
+    v = st["window_verified"] if fresh else window_verified(st, path, sid)
+    if v == "verified":
+        save_state(path, st)
+        return True, ""
+    esc = os.environ.get("WA_ALLOW_UNVERIFIED_WINDOW", "")
+    if esc.strip():
+        del os.environ["WA_ALLOW_UNVERIFIED_WINDOW"]  # 单次消费：用完即焚
+        _ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        _eid = "P0-ESC-%s" % hashlib.sha256(
+            ("%s|%s" % (_ts, st.get("url") or "")).encode("utf-8")).hexdigest()[:8]
+        root = os.path.dirname(path) or "."
+        try:
+            import pending_gate as _pg
+            _led = _pg.pending_path_for(root, "", "")
+            _head = "" if os.path.exists(_led) else "# 未清项清单\n"
+            os.makedirs(os.path.dirname(_led), exist_ok=True)
+            with open(_led, "a", encoding="utf-8") as _f:
+                _f.write(_head + ("- [P0][%s] unverified_window_send 归属未验证（%s）仍发送"
+                                  " | deferred(违例：%s target=%s reason=%s；"
+                                  "必须在回执三栏报备) | 来源:escape_hatch\n"
+                                  % (_eid, v, _ts, hashlib.sha256(
+                                      (st.get("url") or "").encode("utf-8")
+                                  ).hexdigest()[:12], esc.strip())))
+        except Exception:
+            pass
+        sys.stderr.write("警告：窗口归属未验证（%s）仍发送——已落账 %s，须在回执三栏报备\n"
+                         % (v, _eid))
+        save_state(path, st)
+        return True, ""
+    save_state(path, st)
+    if v == "misplaced":
+        why = ("页面被确认开在本会话 Agent Window 之外（自愈失败）。往用户窗口打字 = "
+               "直接干扰人用电脑，禁止发送。修根：更新 BrowserSkill 扩展 ≥0.4.0、"
+               "把扩展 Automation 设置从「共享标签页」改为允许独立 Agent Window，"
+               "或 rebind。")
+    else:
+        why = ("无法确认窗口归属（tab list 探不到：扩展无响应/版本过旧）。"
+               "归属未知 ≠ 归属正确，禁止发送。处置：跑 wa.py doctor 看扩展状态，"
+               "或重新 bind。")
+    why += ("\n  逃生阀（单次消费，理由必填，落账 P0-ESC）："
+            "WA_ALLOW_UNVERIFIED_WINDOW='<理由>' 重跑")
+    return False, why
+
+
 def enforce_single_session(keep: str = "", browser: str = "") -> None:
     """窗口纪律（硬规则）：**同一浏览器实例**内任何时刻只允许一个会话/Agent Window。
 
@@ -1059,10 +1146,10 @@ def cmd_bind(a) -> int:
                "awaiting_reply": False, "turn": 0, "history": [],
                "new_chat": new_chat})
     touch_lease(st, path)
-    wrep = heal_window_placement(st, path, sid)
+    _wv = window_verified(st, path, sid)  # 三态判定（含重试与自愈），写回 state
     save_state(path, st)
     print(json.dumps({"ok": True, "bound": st["url"], "platform": p["key"],
-                      "window": {"ok": wrep.get("ok"), "heal": wrep.get("heal") or ""},
+                      "window": {"verified": _wv},
                       "msg_count": data["msg_count"], "session": sid,
                       "new_chat": new_chat, "conv_id": bv["conv_id"],
                       "bind_code": bv["code"], "warn": bv["warn"],
@@ -1167,6 +1254,14 @@ def cmd_send(a) -> int:
     if not st.get("url"):
         print("尚未绑定对话：先跑 wa.py bind <url>", file=sys.stderr)
         return 2
+
+    # ---- 窗口归属三态门（2026-11-02 GPT 审计 P0：null 不得放行）----
+    # send 是写路径：打错窗口 = 往用户正在用的窗口打字。归属 unknown/misplaced
+    # 一律拒绝；逃生门单次消费 + 落账 P0-ESC，与上方熔断逃生门同一模式。
+    _wok, _why = require_window_verified(st, path, st.get("session") or "")
+    if not _wok:
+        print("WINDOW_UNVERIFIED：窗口归属未确认，拒绝发送。\n  " + _why, file=sys.stderr)
+        return 6
 
     text = a.text or ""
     if a.file:
@@ -1674,7 +1769,7 @@ def cmd_doctor(a) -> int:
         "sessions": sessions,
         "state": {k: st.get(k) for k in ("platform", "url", "conv_id", "session",
                                          "browser", "awaiting_reply", "turn",
-                                         "window_kind")},
+                                         "window_kind", "window_verified")},
         "window": wr,
         "lease": ({"left_s": int(left), "idle_close_s": idle_close_s(),
                    "reaper": "wa.py reap --watch"} if left is not None else None),

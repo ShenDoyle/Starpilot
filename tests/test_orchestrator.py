@@ -220,11 +220,17 @@ class TestWriteGate(TempWorkspace):
             self.assertFalse(p.get("verified"), "%s 应是未实测" % key)
             self.assertEqual(p.get("write_allowed"), [], "%s 不该有可写路径" % key)
         # 已实测平台的写路径必须在白名单里
-        for key in ("kimi", "chatgpt", "deepseek", "gemini", "doubao"):
+        for key in ("kimi", "deepseek", "gemini", "doubao"):
             p = platforms.get(key)
             self.assertTrue(p.get("verified"))
             self.assertIn(p.get("write_method"), p.get("write_allowed"),
                           "%s 的 write_method 必须在自己的白名单里" % key)
+        # chatgpt：整链路口径未 verified（计数选择器待重标定），但写路径当天单独复测过，
+        # 白名单保留是事实而不是放水——两件事分开记，不许互相冒充。
+        cg = platforms.get("chatgpt")
+        self.assertFalse(cg.get("verified"))
+        self.assertTrue(cg.get("write_verified"))
+        self.assertIn(cg.get("write_method"), cg.get("write_allowed"))
 
 
 class _Args(object):
@@ -361,9 +367,14 @@ class TestMatrixAndSignals(TempWorkspace):
                          "send_allowed": bool(p.get("write_allowed"))})
         self.assertGreaterEqual(len(rows), 5, "平台矩阵至少 5 行")
         for r in rows:
-            if not r["verified"]:
+            p = platforms.get(r["platform"])
+            if not r["verified"] and not p.get("write_verified"):
                 self.assertFalse(r["send_allowed"],
-                                 "%s 未实测就不许真写" % r["platform"])
+                                 "%s 未实测、写路径也没单独复测，就不许真写" % r["platform"])
+        # chatgpt 是「写路径已复测、整链路待重标定」的特例：写允许，但必须两账分明
+        cg = {r["platform"]: r for r in rows}["chatgpt"]
+        self.assertTrue(cg["send_allowed"])
+        self.assertFalse(cg["verified"])
 
     def test_editor_cleared_is_weak_signal_only(self):
         """输入框清空是**弱信号**：主信号不满足时必须报 INCONCLUSIVE_NOT_SUCCESS，
@@ -489,9 +500,15 @@ class TestVerifyAndRecovery(TempWorkspace):
                                   _Args(workspace=self.root, state="", probe=False)))
         rows = {r["platform"]: r for r in out["rows"]}
         self.assertGreaterEqual(len(rows), 5, "矩阵至少 5 行")
-        self.assertEqual(rows["chatgpt"]["read_probe"], "deferred_rule1",
-                         "chatgpt 是纪律搁置，不是技术失败")
-        self.assertTrue(rows["chatgpt"]["verified"], "chatgpt 历史实测为真")
+        # 2026-11-02 DOM 改版后 chatgpt 整链路未验证：如实记 skipped_not_bound
+        # （skipped ≠ probed），不再是 deferred_rule1——那是「已实测但未绑定」的记号。
+        self.assertEqual(rows["chatgpt"]["read_probe"], "skipped_not_bound")
+        self.assertFalse(rows["chatgpt"]["verified"])
+        self.assertIn("重标定", platforms.get("chatgpt").get("notes", ""),
+                      "未验证状态必须写清待办，不能静默降级")
+        # deferred_rule1 的语义仍要有平台承担：gemini 已实测但本轮未绑定
+        self.assertEqual(rows["gemini"]["read_probe"], "deferred_rule1",
+                         "已实测但未绑定 = 纪律搁置，不是技术失败")
         self.assertTrue(rows["gemini"]["verified"], "gemini 2026-10-29 已实测")
         for key in ("claude",):
             self.assertNotEqual(rows[key]["read_probe"], "ok",

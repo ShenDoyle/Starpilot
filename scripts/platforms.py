@@ -124,8 +124,19 @@ PLATFORMS = {
     "chatgpt": {
         "label": "ChatGPT",
         "home": "https://chatgpt.com",
-        "verified": True,
-        "notes": "2026-10-27/28 实测，14 轮循环跑通。选择器精确、信号最完整。",
+        # 2026-11-02 实测 DOM 改版：编辑器 = div.ProseMirror（#prompt-textarea 已移除）、
+        # 发送 = form button[type=submit]（data-testid=send-button 已移除）。两项已回填；
+        # 但 assistant 消息节点的 data-message-author-role 属性也消失了，
+        # `reply_count_delta` 依赖的计数选择器**尚未找到替代**（正文读取走 marker
+        # 「ChatGPT 说：」仍可用）。计数口径未重标定前，verified 一律 false——
+        # 不拿「大部分还能用」冒充「已实测」。
+        "verified": False,
+        # 写路径（editor 写入 + send 点击）2026-11-02 当天单独复测通过：
+        # 2367 字全文写入、指纹 6/6 命中、点击后地址出现 /c/<uuid>。
+        # 它是「写没问题」，不等于「整条 loop 可自动跑」（计数口径还没重标定）。
+        "write_verified": True,
+        "notes": "2026-11-02 DOM 改版：editor/send 已回填实测值且写路径复测通过；"
+                 "assistant 计数选择器待重标定（role 属性消失），整链路口径的 verified 保持 false。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chatgpt.com/c/<uuid>；出现 / 或 /new 即为新对话，拒绝绑定。",
         "write_method": "exec",
@@ -137,14 +148,20 @@ PLATFORMS = {
         # 已实测的写入路径：只有 exec（execCommand）这一条被允许真实写
         "write_allowed": ["exec"],
         "sel": {
-            "editor": ["#prompt-textarea", "main div[contenteditable=\"true\"]",
+            # 2026-11-02 实测：编辑器是 ProseMirror 根节点；旧 #prompt-textarea 作后备
+            "editor": ["div.ProseMirror", "#prompt-textarea",
+                       "main div[contenteditable=\"true\"]",
                        "div[contenteditable=\"true\"]"],
-            "send": ["button[data-testid=\"send-button\"]",
+            # 2026-11-02 实测：发送是表单提交按钮（aria=发送）；testid 已弃用，留作后备
+            "send": ["form button[type=\"submit\"]",
+                     "button[data-testid=\"send-button\"]",
                      "main button[aria-label=\"发送\"]",
                      "main button[aria-label=\"Send\"]"],
             "stop": ["button[data-testid=\"stop-button\"]",
                      "main button[aria-label*=\"停止\"]",
                      "main button[aria-label*=\"Stop\"]"],
+            # ⚠️ 2026-11-02：这三个 role 属性在实测页面里已查不到（计数口径失效）。
+            # 保留为后备（部分地区/灰度可能仍存在），但**不得据此宣称已验证**。
             "messages": ["[data-message-author-role=\"assistant\"]"],
             "msg_containers": ["[data-message-author-role]"],
             "user_messages": ["[data-message-author-role=\"user\"]"],

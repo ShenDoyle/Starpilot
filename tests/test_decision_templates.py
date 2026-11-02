@@ -91,6 +91,34 @@ class TestSkillWiring(unittest.TestCase):
         self.assertIn("裁定申请单", self.skill)
 
 
+class TestPlainLanguageSemantics(unittest.TestCase):
+    """D06/D07（GPT 2026-11-02 审计 P1）：翻译不得遗漏风险、不得替用户选择。"""
+
+    def setUp(self):
+        # 去粗体标记再断言：语义在，格式不该左右测试
+        self.card = read("templates", "requirement-card.md").replace("**", "")
+        self.gate = read("templates", "confirm-gate.md").replace("**", "")
+
+    def test_d06_no_omitted_risk_rules_present(self):
+        for text, name in ((self.card, "requirement-card"), (self.gate, "confirm-gate")):
+            for needle in ("遗漏", "增加", "改变选项", "弱化风险"):
+                self.assertIn(needle, text, "%s 缺语义自查项：%s" % (name, needle))
+            self.assertIn("语义自查五问", text, "%s 缺五问清单" % name)
+
+    def test_d07_translation_cannot_choose_for_user(self):
+        for text, name in ((self.card, "requirement-card"), (self.gate, "confirm-gate")):
+            self.assertIn("不得替用户选择", text, "%s 未写明不得代选" % name)
+            self.assertIn("代替用户确认", text, "%s 未写明不得代确认" % name)
+
+    def test_card_covers_four_stages(self):
+        for stage in ("需求确认", "方案确认", "风险确认", "最终验收"):
+            self.assertIn(stage, self.card, "白话标准未覆盖：%s" % stage)
+
+    def test_translation_scope_unchanged(self):
+        self.assertIn("范围、选项、风险、约束", self.card)
+        self.assertIn("以原文为准", self.card)
+
+
 class TestRequirementCardPlainLanguage(unittest.TestCase):
     def test_plain_language_note_in_unclear_section(self):
         text = read("templates", "requirement-card.md")

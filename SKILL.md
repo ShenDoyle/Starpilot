@@ -421,15 +421,26 @@ gemini.google.com 在登录态下会重定向回最近一次对话，等于没�
 
 **怎么做**：
 
-1. **plan 输出阶段拆分表**（连同 `runs/<run_id>/plan.md` 落盘）：每阶段一行——
+1. **先定格任务范围（防「说小做多」）**：`orchestrator.py scope --rounds N --deliverables N --modules N`
+   一次记进 run state（`task_scope`）。预估值与**实际执行值分开记**；改预估必须带
+   `--revise-reason`（进 journal，`audit` 单列 `scope_revised`）——静默改小 = 拒。
+2. **plan 输出阶段拆分表**（连同 `runs/<run_id>/plan.md` 落盘）：每阶段一行——
    阶段号 / 阶段目标（一句话）/ 交付物 / 验收判据（我拿什么证明这阶段做完了）/ 预计轮次。
    阶段粒度：**一个阶段 = 一次能被验证的交付**，不按「今天做什么」分。
-2. **每阶段结束走 §4.6 CLOSE**：`close --stage <id> --require-lessons`（lessons 门强制回流），
-   并产出阶段报告（`templates/phase-report.md`）。
-3. **验收没过不进下一阶段**：逐步确认模式 = 等用户看报告点头；直接执行模式 =
+   plan 里的 `## 阶段 <id>` 行会被自动导入为阶段记录；范围已超阈值但 plan 没有阶段表
+   → **plan 直接拒**（rc=5，不许进 PLAN_OK）。
+3. **阶段状态机**（机器状态，不是口头）：`pending → executing → submitted → accepted`。
+   - `stage start <id>` 起阶段；**上一阶段不是 accepted 就拒**（rc=5）。
+   - 每阶段结束走 §4.6 CLOSE：`close --stage <id> --require-lessons`（lessons 门强制回流），
+     收口只把阶段推到 **submitted**——**收口 ≠ 验收通过**。
+   - `stage accept <id> --by web_ai|user --evidence '<验收依据>'` 才是 accepted；
+     空证据、agent 自验收一律拒。
+4. **验收没过不进下一阶段**：逐步确认模式 = 等用户看报告点头；直接执行模式 =
    验收判据逐条自证 + 网页版 AI 确认（§4.8），判据不过就留在本阶段修。
-4. **禁止压缩**：不许「把阶段 2、3 合成一轮做完」。阶段计划要改，走裁定申请（§4.10），
+5. **禁止压缩**：不许「把阶段 2、3 合成一轮做完」。阶段计划要改，走裁定申请（§4.10），
    由网页版 AI 改表，agent 不自己合并。
+6. **审计兜底**：`orchestrator.py audit` 把「实际已达阈值但 stages 为空」判
+   `undeclared_complexity` → verdict FAIL。少报轮数骗不过 audit。
 
 ### 4.1 发送（一次只发一件事）
 
@@ -714,6 +725,28 @@ python scripts/orchestrator.py decide \
 三条纪律：**先裁后动**（发出≠可动手）；**选项必须带影响**（不带影响等于把判断丢回去）；
 **不许夹带**（一张单子裁一个岔路，顺带的想法单独开单）。
 
+#### 4.10.1 裁定台账：倾向 ≠ 批准（2026-11-02 GPT 审计 P0-2）
+
+**光看文字不算数**：WebAI 说了什么，要落成机器可查的记录，否则「它没反对」会被
+agent 解释成「它同意了」。
+
+```bash
+python scripts/decisions.py record --ledger state/decisions.json \
+    --action "合并阶段 S2+S3" --verdict-text "<WebAI 原话，不改写>" --facts-hash <现场指纹>
+python scripts/decisions.py check  --ledger state/decisions.json \
+    --action "合并阶段 S2+S3" --facts-hash <现场指纹>     # 0=已授权 / 6=未授权
+```
+
+规则（机器判定，见 `scripts/decisions.py`）：
+
+1. **五态**：`approved` / `rejected` / `need_info` / `stopped` / **`tentative`**。
+   「我倾向于 A」「建议用 A」「或许可以」→ **tentative，不是授权**；
+   认不出的表述一律按 tentative（fail-closed）。
+2. **裁定绑定动作 + 范围**：一张裁定只对它写的那个动作有效；换动作 = 重新申请。
+3. **事实变化即失效**：`check` 比对裁定时的 `facts_hash`，不一致 → 原裁定作废，
+   必须重新申请（现场变了，旧的同意不再是同意）。
+4. **动手前 check**：任何待裁定动作，先 `check` 拿到 0 再执行；没有记录就申请。
+
 ---
 
 ## 5. 落地实现
@@ -827,6 +860,9 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `wa.py clear` | 清空输入框（不发送）：给「已写入未发送」的恢复态用 |
 | `wa.py doctor` | 体检：在线实例（含**重复安装**判定）/ 会话 / state 指向。重试之前先看它 |
 | `wa.py triage [--relocate]` | 卡住判定：只读页面，判风控/漂移/假生成/选择器失效/没发出去，给下一步。`--relocate` 用备用读法复探（不刷新） |
+| `orchestrator.py scope --rounds N --deliverables N --modules N` | 定格任务范围预估（一次定格；改要 `--revise-reason`，audit 单列 scope_revised） |
+| `orchestrator.py stage add\|start\|accept\|list` | 阶段状态机 pending→executing→submitted→accepted；未 accepted 不许开下一阶段 |
+| `decisions.py record\|check\|list` | 裁定台账：倾向≠批准、裁定绑定动作与事实指纹、事实变即失效 |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
 | `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、浏览器后端（bsk / builtin）、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk；`--set-backend` 记录 §0.2 的用户选择 |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
@@ -839,6 +875,10 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
   自动尝试 `tab create` + 重新导航迁回来（结果见 bind 输出的 `window` 块与 doctor 的
   `window` 块）。迁不回 = 根因在扩展侧：**更新 BrowserSkill 扩展到 ≥0.4.0**（Agent Window
   是 0.4.0 特性）、把扩展的 Automation 设置从「共享标签页」改为允许独立 Agent Window。
+- **归属是三态，不是布尔（2026-11-02 GPT 审计 P0）**：`window.verified` =
+  `verified` / `misplaced` / `unknown`。**unknown 不得当成通过**：探不到（扩展无响应、
+  tab list 失败）与确认开错窗口一样不许写——send 会以 rc=6 `WINDOW_UNVERIFIED` 拒绝。
+  判定结果带时间戳（TTL 300s），过期的 verified 会重新探测。
 - **窗口租约 + 自动收割（2026-11-02 新增）**：每条浏览器命令都会续租
   （`lease_until = now + idle_close_s`，缺省 900 秒，config `idle_close_s` 或
   `WA_IDLE_CLOSE_S` 可调）；**bind 成功后立即启动收割器**（后台任务常驻）：
@@ -942,6 +982,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | `probe` 报 `editor: false` | 平台改版，选择器失效 | **这不是平台「断片」**，是 DOM 变了 → 回填 `platforms.py` 的 `sel` |
 | 某平台开始「记不住」早期细节 | 上下文压缩或截断 | 落盘原文 + 定期重贴结论；换平台前先跑 `templates/web-ai-eval.md` |
 | 回复被截断 | 生成中断 | 不重发，把截断位置报给网页版 AI |
+| `WINDOW_UNVERIFIED`（send rc=6） | 窗口归属 unknown/misplaced：探不到或确认不在 Agent Window | **不许发**（打错窗口 = 往用户窗口打字）。`wa.py doctor` 看 `window_verified`；修扩展 ≥0.4.0 / 改 Automation 设置 / 重新 bind。用户明示可越过时：`WA_ALLOW_UNVERIFIED_WINDOW='<理由>'`（单次消费 + 落账 P0-ESC） |
+| `stage start` 被拒（blocked_by） | 上一阶段还停在 submitted，没收 accepted | 让 web_ai 或用户 `stage accept <id> --by web_ai --evidence '<依据>'` 后再 start；收口 ≠ 验收通过 |
+| `decisions.py check` 返回 6 | 无记录 / 只是倾向（tentative）/ 事实已变 | 重新发裁定申请（`templates/web-ai-decision.md`），拿到明确「批准 A」再动手；软话不算授权 |
 | `msg_count=0` 但页面正常 | 手工 bsk session 顶掉了 state 里的 session | 重新 `wa.py bind <url>` 恢复 |
 | 找不到 bsk | 没装 / 不在 PATH / 扩展没开 / **后端是 builtin（设计如此）** | 先看 `env.py --json` 的 `backend`：`builtin` 下 wa.py 浏览器命令 rc=6 属正常，按 `references/builtin-mode.md` 手动执行；`bsk` 后端才自己装：`--install`（官方脚本，用户级）；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
 | 发送后输入框空了、页面却没有新会话 | 平台侧限流/拒绝（Kimi 会弹「和Kimi聊天的人太多了」弹窗） | 先关弹窗、确认模型档位，再按 §4.1 的三重判据重发；仍不行按硬规则 4 停下转交 |
@@ -994,7 +1037,8 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | ~~**无 orchestrator**~~ | **已补（2026-10-29）**：`scripts/orchestrator.py` 落地 14 态状态机 + 守卫迁移 + 轮次预算 + 崩溃恢复（`loop --resume` 只复核 DOM、绝不重发），实测证据见 `runs/20261029T042822-recovery2` | — |
 | ~~**写侧未落地**~~ | **已补（2026-10-29）**：`scripts/write_gate.py` 落地「缺省 dry_run + 必须批准 + 单条真实写 + 写后核验」，真实写在 Kimi 上跑通（`reply_count_delta=1`） | — |
 | ~~**知识回流靠自觉**~~ | **已补（2026-10-29）**：`orchestrator.py close --stage <id> --require-lessons` 强制把 lesson 候选并进 `references/lessons.md` 附录，验收看 `candidates=merged=appendix_added` 与 `lessons_pending=0` | — |
-| **5 个平台已实测，Claude 未标定** | `platforms.py` 已抽象出适配层，**ChatGPT / Kimi / DeepSeek / Gemini / 豆包已实测**（DeepSeek、Gemini、豆包均于 2026-10-29 全链路跑通）；Claude 的候选选择器**仍为通用模式推断**，未验证。**受硬规则 1 约束，未绑定就不能探测**（矩阵记 `skipped_not_bound`） | 要实测就得**由人改绑**（架构师级决定），再按 `references/web-ai-platforms.md` 六步接入 |
+| **ChatGPT 计数选择器待重标定（2026-11-02）** | DOM 改版：`#prompt-textarea` 已移除（现为 `div.ProseMirror`）、`send-button` testid 已弃用（现为 `form button[type=submit]`）——两项已回填实测值，写路径当天复测通过（2367 字写入 + 地址出现 conv_id）。但 `data-message-author-role` 属性消失，**回复计数口径失效**，`verified=false`、只保留 `write_verified=true`（单轮写入可用，循环完成度判定不可用） | 在改造后的页面上重新标定 reply_count 口径（候选：article/conversation-turn 容器 + marker「ChatGPT 说：」计数），跑通 `effective_delta==1` 后再置 verified=true |
+| **4 平台已实测，Claude 未标定** | `platforms.py` 已抽象出适配层，**Kimi / DeepSeek / Gemini / 豆包已实测**（DeepSeek、Gemini、豆包均于 2026-10-29 全链路跑通）；Claude 的候选选择器**仍为通用模式推断**，未验证。**受硬规则 1 约束，未绑定就不能探测**（矩阵记 `skipped_not_bound`） | 要实测就得**由人改绑**（架构师级决定），再按 `references/web-ai-platforms.md` 六步接入 |
 | **「工具说成功/失败」不等于事实** | 三个同源坑：① 导航 `load` 事件不来（Gemini 长轮询）→ 判导航失败；② `bsk fill` 自校验比对多行文本 → 判写入失败（字其实已进去）；③ `innerText` 有字而编辑器 model 是空（Quill）。**一律以页面事实定性**：地址+编辑器、空态类+发送键+字数 | `navigate_soft` / `fill_check` / `normalize_probe` 三处收口；`references/lessons.md` L-GEMINI-NAV-TIMEOUT / FILL-FAILED / FILL-NOT-ACCEPTED |
 | **写完未发就卡住时无路可走** | 守卫正确地拒绝「脏输入框」再写，但以前没有清空工具 → 恢复只能人工点浏览器 | `wa.py clear`（Ctrl+A + Delete，真实键盘；清完复核空态） |
 | ~~**需求阶段无工具**~~ | **已补（2026-10-29）**：`scripts/requirement_gate.py` 做**否定式**校验（未明确未清空 / 冲突未裁定 / 确认未通过 一律拒），`orchestrator.py init --card` 强制先过。**它只拒绝，不生成、不补全、不建议**（硬规则 2） | 卡片模板见 `templates/requirement-card.md` |
@@ -1024,6 +1068,7 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 - `templates/` — 需求卡片 / **首次确认单（人话版）** / 反馈 / **裁定申请单（先裁后动）** / 阶段报告 / 完成判定 / 平台记忆自测
 - `scripts/wa.py` — bind / send / wait / read / state / plock 命令实现
 - `scripts/env.py` — 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展连接；`--install` 自动装 bsk
+- `scripts/decisions.py` — 裁定台账：倾向≠批准、动作绑定、事实指纹失效
 - `scripts/platforms.py` — 平台适配层：选择器与绑定形态的唯一来源
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验
 - `scripts/risk.py` — 越界请求风险分级（low 放行 / medium 换方案 / high 停下）

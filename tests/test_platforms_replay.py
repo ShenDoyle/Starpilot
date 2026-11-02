@@ -215,16 +215,18 @@ class TestPlatformContract(unittest.TestCase):
             if p.get("verified"):
                 self.assertIn(p.get("write_method"), p.get("write_allowed") or [],
                               "%s 已实测，但 write_method 不在白名单里" % key)
-            else:
+            elif not p.get("write_verified"):
                 self.assertEqual(p.get("write_allowed") or [], [],
-                                 "%s 未实测，不许有真实写路径" % key)
+                                 "%s 未实测且写路径未单独复测，不许有真实写路径" % key)
 
     def test_verified_count_is_honest(self):
         verified = [k for k in platforms.PLATFORMS if platforms.get(k).get("verified")]
         self.assertIn("deepseek", verified, "DeepSeek 2026-10-29 已实测通过")
         self.assertIn("gemini", verified, "Gemini 2026-10-29 已实测通过")
         self.assertIn("kimi", verified)
-        self.assertIn("chatgpt", verified)
+        self.assertNotIn("chatgpt", verified,
+                         "2026-11-02 DOM 改版后计数选择器失效：重标定前不许标 verified")
+        self.assertIn("重标定", platforms.get("chatgpt").get("notes", ""))
         self.assertIn("doubao", verified, "豆包 2026-10-29 已实测通过（Tiptap + exec + enter 发送）")
         for k in ("claude",):
             self.assertNotIn(k, verified, "%s 没实测过，不许标 verified" % k)

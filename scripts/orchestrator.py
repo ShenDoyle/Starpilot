@@ -681,6 +681,200 @@ def cmd_bind(a) -> int:
     return 0
 
 
+# ------------------------------------------------ scope / stage（2026-11-02 GPT 审计 P0-1）
+#
+# GPT 裁定：agent 只靠自报就能绕过拆阶段规则（少报轮数、少列交付物）。
+# 对策不是造 AI 判轮器，而是让「申报—执行—验收」三者可审计且有状态：
+#
+#   · task_scope 一次定格：预估轮数/交付物/模块 + 时间；改要写修订记录进 journal
+#     （audit 会把 scope_revised 列出来，不许静默改小逃避拆阶段）；
+#   · stages 状态机：pending → executing → submitted → accepted。
+#     未 accepted 不许 start 下一阶段；accept 必须带验收人（web_ai/user）+ 证据；
+#     close --stage 只把阶段推到 submitted（收口≠验收通过）；
+#   · audit 用「申报 vs 实际」比对：实际超阈值而 stages 为空 → 明确的审计异常。
+
+SCOPE_KEYS = ("rounds", "deliverables", "modules")
+SCOPE_THRESHOLDS = {"rounds": 6, "deliverables": 3, "modules": 2}
+STAGE_STATUSES = ("pending", "executing", "submitted", "accepted")
+
+
+def _stages(st) -> list:
+    return st.setdefault("stages", [])
+
+
+def _stage_of(st, sid: str):
+    for s in _stages(st):
+        if s.get("id") == sid:
+            return s
+    return None
+
+
+def _parse_stage_headers(body: str) -> list:
+    """从 plan.md 里读阶段表：`## 阶段 <id>` / `### 阶段 <id>：目标`。"""
+    ids = []
+    for line in body.splitlines():
+        m = re.match(r"^#{2,4}\s*阶段\s*[:：]?\s*([A-Za-z0-9_\-]+)", line.strip())
+        if m and m.group(1) not in ids:
+            ids.append(m.group(1))
+    return ids
+
+
+def _over(scope: dict, key: str) -> bool:
+    """阈值比较：轮数用 >（>6 才拆），交付物/模块用 >=（≥3/≥2 就拆）。"""
+    limit = SCOPE_THRESHOLDS[key]
+    try:
+        val = int(scope.get(key) or 0)
+    except Exception:
+        return False
+    return val > limit if key == "rounds" else val >= limit
+
+
+def _exceeded(scope: dict) -> list:
+    return ["%s=%s 达阈值 %s" % (k, scope.get(k), SCOPE_THRESHOLDS[k])
+            for k in SCOPE_THRESHOLDS if _over(scope, k)]
+
+
+def actual_scope(d: str, st: dict) -> dict:
+    """实际执行数据（与申报值区分）：轮数取 state/round 或 journal 的 ROUND_DONE。"""
+    evs = wg.read_journal(d)
+    rounds = int(st.get("round") or st.get("turn") or 0)
+    if not rounds:
+        rounds = sum(1 for e in evs if e.get("to") == "ROUND_DONE"
+                     or e.get("action") == "round_done")
+    targets = set()
+    for e in evs:
+        if str(e.get("action", "")).startswith("write_") and e.get("result") in ("ok", "dry_run"):
+            p = e.get("target") or e.get("path") or e.get("target_url_sha256") or ""
+            if p:
+                targets.add(p)
+    mods = set()
+    for p in targets:
+        parts = str(p).replace("\\", "/").split("/")
+        if len(parts) >= 2:
+            mods.add(parts[0] or parts[1])
+    return {"rounds": rounds, "deliverables": len(targets), "modules": len(mods)}
+
+
+def cmd_scope(a) -> int:
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    d = run_dir(root, run_id)
+    new = {k: getattr(a, k, None) for k in SCOPE_KEYS}
+    new = {k: v for k, v in new.items() if v is not None}
+    cur = st.get("task_scope")
+    if cur and new and any(int(cur.get(k) or 0) != int(v) for k, v in new.items()):
+        # 改预估 = 改拆阶段依据。允许改，但不许静默：必须有理由并留痕，
+        # audit 会把 scope_revised 列出来（只调大不调小也记，改小尤其要记）。
+        if not (a.revise_reason or "").strip():
+            print(json.dumps({"ok": False, "scope": cur,
+                              "reason": "预估范围已定格，修改必须带 --revise-reason"
+                                        "（进 journal，audit 会单列 scope_revised）"},
+                             ensure_ascii=False, indent=2))
+            return 5
+        wg.append_journal(d, {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                              "action": "scope_revised", "result": "ok",
+                              "before": cur, "after": dict(cur, **new),
+                              "reason": a.revise_reason.strip()})
+        cur = dict(cur, **new, revised_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    elif new:
+        cur = dict(new)
+        cur["declared_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        cur["declared_by"] = "agent"
+        wg.append_journal(d, {"ts": cur["declared_at"], "action": "scope_declared",
+                              "result": "ok", "scope": dict(cur)})
+    st["task_scope"] = cur
+    save_run_state(root, st, run_id)
+    print(json.dumps({"ok": True, "task_scope": cur,
+                      "exceeds": _exceeded(cur or {})}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_stage(a) -> int:
+    root = wg.workspace_root(a.workspace)
+    run_id = a.run or wg.read_pointer(root)
+    st = load_run_state(root, run_id)
+    d = run_dir(root, run_id)
+    stages = _stages(st)
+
+    if a.list or not a.stage_action:
+        print(json.dumps({"ok": True, "stages": stages,
+                          "task_scope": st.get("task_scope")},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    sid = a.stage_id
+    if a.stage_action == "add":
+        if _stage_of(st, sid):
+            print(json.dumps({"ok": False, "reason": "阶段 %s 已存在" % sid},
+                             ensure_ascii=False, indent=2))
+            return 5
+        stages.append({"id": sid, "goal": a.goal or "", "status": "pending",
+                       "added_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        save_run_state(root, st, run_id)
+        print(json.dumps({"ok": True, "stages": stages}, ensure_ascii=False, indent=2))
+        return 0
+
+    s = _stage_of(st, sid)
+    if not s:
+        print(json.dumps({"ok": False, "reason": "无此阶段：%s（先 add 或让 plan 从阶段表导入）" % sid},
+                         ensure_ascii=False, indent=2))
+        return 5
+
+    if a.stage_action == "start":
+        for prev in stages[:stages.index(s)]:
+            if prev.get("status") != "accepted":
+                print(json.dumps({"ok": False, "blocked_by": prev.get("id"),
+                                  "prev_status": prev.get("status"),
+                                  "reason": "上一阶段 %s 未 accepted（现 %s）：不许开新阶段。"
+                                            "先 stage --accept %s --by web_ai|user --evidence '<验收依据>'"
+                                            % (prev.get("id"), prev.get("status"), prev.get("id"))},
+                                 ensure_ascii=False, indent=2))
+                return 5
+        s["status"] = "executing"
+        s["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        st["stage_id"] = sid
+        # 上一阶段收口后 run 处于 CLOSED/HANDOFF；验收通过再开新阶段 = 合法重开。
+        # 只在这一条路径上重开（带 journal），不许别处随手把 CLOSED 改回 READY。
+        if st.get("state") in ("CLOSED", "HANDOFF"):
+            old = st.get("state")
+            st["state"] = "READY"
+            wg.append_journal(d, {"ts": s["started_at"], "action": "stage_start_reopen",
+                                  "result": "ok", "from": old, "stage": sid})
+        save_run_state(root, st, run_id)
+        print(json.dumps({"ok": True, "stage": s}, ensure_ascii=False, indent=2))
+        return 0
+
+    if a.stage_action == "accept":
+        if s.get("status") != "submitted":
+            print(json.dumps({"ok": False, "status": s.get("status"),
+                              "reason": "只有 submitted 的阶段才能 accept（先 close --stage %s）" % sid},
+                             ensure_ascii=False, indent=2))
+            return 5
+        if not (a.evidence or "").strip():
+            print(json.dumps({"ok": False, "reason": "accept 必须带 --evidence（验收依据），空证据=没验收"},
+                             ensure_ascii=False, indent=2))
+            return 5
+        if (a.by or "") not in ("web_ai", "user"):
+            print(json.dumps({"ok": False, "reason": "--by 只能是 web_ai 或 user（agent 不能自己验收自己）"},
+                             ensure_ascii=False, indent=2))
+            return 5
+        s["status"] = "accepted"
+        s["accepted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        s["accepted_by"] = a.by
+        s["evidence"] = a.evidence.strip()
+        save_run_state(root, st, run_id)
+        wg.append_journal(d, {"ts": s["accepted_at"], "action": "stage_accepted",
+                              "result": "ok", "stage": sid, "by": a.by,
+                              "evidence": a.evidence.strip()})
+        print(json.dumps({"ok": True, "stage": s}, ensure_ascii=False, indent=2))
+        return 0
+
+    print(json.dumps({"ok": False, "reason": "未知动作 %s" % a.stage_action},
+                     ensure_ascii=False, indent=2))
+    return 2
+
+
 def cmd_plan(a) -> int:
     root = wg.workspace_root(a.workspace)
     run_id = a.run or wg.read_pointer(root)
@@ -695,9 +889,36 @@ def cmd_plan(a) -> int:
     wg.atomic_write_text(dest, body)
     st["plan_file"] = os.path.relpath(dest, root)
     st["plan_chars"] = len(body)
+
+    # 阶段表导入 + 大任务必须拆阶段（2026-11-02 GPT 审计 P0-1）
+    declared = _parse_stage_headers(body)
+    if declared:
+        existing = {s.get("id") for s in _stages(st)}
+        for sid in declared:
+            if sid not in existing:
+                _stages(st).append({"id": sid, "goal": "", "status": "pending",
+                                    "added_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    else:
+        scope = st.get("task_scope") or {}
+        bad = _exceeded(scope)
+        if bad and not _stages(st):
+            print(json.dumps({"ok": False, "exceeds": bad,
+                              "reason": "申报范围已达拆阶段阈值（%s），但 plan 里没有阶段表"
+                                        "（`## 阶段 <id>` 行）。大任务必须分阶段，"
+                                        "不许一次性做完；补阶段表后重跑，或先用 scope 修订范围并写理由"
+                                        % "、".join(bad)},
+                             ensure_ascii=False, indent=2))
+            return 5
+        if not scope:
+            wg.append_journal(run_dir(root, run_id),
+                              {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               "action": "scope_missing", "result": "warn",
+                               "note": "未申报任务范围就出规划：audit 会列为异常"})
+
     transition(root, st, "PLAN_OK", "规划产物已落盘（%d 字）" % len(body),
                {"action": "plan", "result": "ok", "plan_chars": len(body)})
     print(json.dumps({"ok": True, "plan_file": st["plan_file"], "chars": len(body),
+                      "stages": [s.get("id") for s in _stages(st)],
                       "state": st["state"]}, ensure_ascii=False, indent=2))
     return 0
 
@@ -1541,6 +1762,24 @@ def cmd_audit(a) -> int:
                        if e.get("action") == "write_verify"
                        and e.get("result") == "inconclusive")
 
+    # 申报 vs 实际（2026-11-02 GPT 审计 P0-1）：不造 AI 判轮器，只把「说小做多」
+    # 变成审计异常。undeclared_complexity = 实际已达拆阶段阈值但没有阶段表 → FAIL。
+    scope = st.get("task_scope") or {}
+    act = actual_scope(d, st)
+    stages = st.get("stages") or []
+    anomalies = []
+    if not scope:
+        anomalies.append("scope_missing")
+    excess = [k for k in SCOPE_THRESHOLDS if _over(act, k)]
+    if excess and not stages:
+        anomalies.append("undeclared_complexity:%s" % ",".join(excess))
+    revised = sum(1 for e in evs if e.get("action") == "scope_revised")
+    if revised:
+        anomalies.append("scope_revised:%d" % revised)
+    for s in stages:
+        if s.get("status") == "submitted":
+            anomalies.append("stage_submitted_not_accepted:%s" % s.get("id"))
+
     out = {
         "run_id": st.get("run_id"),
         "duplicate_sends": duplicate_sends,
@@ -1554,9 +1793,15 @@ def cmd_audit(a) -> int:
         "last_reply_count_delta": (st.get("last_send") or {}).get("reply_count_delta"),
         "write_mode_at_send": write_mode_at_send,
         "write_mode_now": wg.write_mode(),
+        "task_scope": scope,
+        "actual_scope": act,
+        "stages": [{"id": s.get("id"), "status": s.get("status")} for s in stages],
+        "scope_anomalies": anomalies,
         "verdict": "PASS" if (duplicate_sends == 0 and unconfirmed_sends == 0
                               and unexpected_write == 0 and lessons_pending == 0
-                              and sends_after_resume == 0 and inconclusive == 0) else "FAIL",
+                              and sends_after_resume == 0 and inconclusive == 0
+                              and not any(a.startswith("undeclared_complexity")
+                                          for a in anomalies)) else "FAIL",
     }
     if getattr(a, "trace", False):
         out["trace"] = build_trace(d, evs)
@@ -1733,6 +1978,20 @@ def cmd_close(a) -> int:
         if not c.get("appendix_status"):
             c["status"] = "merged"
     st["lessons_merged"] = len(cands)
+
+    # 阶段状态：收口只到 submitted（2026-11-02 GPT 审计 P0-1）——
+    # 「阶段报告写完」≠「阶段验收通过」。accepted 只能由 web_ai/user 带证据授予。
+    if a.stage:
+        _sg = _stage_of(st, a.stage)
+        if not _sg:
+            _stages(st).append({"id": a.stage, "goal": "",
+                                "status": "submitted",
+                                "added_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        else:
+            _sg["status"] = "submitted"
+        _sg = _stage_of(st, a.stage)
+        _sg["submitted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
     cur = st.get("state")
     if "CLOSED" in TRANSITIONS.get(cur, []):
         transition(root, st, "CLOSED", "阶段收口：%s" % a.stage,
@@ -1857,7 +2116,9 @@ def cmd_matrix(a) -> int:
     for key in sorted(platforms.PLATFORMS):
         p = platforms.get(key)
         verified = bool(p.get("verified"))
-        allowed = bool(p.get("write_allowed"))
+        # 写权限看写路径本身（verified 覆盖整条 loop；write_verified 只覆盖「能写」）。
+        # chatgpt 2026-11-02：写路径复测通过、整链路因计数选择器失效未 verified。
+        allowed = bool(p.get("write_allowed")) and bool(verified or p.get("write_verified"))
         read_probe = "skipped"
         detail = ""
         if key == bound_platform and verified and a.probe:
@@ -1885,12 +2146,17 @@ def cmd_matrix(a) -> int:
             read_probe = "skipped_not_bound"
             detail = ("skipped ≠ probed：未实测平台本轮不探测，"
                       "也不允许临时绑定抢窗口")
+            if p.get("write_verified"):
+                detail = ("整链路未验证（计数口径待重标定）但写路径已单独复测："
+                          "只允许单轮写入，循环的完成度判定不可用")
         rows.append({"platform": key, "verified": verified,
+                     "write_verified": bool(p.get("write_verified")),
                      "read_probe": read_probe, "send_allowed": allowed,
                      "write_method": p.get("write_method"), "detail": detail})
     out = {"rows": rows, "row_count": len(rows),
            "bound_platform": bound_platform,
-           "rule": "未实测平台 send_allowed=false；read_probe 只读，不写不发；"
+           "rule": "send_allowed 由写路径是否实测决定（write_verified 可单独成立）；"
+                   "read_probe 只读，不写不发；"
                    "未绑定不探测（skipped ≠ probed）；纪律搁置记 deferred_rule1。"}
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
@@ -2254,6 +2520,24 @@ def main() -> int:
     p = add_pl(sub.add_parser("plan", help="落盘规划产物 → PLAN_OK"))
     p.add_argument("--file", required=True)
     p.set_defaults(func=cmd_plan)
+
+    # ---- scope / stage（2026-11-02 GPT 审计 P0-1：大任务防绕过）----
+    p = add_pl(sub.add_parser("scope", help="定格任务范围预估（轮数/交付物/模块），改要写理由"))
+    p.add_argument("--rounds", type=int, default=None)
+    p.add_argument("--deliverables", type=int, default=None)
+    p.add_argument("--modules", type=int, default=None)
+    p.add_argument("--revise-reason", default="", help="改预估必须写理由（进 journal）")
+    p.set_defaults(func=cmd_scope)
+
+    p = add_pl(sub.add_parser("stage", help="阶段状态机：add/start/accept/list"))
+    p.add_argument("stage_action", nargs="?", default="list",
+                   choices=["add", "start", "accept", "list"])
+    p.add_argument("stage_id", nargs="?", default="")
+    p.add_argument("--goal", default="")
+    p.add_argument("--by", default="", help="accept 的验收人：web_ai / user（agent 不能自己验收）")
+    p.add_argument("--evidence", default="", help="accept 必须带验收依据")
+    p.add_argument("--list", action="store_true")
+    p.set_defaults(func=cmd_stage)
 
     p = add_pl(sub.add_parser("loop", help="推进循环"))
     p.add_argument("--once", action="store_true", help="推进一个状态步")
