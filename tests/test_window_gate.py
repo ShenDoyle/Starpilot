@@ -12,6 +12,7 @@ GPT 裁定：window.ok=null 不得放行受保护操作（send/clear 是写路�
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
