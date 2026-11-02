@@ -106,6 +106,10 @@ class TestOrchestratorFuse(unittest.TestCase):
         os.chdir(self.tmp)
         self._env = os.environ.copy()
         os.environ["BSK_BIN"] = self.wa.BSK  # 版本首查会跑真实 bsk --version
+        # 锁目录隔离（2026-11-02）：默认锁目录是全局的 ~/.starpilot/locks，
+        # 本机只要有并行真实任务占用同平台（如 deepseek），就会以 rc=9（平台锁）
+        # 抢在 rc=7（run 熔断）之前拒绝，测试随环境漂红。指向临时目录即可。
+        os.environ["STARPILOT_LOCK_DIR"] = os.path.join(self.tmp, "locks")
 
     def tearDown(self):
         os.chdir(self.oldcwd)
