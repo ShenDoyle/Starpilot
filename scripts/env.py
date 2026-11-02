@@ -99,6 +99,48 @@ def set_backend(v, env=None) -> str:
     return p
 
 
+# ---- 无人值守硬开关（0.1.6 未发）：解决「agent 每轮都停下来要确认」----
+# 取值顺序：环境变量 STARPILOT_UNATTENDED（1/true/on 开，0/false/off 关）> config > 关。
+# 开了之后：orchestrator init 的执行模式缺省从 step（每轮停）变成 auto（无人值守），
+# 写闸门照旧 fail-closed——安全边界不放松，放的是「每轮重复确认」，不是「无授权写」。
+_TRUTHY = ("1", "true", "on", "yes")
+_FALSY = ("0", "false", "off", "no", "")
+
+
+def unattended(env=None) -> bool:
+    env = os.environ if env is None else env
+    raw = (env.get("STARPILOT_UNATTENDED") or "").strip().lower()
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY and raw != "":
+        return False
+    return bool(load_config(env).get("unattended"))
+
+
+def set_unattended(v: bool, env=None) -> str:
+    p = config_path(env)
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    cfg = load_config(env)
+    cfg["unattended"] = bool(v)
+    with io.open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return p
+
+
+def set_idle_close(seconds: int, env=None) -> str:
+    """窗口闲置收割时限（秒）：agent 超过这么久没有续租，收割器就关它的窗口。"""
+    seconds = int(seconds)
+    if seconds < 60:
+        raise SystemExit("idle_close_s 最小 60 秒（给太短会误杀正常等待）")
+    p = config_path(env)
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    cfg = load_config(env)
+    cfg["idle_close_s"] = seconds
+    with io.open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return p
+
+
 def resolve_backend(flag=None, env=None, bsk_found=None) -> str:
     """bsk 参数 > config > 自动（找到 bsk 就算 bsk，否则 unconfigured）。
 
@@ -193,6 +235,7 @@ def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> 
         "platform": _plat(),
         "backend": backend,
         "transport": transport(),
+        "unattended": unattended(env),
         "needs_decision": needs_decision,
         "python": py,
         "bsk": {"ok": bool(bsk), "path": bsk, "version": bsk_version(bsk, runner, timeout),
@@ -275,8 +318,26 @@ def main(argv=None) -> int:
                     help="本次按指定后端判定（不写配置；持久化用 --set-backend）")
     ap.add_argument("--set-backend", choices=BACKENDS, dest="set_backend",
                     help="记录用户选择的浏览器后端到 ~/.starpilot/config.json（首次激活 §0.2，只问一次）")
+    ap.add_argument("--set-unattended", choices=["on", "off"], dest="set_unattended",
+                    help="无人值守硬开关：on=执行模式缺省 auto、不再每轮停（写闸门仍 fail-closed）")
+    ap.add_argument("--set-idle-close", type=int, default=0, dest="set_idle_close",
+                    help="窗口闲置收割时限（秒，≥60）：agent 超时未续租，wa.py reap 关掉其窗口")
     ap.add_argument("--timeout", type=int, default=300, help="安装超时秒数")
     a = ap.parse_args(argv)
+
+    if a.set_unattended:
+        p = set_unattended(a.set_unattended == "on")
+        print("已记录无人值守开关：%s → %s" % (a.set_unattended, p))
+        if a.set_unattended == "on":
+            print("效果：执行模式缺省 auto（不再每轮停下等确认）；写闸门仍需授权单，"
+                  "开工前先 write_gate.py approve --scope task 一次授权。")
+        return 0
+
+    if a.set_idle_close:
+        p = set_idle_close(a.set_idle_close)
+        print("已记录窗口闲置收割时限：%d 秒 → %s" % (a.set_idle_close, p))
+        print("收割器：python scripts/wa.py reap --watch（绑定后启动，后台常驻）")
+        return 0
 
     if a.set_backend:
         p = set_backend(a.set_backend)

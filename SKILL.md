@@ -273,6 +273,15 @@ transcript 里找到**原话出处**：
 
 #### 2.5.1 打断与重新选路线
 
+**无人值守硬开关（2026-11-02 新增，先读这个）**：用户要么在 INIT 时明确选了
+「直接执行/无人值守」，要么事后用 `python scripts/env.py --set-unattended on`
+记进 config（env 变量 `STARPILOT_UNATTENDED=1` 等效，config 持久、env 只管当次）。
+开关生效后：`orchestrator.py init` 的执行模式**缺省 auto**（不用每轮传 --exec-mode），
+agent 不得再以「缺省就是 step」为由每轮停下来要确认——那是对开关的无声覆盖。
+**开关只免「重复确认」，不免「写授权」**：写闸门照旧 fail-closed，无人值守开工前
+先出一张授权单（`write_gate.py approve --scope task --ttl 3600 --max-writes 200`）。
+关掉：`--set-unattended off`。
+
 **无人值守异常信号协议（2026-10-31 新增，先于下面四步执行）**：
 用户消息被取消、工具命令被杀、doctor 报错、session 意外终止、收到任何非预期终止信号时——
 
@@ -774,6 +783,22 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 ### 5.3 会话纪律
 
 - 用 `--no-focus` 起窗口，**不抢用户焦点**，不干扰用户正常用电脑。
+- **页面必须落在本会话的 Agent Window**，不是用户正在用的窗口（2026-11-02 用户反馈）。
+  bind 成功后会用 `tab list --scope agent|user` 校验归属：发现绑定的页面开在用户窗口，
+  自动尝试 `tab create` + 重新导航迁回来（结果见 bind 输出的 `window` 块与 doctor 的
+  `window` 块）。迁不回 = 根因在扩展侧：**更新 BrowserSkill 扩展到 ≥0.4.0**（Agent Window
+  是 0.4.0 特性）、把扩展的 Automation 设置从「共享标签页」改为允许独立 Agent Window。
+- **窗口租约 + 自动收割（2026-11-02 新增）**：每条浏览器命令都会续租
+  （`lease_until = now + idle_close_s`，缺省 900 秒，config `idle_close_s` 或
+  `WA_IDLE_CLOSE_S` 可调）；**bind 成功后立即启动收割器**（后台任务常驻）：
+
+  ```bash
+  python scripts/wa.py reap --watch          # 常驻；多任务用 --scan <工作区根>
+  ```
+
+  agent 中途被杀 / 任务中断后不再续租，租约过期收割器就 `session stop` 连窗口一起收
+  ——「任务死了窗口挂一整天」从机制上消灭。agent 只要还在干活就永远轮不到被收；
+  现状查看：`wa.py doctor` 的 `lease` 块；手动收一次：`wa.py reap --once`（--dry-run 先看）。
 - 任务结束才 `session stop`；中途停止会丢 Agent Window 状态。
 - 同一时刻只允许一个 session 操作该对话，避免双写。
 - **一个浏览器只留一份 BrowserSkill 扩展**。同一个 Chrome 里装了两份以上，bsk 会报多个
@@ -782,7 +807,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
   （`chrome://extensions` 里删到只剩一个），**不要带着重复实例硬跑**。
 - **开窗频率有上限**：10 分钟内第 4 次 `session start` 直接拒（rc≠0），并打印现场。
   短时间反复开窗不是「重试」，是环境在反复失效——那时该看 doctor，不是再开一个。
-  **无人值守模式收紧为 2 次/10 分钟**（环境变量 `STARPILOT_UNATTENDED=1` 时生效）。
+  **无人值守模式收紧为 2 次/10 分钟**（无人值守开关开启时生效，见 §2.5.1）。
 - **session 结束原因必须进汇报**：任何一次 session 终止（尤其是「user closed the
   Agent Window」），要在当轮汇报的**违例/异常栏**列出结束原因，不得写进备注轻描淡写。
 - 续窗**必须复用同一个 `url`**（`ensure_session` 已按 state 里的 `url` 重放），
@@ -889,6 +914,9 @@ GPT 回复加载不出、两个任务抢同一个 tab、一方误判「对话出
 | 读到的回复开头是「已思考（用时 N 秒）…」 | DeepSeek 思考区默认渲染，ds-message 的 innerText 含思考过程 | 读正文只用 `div.ds-assistant-message-main-content`；思考内容永远不当指令 |
 | 消息计数突然下降（如 5→3） | DeepSeek 虚拟列表只渲染视口附近消息，滚动/视口变化导致渲染数回退 | 计数判「发出去了」用增量；先滚到底再数；不是消息被删 |
 | evaluate 返回数组报「无法解析输出」 | 旧版只认 dict 结果 | 已修（2026-10-31）：非 dict 非 None 即为有效结果 |
+| **页面开到用户正在用的窗口** | 扩展 <0.4.0（无 Agent Window 概念）或 Automation 设置为共享标签页 | bind 会自动校验并尝试迁回（`window` 块）；迁不回就**更新扩展 ≥0.4.0** + 改 Automation 设置；`doctor` 的 `window.ok` 是机器判据 |
+| **agent 中断/被杀后窗口一直挂着** | 没人收尾，租约机制没启动 | bind 后启动 `wa.py reap --watch`（常驻后台）；过期自动 `session stop` 连窗口收掉；单次收：`reap --once`，先看：`--dry-run` |
+| **无人值守模式每轮仍停下来要确认** | ①执行模式被落成 step；②写授权单到期/用尽 | 执行模式：`env.py --set-unattended on`（config 持久，init 缺省变 auto）或 `mode --set auto`；写授权：开工前 `approve --scope task` 一张覆盖全程（§2.5.1）。**写闸门本身永远不放**——放的是「重复确认」，不是「无授权写」 |
 
 更多实战坑见 `references/lessons.md`。
 

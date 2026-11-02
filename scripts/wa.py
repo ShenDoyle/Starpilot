@@ -401,6 +401,181 @@ def _too_many_starts(st: dict) -> bool:
     return len(hist) >= WA_START_MAX
 
 
+# ---------------------------------------------- 窗口租约与自动收割（0.1.6 未发）
+#
+# 痛点：agent 中途被杀 / 任务中断后，Agent Window 一直挂着没人收。
+# 机制：每条浏览器命令都「续租」（lease_until = now + idle_close_s）；
+#       收割器（wa.py reap）发现租约过期就 session stop（连同 Agent Window）。
+# agent 只要还在干活就永远杀不到它；一旦断联，最多 idle_close_s 后窗口被收。
+DEFAULT_IDLE_CLOSE_S = 900
+
+
+def idle_close_s() -> int:
+    """收割时限：config idle_close_s > env WA_IDLE_CLOSE_S > 900。下限 60s。"""
+    try:
+        import env as _env
+        v = _env.load_config(os.environ).get("idle_close_s")
+        if isinstance(v, (int, float)) and int(v) >= 60:
+            return int(v)
+    except Exception:
+        pass
+    try:
+        return max(60, int(os.environ.get("WA_IDLE_CLOSE_S") or DEFAULT_IDLE_CLOSE_S))
+    except Exception:
+        return DEFAULT_IDLE_CLOSE_S
+
+
+def touch_lease(st: dict, path: str) -> None:
+    now = time.time()
+    st["lease_until"] = now + idle_close_s()
+    st["lease_at"] = now
+    save_state(path, st)
+
+
+def lease_left(st: dict) -> float:
+    try:
+        return float(st.get("lease_until") or 0) - time.time()
+    except Exception:
+        return 0.0
+
+
+def cmd_reap(a) -> int:
+    """收割闲置窗口：租约过期的 state → session stop（Agent Window 一并关闭）。
+
+    用法：
+      wa.py reap --once              # 扫一遍（缺省单次）
+      wa.py reap --watch             # 常驻循环（绑定后启动，后台任务）
+      wa.py reap --scan <工作区根>   # 扫目录下所有 *.wa-state.json（多任务）
+      wa.py reap --dry-run           # 只报告不动手
+    """
+    if _transport_is_iab():
+        print("IAB 传输无窗口生命周期，无需收割。")
+        return 0
+    ttl = int(getattr(a, "ttl", 0) or 0) or idle_close_s()
+    interval = max(10, int(getattr(a, "interval", 0) or 60))
+    dry = bool(getattr(a, "dry_run", False))
+    watch = bool(getattr(a, "watch", False))
+
+    def _targets():
+        if getattr(a, "scan", ""):
+            found = []
+            for root, dirs, files in os.walk(a.scan):
+                if STATE_NAME in files:
+                    found.append(os.path.join(root, STATE_NAME))
+            return found
+        return [state_path(getattr(a, "state", None))]
+
+    def _sweep() -> int:
+        reaped = 0
+        for p in _targets():
+            if not os.path.exists(p):
+                continue
+            st = load_state(p)
+            sid = st.get("session") or ""
+            if not sid:
+                continue
+            left = lease_left(st)
+            if not st.get("lease_until"):
+                print("跳过（无租约记录，不敢乱杀）：%s" % p)
+                continue
+            if left > 0:
+                continue
+            if dry:
+                print("DRY-RUN 将收割（租约已过期 %ds）：%s session=%s"
+                      % (int(-left), p, sid))
+                reaped += 1
+                continue
+            rc, out, err = bsk(["session", "stop", sid], timeout=60)
+            now = time.time()
+            st["session"] = ""
+            st["reaped_at"] = now
+            st.pop("lease_until", None)
+            save_state(p, st)
+            reaped += 1
+            print("已收割：%s session=%s（rc=%d %s）"
+                  % (p, sid, rc, (err or out).strip()[:120]))
+        return reaped
+
+    if not watch:
+        n = _sweep()
+        print("收割完成：%d 个%s" % (n, "（dry-run）" if dry else ""))
+        return 0
+    print("收割器已启动：ttl=%ds interval=%ds targets=%s（Ctrl+C 退出）"
+          % (ttl, interval, a.scan or state_path(getattr(a, "state", None))))
+    while True:
+        try:
+            _sweep()
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:  # 收割器自己不能死：出错记下来继续转
+            print("收割器单轮异常（继续）：%s" % e, file=sys.stderr)
+        time.sleep(interval)
+    return 0
+
+
+# ---------------------------------------------- 窗口归属校验（0.1.6 未发）
+#
+# 痛点：页面开到了**用户正在用的窗口**（cooperate 共享 / 扩展旧版 / Automation 设置
+# 为共享模式），而不是本会话的 Agent Window。
+# 依据：bsk ≥0.4.0 `tab list --scope agent|user` 能机器区分两者。
+def tab_scope_report(sid: str) -> dict:
+    def _urls(scope):
+        rc, out, err = bsk(["tab", "list", "--session", sid,
+                            "--scope", scope, "--json"], timeout=60)
+        if rc != 0:
+            return None  # 探不到就不编，None = 未知
+        try:
+            data = json.loads(out or "[]")
+        except Exception:
+            return None
+        if isinstance(data, list):
+            return [t.get("url") or "" for t in data if isinstance(t, dict)]
+        return None
+    return {"agent": _urls("agent"), "user": _urls("user")}
+
+
+def window_report(st: dict, sid: str) -> dict:
+    """绑定地址落在哪个 scope：agent=正常；user=开到用户窗口，要自愈。"""
+    rep = tab_scope_report(sid)
+    bound = (st.get("url") or "").split("?")[0][:60]
+
+    def _has(urls):
+        if bound and isinstance(urls, list):
+            return any((u or "").split("?")[0][:60].startswith(bound) for u in urls)
+        return None  # None = 探不到
+
+    out = dict(rep)
+    out["bound_in_agent"] = _has(rep.get("agent"))
+    out["bound_in_user"] = _has(rep.get("user"))
+    if out["bound_in_agent"] is None and out["bound_in_user"] is None:
+        out["ok"] = None  # 探不到 = 未知，不误报
+    else:
+        out["ok"] = bool(out["bound_in_agent"]) and not bool(out["bound_in_user"])
+    return out
+
+
+def heal_window_placement(st: dict, path: str, sid: str) -> dict:
+    """页面开到用户窗口时的自愈：在 Agent Window 里新开 tab 并把绑定地址迁过去。
+
+    成功 = bound_in_agent 且不再出现在 user scope；失败只报告，不硬来
+    （反复抢页面会打扰用户，修根在扩展设置，见 doctor 输出）。
+    """
+    rep = window_report(st, sid)
+    if rep.get("ok") is not False:
+        return rep
+    rc, out, err = bsk(["tab", "create", "--session", sid], timeout=60)
+    if rc != 0:
+        rep["heal"] = "tab create 失败：%s" % (err or out).strip()[:150]
+        return rep
+    rc, out, err = navigate_soft(sid, st.get("url") or "")
+    rep2 = window_report(st, sid)
+    rep2["heal"] = ("tab create + 重新导航%s" % ("成功" if rep2.get("ok") else
+                    "后仍在用户窗口（扩展 Automation 设置为共享模式？更新扩展或改设置）"))
+    if rep2.get("ok") and st is not None:
+        st["window_kind"] = "agent"
+    return rep2
+
+
 def enforce_single_session(keep: str = "", browser: str = "") -> None:
     """窗口纪律（硬规则）：**同一浏览器实例**内任何时刻只允许一个会话/Agent Window。
 
@@ -883,8 +1058,11 @@ def cmd_bind(a) -> int:
                "bound_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                "awaiting_reply": False, "turn": 0, "history": [],
                "new_chat": new_chat})
+    touch_lease(st, path)
+    wrep = heal_window_placement(st, path, sid)
     save_state(path, st)
     print(json.dumps({"ok": True, "bound": st["url"], "platform": p["key"],
+                      "window": {"ok": wrep.get("ok"), "heal": wrep.get("heal") or ""},
                       "msg_count": data["msg_count"], "session": sid,
                       "new_chat": new_chat, "conv_id": bv["conv_id"],
                       "bind_code": bv["code"], "warn": bv["warn"],
@@ -900,6 +1078,7 @@ def cmd_bind(a) -> int:
 def cmd_clear(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
     res = clear_editor(p, sid)
@@ -911,6 +1090,7 @@ def cmd_clear(a) -> int:
 def cmd_probe(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     data = probe(st, path, p)
     if st.get("url") and not data["url"].startswith(st["url"].split("?")[0][:60]):
@@ -937,6 +1117,7 @@ def cmd_platforms(a) -> int:
 def cmd_send(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     # ---- ORCHESTRATOR_REQUIRED 熔断（2026-10-31 服从性审计新增）----
     # 工作区里存在编排 run（state/current）时，直接 CLI 发送 = 绕过写闸门与
@@ -1255,6 +1436,7 @@ def cmd_wait(a) -> int:
     """
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
     ttft_s = float(getattr(a, "first_token", 0) or p.get("ttft_s") or 45)
@@ -1437,6 +1619,7 @@ def cmd_wait(a) -> int:
 def cmd_read(a) -> int:
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
 
@@ -1482,19 +1665,34 @@ def cmd_doctor(a) -> int:
     sessions = [{k: s.get(k) for k in ("id", "browser", "window")} for s in list_sessions()]
     path = state_path(getattr(a, "state", None))
     st = load_state(path)
+    sid = st.get("session") or ""
+    wr = window_report(st, sid) if sid and not _transport_is_iab() else None
+    left = lease_left(st) if st.get("lease_until") else None
     out = {
         "ok": rep["healthy"],
         "browsers": rep,
         "sessions": sessions,
         "state": {k: st.get(k) for k in ("platform", "url", "conv_id", "session",
-                                         "browser", "awaiting_reply", "turn")},
+                                         "browser", "awaiting_reply", "turn",
+                                         "window_kind")},
+        "window": wr,
+        "lease": ({"left_s": int(left), "idle_close_s": idle_close_s(),
+                   "reaper": "wa.py reap --watch"} if left is not None else None),
         "state_path": path,
         # 卡住的可见性：state 有锁、只在状态变化时写，观察文件每次探测都刷。
         # 两者都给出去，人才分得清「卡在探测」和「卡在没回复」。
         "progress": read_progress(path),
     }
+    if wr and wr.get("ok") is False:
+        out["hint"] = ("绑定页面开在**用户的窗口**而不是本会话的 Agent Window："
+                       "多半是扩展 Automation 设置为「共享标签页」或扩展版本 <0.4.0。"
+                       "先更新扩展 / 把 Automation 设置改为允许独立 Agent Window；"
+                       "自愈尝试结果见 window.heal。") + (" 已尝试自愈：%s" % wr["heal"] if wr.get("heal") else "")
     if rep["duplicates"]:
         out["hint"] = duplicate_hint(rep)
+    if sid and left is not None and left <= 0:
+        out["hint"] = (out.get("hint", "") + " 租约已过期但窗口还挂着：启动收割器 "
+                       "`python scripts/wa.py reap --once`（常驻：--watch）。").strip()
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0 if out["ok"] else 6
 
@@ -1508,6 +1706,7 @@ def cmd_triage(a) -> int:
     """
     path = state_path(a.state)
     st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
     p = platforms.get(a.platform or st.get("platform"))
     sid = ensure_session(st, path)
     ok, cur = read_state(p, sid)
@@ -1654,7 +1853,7 @@ def cmd_stop(a) -> int:
 # 「bsk 没装」走各命令自己的报错，不在这里替用户做决定。
 
 BROWSER_CMDS = frozenset({"bind", "probe", "clear", "send", "wait", "read",
-                          "triage", "doctor", "stop"})
+                          "triage", "doctor", "stop", "reap"})
 
 
 def builtin_guard(cmd):
@@ -1755,6 +1954,15 @@ def main(argv: list | None = None) -> int:
 
     p = add_pl(sub.add_parser("stop", help="停止 session"))
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("reap", help="收割闲置窗口：租约过期就 session stop（防中断后窗口堆积）")
+    p.add_argument("--ttl", type=int, default=0,
+                   help="收割时限秒数（缺省读 config idle_close_s / WA_IDLE_CLOSE_S / 900）")
+    p.add_argument("--watch", action="store_true", help="常驻循环（绑定后启动；interval 控制节奏）")
+    p.add_argument("--interval", type=int, default=60, help="watch 模式扫描间隔秒（缺省 60）")
+    p.add_argument("--scan", default="", help="扫描目录下所有 %s（多任务并收）" % STATE_NAME)
+    p.add_argument("--dry-run", action="store_true", help="只报告将收割哪些，不动手")
+    p.set_defaults(func=cmd_reap)
 
     a = ap.parse_args(argv)
 

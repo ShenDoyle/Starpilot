@@ -486,9 +486,12 @@ MODE_HUMAN = {
 
 
 def _resolve_exec_mode(cli_val: str, card_res: dict = None) -> str:
-    """执行模式的三级来源：命令行 > 需求卡片 > 缺省 step。
+    """执行模式的来源优先级：命令行 > 需求卡片 > 无人值守开关（env/config）> 缺省 step。
 
-    缺省必须是 step：拿不到人明确说过「直接执行」，就不许替他决定不打扰。
+    缺省 step（保守）：拿不到人明确说过「直接执行」，就不许替他决定不打扰——
+    但**用户在 config / 环境变量里显式开过无人值守开关**（env.py --set-unattended on
+    或 STARPILOT_UNATTENDED=1）就是明确说过：这时候缺省 auto，否则 agent 每轮
+    停下来问「要不要继续」就违背了开关的本意（2026-11-02 用户反馈）。
     """
     v = (cli_val or "").strip().lower()
     if v in EXEC_MODES:
@@ -496,6 +499,12 @@ def _resolve_exec_mode(cli_val: str, card_res: dict = None) -> str:
     code = ((card_res or {}).get("stats") or {}).get("exec_mode_code") or ""
     if code in EXEC_MODES:
         return code
+    try:
+        import env as _env
+        if _env.unattended(os.environ):
+            return "auto"
+    except Exception:
+        pass
     return "step"
 
 
