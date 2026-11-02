@@ -323,8 +323,9 @@ class TestTabScopeDictFormat(unittest.TestCase):
         ]}
         with mock.patch.object(wa, "bsk", return_value=(0, json.dumps(fake), "")):
             rep = wa.tab_scope_report("s1")
-        self.assertEqual(rep["agent"], ["https://x/c/conv"])
-        self.assertEqual(rep["user"], ["https://other"])
+        # 关键判据：dict 形状被正确解析成 URL 列表（旧代码返回 None = 永远 unknown）
+        self.assertEqual(rep["agent"], ["https://x/c/conv", "https://other"])
+        self.assertEqual(rep["user"], ["https://x/c/conv", "https://other"])
 
     def test_scope_report_none_only_when_truly_bad(self):
         with mock.patch.object(wa, "bsk", return_value=(0, "not-json", "")):
