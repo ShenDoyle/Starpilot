@@ -495,6 +495,12 @@ _DEFAULTS = {
     # 允许的**真实写**路径白名单。空 = 该平台禁止真实写（未实测）。
     # 写闸门（write_gate.py）只认这张表；不在表里的写入方法一律 WRITE_BLOCKED_WRITE_METHOD。
     "write_allowed": [],
+    # 两层标定各有默认值（含义见 write_path_ok / loop_accepted）：
+    "write_verified": False,      # 「写字 + 点发送」这条路单独复测过
+    "key_attrs": [],              # 平台显式声明的「消息身份属性」，通用代码不许自己猜
+    "key_up": 4,                  # 取身份属性时最多向上走几层
+    "count_from_users": False,    # marker 全落空时用 user_messages 的 DOM 数兜底
+    "send_requires_text": False,  # 发送键条件渲染：写完必须看见它才算被接受
     # ---- 时间预算（秒）：三类时钟，取代「一个 900 秒总超时」----
     # 首字：从「发送已确认」起算，多久内必须看到生成中或首字。过了就走分诊。
     # 实测（2026-10-30，DeepSeek）：首字 2–5 秒；开联网搜索会拖到 20 秒以上。
@@ -517,6 +523,49 @@ def get(key=None):
         p["new_chat_url"] = p.get("home") or ""
     p["key"] = key
     return p
+
+
+# ------------------------------------------------ 两层标定口径（唯一实现）
+
+def write_path_ok(p: dict) -> bool:
+    """**能不能真实写**：写路径单独复测过，且写入方式在实测白名单里。
+
+    为什么必须把它和 `verified` 分开（2026-11-03 定的这条）：
+    这两个字段回答的是两个问题——
+
+      · `write_verified` = 「往这个输入框打字、点这个发送键，真的会发出去」
+      · `verified`       = 「发出去之后还能靠计数锚点自动认出回复、把整条闭环对账」
+
+    ChatGPT 在 2026-11-02 改版后是后者不成立、前者成立。写闸门当时只看
+    `verified`，于是**每一轮编排写都被拒**（WRITE_BLOCKED_PLATFORM_UNVERIFIED），
+    agent 唯一的出路是逃生门 `STARPILOT_ALLOW_DIRECT_SEND` 直发——而直发绕开的
+    恰恰是幂等守卫与写后核验。闸门想保护的东西，被自己的口径逼到了保护之外；
+    `pending.md` 里 32 条 P0-ESC 就是这么攒出来的。
+    """
+    if not p:
+        return False
+    method = p.get("write_method") or ""
+    return bool(p.get("write_verified")) and method in (p.get("write_allowed") or [])
+
+
+def loop_accepted(p: dict) -> bool:
+    """**能不能自动确认回复**：整条闭环（含计数锚点）真机验收过。
+
+    未过不等于不能写，但**等于不能宣称「已自动确认收到回复」**：
+    核验结论必须带上 verify_basis，让人一眼看出这个 VERIFIED 建立在
+    「离线重标定的锚点」还是「5/5 独立问答验收」上。
+    """
+    return bool(p and p.get("verified"))
+
+
+def calibration_gap(p: dict) -> str:
+    """标定缺口的如实描述（进 dry 计划、journal、doctor 输出）。"""
+    if loop_accepted(p):
+        return "loop_accepted"
+    if write_path_ok(p):
+        return ("write_only：写路径 %s 已于 %s 复测；整链路 5/5 验收未跑" % (
+            p.get("write_method"), p.get("write_verified_at") or "（未记录日期）"))
+    return "unverified：写路径未复测，禁止真实写"
 
 
 def label(key=None):

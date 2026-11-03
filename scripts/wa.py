@@ -113,6 +113,62 @@ def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, 
     return rc, out, err
 
 
+class BskQueryError(RuntimeError):
+    """bsk 查询**没拿到可信答案**（非零退出、或输出里解析不出 JSON）。
+
+    这个异常存在的唯一理由：把「查不到」和「查到的是空」分开。
+    两者混在一起时，上层会把「看不清」当成「没有了」处理 —— 于是重开窗口、
+    重发消息、报「浏览器未连接」，本来没坏的东西被修坏了。
+    """
+
+
+def parse_bsk_json(out: str) -> tuple[bool, object]:
+    """从 bsk 的输出里取**第一个平衡的 JSON 值**，返回 (是否拿到, 值)。
+
+    为什么要平衡扫描而不是 `json.loads(整段)`：bsk 偶尔会在 JSON 前后带一行
+    提示（daemon 自动拉起、版本 skew 警告、cooperate 同步说明）。整段 loads
+    必然失败，而失败在旧代码里被当成「没有会话 / 没有浏览器」——静默的错误结论。
+    从每个 `{`/`[` 起点试一次平衡切片，能容忍噪声行，也能容忍尾巴上的日志。
+    """
+    text = (out or "").strip()
+    if not text:
+        return False, None
+    try:                                    # 快路：干净的一整份 JSON
+        return True, json.loads(text)
+    except Exception:
+        pass
+    starts = sorted({i for i, ch in enumerate(text) if ch in "{["})
+    for i in starts:
+        stack = []                      # 期望的闭括号**栈**，不是单个变量：
+        in_str = False                  # 用单变量时 {"a":[{}]} 收到 } 之后
+        esc = False                     # 就不知道下一个该是 ] 了（本函数第一版
+        for j in range(i, len(text)):   # 就栽过：banner 版输出只能解析到内层，
+            ch = text[j]                # 拿回来的根本不是那个对象）
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]":
+                if not stack or ch != stack[-1]:
+                    break
+                stack.pop()
+                if not stack:
+                    try:
+                        return True, json.loads(text[i:j + 1])
+                    except Exception:
+                        break
+                continue
+    return False, None
+
+
 def _bsk_raw(args: list, timeout: int) -> tuple[int, str, str]:
     env = None
     # L2 shim 通行票据（2026-11-02 用户指令「只要使用 bsk 必须遵守窗口规则」；
@@ -262,6 +318,10 @@ def save_state(path: str, st: dict, timeout: float = 10.0) -> None:
 # ---------------------------------------------------------------- session
 
 _SID_RE = re.compile(r"\b([a-z0-9]{4})\b")
+# 兜底专用的**带上下文**正则：bsk 的会话 id 是 4 位小写字母，但裸的
+# `\b[a-z0-9]{4}\b` 会把 `edge`、`true`、路径片段都当成候选 —— 拿错 id 就是
+# 往别人的会话里打字。要求前面贴着 "session" 才算，宁可拿不到（报错）也不猜。
+_SID_RE2 = re.compile(r"session[^A-Za-z0-9]{0,4}([a-z0-9]{4})\b")
 
 
 def _norm_session(s: dict) -> dict:
@@ -277,15 +337,27 @@ def _norm_session(s: dict) -> dict:
     return s
 
 
-def list_sessions() -> list:
+def list_sessions(strict: bool = False) -> list:
+    """`bsk session list --json` → 规范化的会话列表。
+
+    ⚠️ 「查不到」与「查到的是空」是两件事，以前这里把它们压成同一个 `[]`：
+    bsk 在 JSON 前多打一行 banner、或 daemon 瞬断、或输出被截断，都会解析失败
+    → 返回空 → 上层判「会话不存在」→ **重开一个新窗口**。用户的感受就是
+    「页面故障越来越多、窗口一个接一个」，而根本没有故障，是自己吓自己。
+    `strict=True` 时解析失败/非零退出会抛 BskQueryError，由调用方如实分成
+    alive / dead / unknown 三态（见 session_state）。
+    """
     if _transport_is_iab():
         return [{"id": "iab", "browser": "iab", "window": ""}]
     rc, out, _ = bsk(["session", "list", "--json"])
     if rc != 0:
+        if strict:
+            raise BskQueryError("session list rc=%s" % rc)
         return []
-    try:
-        data = json.loads(out.strip())
-    except Exception:
+    ok, data = parse_bsk_json(out)
+    if not ok:
+        if strict:
+            raise BskQueryError("session list 输出解析失败：%r" % (out[:160],))
         return []
     if isinstance(data, dict):
         data = data.get("sessions") or data.get("value") or []
@@ -309,18 +381,27 @@ def place_window(sid: str) -> None:
         pass
 
 
-def list_browsers() -> list:
-    """`bsk browsers --json` → 规范化的实例列表（拿不到就是空列表）。
+def list_browsers(strict: bool = False) -> list:
+    """`bsk browsers --json` → 规范化的实例列表。
+
+    ⚠️ 默认返回空列表**只表示「没查到」**，不表示「一个浏览器都没连」。
+    这两种情况以前压在一起，于是「daemon 抖了一下 / JSON 前多打一行提示」
+    被当成「扩展没连」，上层据此重开窗口、重绑实例 —— 用户看到的是
+    「网页故障 + 窗口越开越多」，而故障是自查过程自己造的。
+    要做决策的调用方传 `strict=True`：拿不到可信答案就抛 BskQueryError。
 
     只用 JSON：`browsers` 的表格列宽是按标签长度对齐的，靠 split 解析会把
     「0.3.3 京东老浦家」整段当成标签，`WA_BROWSER_PREFER` 就永远匹配不上。
     """
     rc, out, _ = bsk(["browsers", "--json"], timeout=30)
     if rc != 0:
+        if strict:
+            raise BskQueryError("browsers rc=%s" % rc)
         return []
-    try:
-        data = json.loads(out.strip())
-    except Exception:
+    ok, data = parse_bsk_json(out)
+    if not ok:
+        if strict:
+            raise BskQueryError("browsers 输出解析失败：%r" % (out[:160],))
         return []
     if isinstance(data, dict):
         data = data.get("browsers") or []
@@ -412,8 +493,31 @@ def _first_browser_instance(browsers: list | None = None) -> str:
     return bs[0]["id"] if len(bs) == 1 else ""
 
 
+def session_state(sid: str) -> str:
+    """会话的三态：`alive` / `dead` / `unknown`。
+
+    为什么必须三态而不是 bool（2026-11-03）：以前 `list_sessions()` 解析失败会
+    返回空列表，`session_alive()` 于是说「不在线」，等待循环就去 **renew 重开窗口**。
+    查不清 ≠ 没了。把「查不清」当成「没了」去动作，制造的是真故障（多余窗口、
+    多余 tab），而用户看到的是「网页各种故障」。
+    """
+    if not sid:
+        return "unknown"
+    try:
+        sessions = list_sessions(strict=True)
+    except BskQueryError:
+        return "unknown"
+    return "alive" if any((s.get("id") or "") == sid for s in sessions) else "dead"
+
+
 def session_alive(sid: str) -> bool:
-    return bool(sid) and any((s.get("id") or "") == sid for s in list_sessions())
+    """兼容旧调用：**不确定时按「还在线」处理**，绝不因为看不清就去重开窗口。
+
+    这不是把未知当成功，而是把未知当「别动作」——真要判死由 session_state()
+    的 `dead` 给出，调用方想区分请用三态版本。旧调用点（read 的收尾判断）
+    在「看不清」时最不该做的事就是再开一扇窗。
+    """
+    return session_state(sid) != "dead"
 
 
 # 开窗纪律：一次任务里短时间反复 `session start` 不是「重试」，是环境在反复失效。
@@ -1536,7 +1640,19 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     # owner_key/run_id/lease/fencing。放在这里而不是各命令里，是因为
     # ensure_session 是**唯一**拿租约的入口——绕开它就绕开了归属。
     _remember_ctx(st, path)
-    ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
+    # 会话清单查不清时**不许开新窗**：以前解析失败会当成「一个会话都没有」，
+    # 于是 sid 不在列表 → 直接往下走去 session start → 多一扇窗、多一个会话，
+    # 用户看到的是「页面故障 + 窗口越开越多」。看不清就停下报现场。
+    try:
+        _sess = list_sessions(strict=True)
+    except BskQueryError as e:
+        raise SystemExit(
+            "会话状态查不清：%s\n"
+            "这种情况下拒绝开新窗（开窗只会让故障变多）。先跑：\n"
+            "  python scripts/wa.py doctor        # 实例与会务体检\n"
+            "  bsk status --json                  # daemon / 扩展是否真的连着\n"
+            "确认通道正常后重试。" % e)
+    ids = [s.get("id") or s.get("session") or "" for s in _sess]
     if sid and not renew:
         if sid in ids:
             winlease.claim_session(inst, sid, own)
@@ -1583,7 +1699,7 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     # 开新会话前：收掉**本任务名下**的旧会话（别人的活会话一律不动，见 enforce）
     enforce_single_session("", browser, own)
     # 多浏览器（用户可能同时开多个 Edge profile）：state.browser 优先，其次 WA_BROWSER env
-    args = ["session", "start", "--no-focus"]
+    args = ["session", "start", "--no-focus", "--json"]
     # 0.4.1 新增 --name：任务名进 bsk 本地操作历史，session 归属可追溯
     # （2026-11-03 优化：回应审计「session 无归属字段」缺口）。旧版不识别该
     # 参数会整体失败，故失败且提示 unknown argument 时去掉重试一次。
@@ -1592,10 +1708,12 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     if browser:
         args += ["--browser", browser]
     rc, out, err = bsk(args, timeout=120)
-    if rc != 0 and "unexpected argument" in (out + err).lower():
-        args = [a for a in args if a not in ("--name", sess_name)]
-        sess_name = ""
-        rc, out, err = bsk(args, timeout=120)
+    for _flag in ("--name", "--json"):
+        if rc != 0 and "unexpected argument" in (out + err).lower():
+            args = [a for a in args if a != _flag and a != sess_name]
+            if _flag == "--name":
+                sess_name = ""
+            rc, out, err = bsk(args, timeout=120)
     if rc == 0 and sess_name:
         st["session_name"] = sess_name
     if rc != 0 and "multiple browsers" in (out + err).lower():
@@ -1606,13 +1724,36 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
             rc, out, err = bsk(args + ["--browser", inst], timeout=120)
     if rc != 0:
         raise SystemExit("session start 失败：%s" % (err or out)[:400])
-    ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
-    sid = ids[-1] if ids else ""
+    # ---- session id 的来源必须写明白（三档，从最硬到最软）----
+    # 以前只有「列会话」和「正则扫 4 位小写字母」两档，且正则谁都像：
+    # `edge`、`true`、路径里的一段都可能被当成会话 id，拿错 id = 往别的会话里打字。
+    sid, sid_from = "", ""
+    okj, jv = parse_bsk_json(out)
+    if okj and isinstance(jv, dict):
+        sid = jv.get("session_id") or jv.get("session") or jv.get("id") or ""
+        if sid:
+            sid_from = "session start --json（最硬：bsk 自报）"
     if not sid:
-        m = _SID_RE.findall(out)
-        sid = m[-1] if m else ""
+        try:
+            ids = [s.get("id") or s.get("session") or ""
+                   for s in list_sessions(strict=True)]
+        except BskQueryError as e:
+            ids = []
+            sys.stderr.write("session list 查不回可信结果（%s），改用输出兜底\n" % e)
+        ids = [i for i in ids if i]
+        if ids:
+            sid = ids[-1]
+            sid_from = "session list 末位（次硬）"
     if not sid:
-        raise SystemExit("拿不到 session id。原始输出：%s" % out[:400])
+        m = _SID_RE2.findall(out or "")
+        if m:
+            sid = m[-1]
+            sid_from = "⚠️ 文本正则兜底（最软，可能取错）——请复核窗口归属"
+            sys.stderr.write("BSK-WARN: 会话 id 只能从 %r 里猜（候选 %s）。"
+                             "这一步取错就是往别人的会话打字，请人工确认。\n"
+                             % (sid, m[-3:]))
+    if not sid:
+        raise SystemExit("拿不到 session id，且没有可信兜底。原始输出：%s" % out[:400])
     enforce_single_session(sid, browser, own)  # 双保险：新会话留下，本任务其余全收
     _note_session_start(st)               # 本任务自己的计数（保留，双保险）
     winlease.note_start(inst)             # 全局跨任务计数：所有走本入口的开窗都记账
@@ -1645,19 +1786,12 @@ def evaluate(js: str, sid: str, timeout: int = 60):
         return False, "timeout"
     if rc != 0:
         return False, (err or out).strip()[:400]
-    s = out.strip()
-    data = None
-    try:
-        data = json.loads(s)
-    except Exception:
-        for line in s.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    data = json.loads(line)
-                    break
-                except Exception:
-                    continue
+    # 统一走 parse_bsk_json：旧的「按行找以 { 开头的那行」只吃得下**单行** JSON，
+    # bsk 一旦 pretty-print（或前面带一行提示）就解析失败，返回 (False, err) ——
+    # 表现是「页面明明在，探测却说不清」。
+    okj, data = parse_bsk_json(out)
+    if not okj:
+        data = None
     if isinstance(data, dict) and "value" in data:
         val = data["value"]
         if isinstance(val, str):
@@ -1684,6 +1818,46 @@ def evaluate(js: str, sid: str, timeout: int = 60):
     return True, data
 
 
+# 「还在生成」的第二路证据：末条回复文本是否在变长。
+# 为什么必须有：JS 里 `generating: !!stop` 只看**停止按钮在不在**，
+# 而停止按钮是平台改版时最先被换掉的东西之一（ChatGPT 2026-11-02 起
+# `data-testid="stop-button"` 命中 0）。只信它会导致：
+#   · 等待循环永远看不到「生成中」→ 首字钟(ttl 45s)一到就走分诊，把正在流式
+#     输出的长回答误杀；
+#   · send 前置守卫失效 → 在对方还在写的时候又发一条，页面上出现两条提问。
+# 增长阈值取 20 字：流式一秒几十字，而计时器/省略号动画不足 20 字
+# （与 platforms.DOC_GROWTH_MIN 同口径，不另立一套）。
+GEN_GROWTH_MIN = 20
+GEN_STALE_S = 30.0
+_GEN_SAMPLE = {}        # sid -> (ts, last_len)：上一条采样，用来判「有没有在变长」
+
+
+def _generating_composite(p: dict, sid: str, d: dict) -> dict:
+    """把 `generating` 从「只看停止按钮」升级成「按钮 or 正文在长」。
+
+    只改这一个点（而不是等待循环里的 8 个判断）：**口径只有一份**，
+    否则三处各判各的，就又回到「闸门与 CLI 说的不是一回事」那种坑。
+    `generating_basis` 把依据留在快照里，triage/审计能看清这条结论踩在哪。
+    """
+    if not isinstance(d, dict):
+        return d
+    hard = bool(d.get("generating"))
+    last_len = int(d.get("last_len") or 0)
+    now = time.time()
+    prev = _GEN_SAMPLE.get(sid)
+    _GEN_SAMPLE[sid] = (now, last_len)
+    grew = False
+    if prev and last_len > 0:
+        pts, plen = prev
+        if now - float(pts) <= GEN_STALE_S and last_len - int(plen) >= GEN_GROWTH_MIN:
+            grew = True
+    d["generating"] = bool(hard or grew)
+    d["generating_basis"] = ("stop" if hard else ("growth" if grew else "none"))
+    if not hard:
+        d["stop_present"] = False      # 如实记下「停止按钮这次没查到」，供分诊区分
+    return d
+
+
 def read_state(p: dict, sid: str, settle_ms: int = 600):
     """滚动到底 → 等虚拟化挂载 → 读状态。读到空线程自动加长等待重试（窗口被遮挡时
     Chrome 会卸载虚拟化内容，单次短等待不可靠）。
@@ -1697,8 +1871,31 @@ def read_state(p: dict, sid: str, settle_ms: int = 600):
         time.sleep(ms / 1000.0)
         ok, data = evaluate(platforms.js_probe(p), sid)
         if ok and (platforms.normalize_probe(p, data).get("msg_count", 0) > 0 or attempt == 2):
-            return ok, platforms.normalize_probe(p, data)
-    return ok, platforms.normalize_probe(p, data) if ok else data
+            return ok, _generating_composite(p, sid, platforms.normalize_probe(p, data))
+    return (ok, _generating_composite(p, sid, platforms.normalize_probe(p, data))
+            if ok else data)
+
+
+def count_matches(sel: str, sid: str) -> int:
+    """这个选择器在页面上命中几个：-1 = 查不动（浏览器不响应 / 语法不通）。
+
+    为什么必须提前数：bsk 的 focus/press/fill 遇到多匹配**直接拒绝**
+    （`selector matched 8 elements`，ChatGPT 2026-11-02 实测：页面上有 8 个
+    div.ProseMirror）。拒绝本身没错，错在信息量——上层只看到一个 rc≠0，
+    clear/fill 全失败、输入框残留清不掉，agent 以为是「平台故障」反复重试。
+    提前数一次就能把「选择器歧义」和「页面坏了」分开说，处置完全相反：
+    前者收窄选择器，后者找人看页面。
+    """
+    js = ('(() => { try { return JSON.stringify({n: document.querySelectorAll(%s).length}); } '
+          'catch (e) { return JSON.stringify({n: -1, err: String(e).slice(0,120)}); } })()'
+          % json.dumps(sel))
+    ok, data = evaluate(js, sid)
+    if ok and isinstance(data, dict):
+        try:
+            return int(data.get("n"))
+        except (TypeError, ValueError):
+            return -1
+    return -1
 
 
 # 写入路径：唯一实现放在本文件（wa 是传输层，闸门与 CLI 都走它）。
@@ -1725,7 +1922,17 @@ def fill_native(p: dict, text: str, sid: str, timeout: int = 180) -> dict:
     """
     last = {"ok": False, "code": platforms.FILL_SHORT, "detail": "没有可用选择器",
             "facts": {}, "used": "", "note": ""}
+    ambiguous = []
     for sel in (p.get("sel") or {}).get("editor") or []:
+        n = count_matches(sel, sid)
+        if n > 1:
+            # 多匹配 = bsk 一定会拒绝这一条；跳过去试下一个候选，
+            # 并把歧义如实记下来（不许伪装成「页面坏了」）
+            ambiguous.append("%s→%d 个" % (sel, n))
+            last = {"ok": False, "code": "SELECTOR_AMBIGUOUS",
+                    "detail": "候选选择器命中多个节点，bsk 会拒绝（selector matched N elements）",
+                    "facts": {"ambiguous": ambiguous}, "used": sel, "note": ""}
+            continue
         rc, out, err = bsk(["fill", "--selector", sel, "--value", text,
                             "--session", sid, "--json"], timeout=timeout)
         note = ""
@@ -2098,9 +2305,12 @@ def cmd_send(a) -> int:
     # 逃生门（2026-10-31 DeepSeek 裁定改为「有代价的显式声明」，0.1.4）：
     #   · 单次消费——env 值即理由，读后立即清除，同进程第二次直发仍被拒；
     #   · 理由必填——env 为空值视为未声明，拒绝；
-    #   · 强制落账——放行时向未清项台账追加 P0-ESC 条目（deferred(违例)），
+    #   · 强制落账——放行时在未清项台账上**累加**该目标的 P0-ESC 条目
+    #     （2026-11-03 改为按目标聚合：一次一发一个 id 会让台账按发送次数增长，
+    #      而回执门要求每条都出现 → 回执越长越容易不合格 → 越不合格越发不走正路，
+    #      24 小时能攒出 32 条。留痕不变，计数与最近理由都在条目里。）
     #     该条目必须在回执三栏「违例/异常」栏出现（pending_gate.check_receipt 强制），
-    #     隐身不报 = 回执不合格——堵死「违例隐身」模式。
+    #     报备过一次的条目用 pending_gate.py settle 核销，不再逐轮复读。
     #   · 本逃生门只豁免「编排器熔断」，不豁免其后的窗口归属三态门——
     #     即使直发放行，window unknown/misplaced 照样 rc=6（复审阶段一盘点结论）。
     root = os.path.dirname(path) or "."
@@ -2118,23 +2328,12 @@ def cmd_send(a) -> int:
         try:
             import pending_gate as _pg
             _led = _pg.pending_path_for(root, "", "")
-            _ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            _eid = "P0-ESC-%s" % hashlib.sha256(
-                ("%s|%s" % (_ts, st.get("url") or "")).encode("utf-8")).hexdigest()[:8]
-            _line = ("- [P0][%s] direct_send 绕过编排器直发 | deferred(违例：%s "
-                     "target=%s reason=%s；必须在回执三栏报备) | 来源:escape_hatch\n"
-                     % (_eid, _ts, hashlib.sha256(
-                         (st.get("url") or "").encode("utf-8")).hexdigest()[:12],
-                         _esc.strip()))
-            _head = "" if os.path.exists(_led) else "# 未清项清单\n"
-            os.makedirs(os.path.dirname(_led), exist_ok=True)
-            with open(_led, "a", encoding="utf-8") as _f:
-                if _head:
-                    _f.write(_head)
-                _f.write(_line)
-            print("违例放行（单次）：本次发送绕过编排器，已落账 %s 条目 %s。"
-                  "该条目必须在回执三栏「违例/异常」栏出现，隐身不报 = 回执不合格。"
-                  % (_led, _eid), file=sys.stderr)
+            _tgt = hashlib.sha256((st.get("url") or "").encode("utf-8")).hexdigest()[:12]
+            _rec = _pg.record_escape(_led, _tgt, _esc.strip())
+            print("违例放行（单次）：本次发送绕过编排器，台账 %s 条目 %s（累计 %d 次）。"
+                  "该条目必须在回执三栏「违例/异常」栏报备一次；报备后可用 "
+                  "pending_gate.py settle 核销，不必每轮复读。"
+                  % (_led, _rec["id"], _rec["count"]), file=sys.stderr)
         except Exception as _esc_err:
             print("警告：逃生门落账失败（%s）——违例未留痕，请人工补记。" % _esc_err,
                   file=sys.stderr)
@@ -2164,14 +2363,47 @@ def cmd_send(a) -> int:
               file=sys.stderr)
         return 3
 
+    # ---- 内容幂等（2026-11-03）：同一条正文不许在没结论之前再发一遍 ----
+    # 为什么 CLI 层也要有：闸门层（write_gate._already_sent）只在走正路时生效，
+    # 而「发出去但没确认」恰恰最容易转成 agent 自己重敲一次 wa.py send。
+    # 实测过这条路：文本滞留在输入框 → 判未发出 → 重发 → 页面上两条一样的提问。
+    # 判据是 内容哈希 + conv_id（同一条对话才算重复），跨对话不算。
+    text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    if (not a.force and st.get("last_send_hash") == text_sha
+            and (st.get("conv_id") or "") == (st.get("last_send_conv") or "")
+            and st.get("last_send_at")):
+        print("这条正文已经发过一次（%s，hash=%s），本轮还没确认回复完成。\n"
+              "  先跑：python scripts/wa.py wait --timeout 900   # 等回复\n"
+              "  或：  python scripts/wa.py triage                # 判卡在哪\n"
+              "  确实要再发一遍（比如明知没送达）：加 --force 并说明理由。"
+              % (st.get("last_send_at"), text_sha), file=sys.stderr)
+        return 9
+
+    # ---- 「发出去了但没确认」的滞留态：禁止盲目重敲 ----
+    # 上一次点击后编辑器已清空、却没有任何主信号证明送达（verdict=INCONCLUSIVE_*）：
+    # 这时候再 send 一次，极可能就是第二条相同提问。
+    if st.get("maybe_sent") and not a.force:
+        mb = st.get("maybe_sent") or {}
+        print("上一轮判定为「疑似已发出但未确认」（%s，%s）。\n"
+              "  直接重发会造成同一条提问发两遍。先跑 wa.py triage 看页面事实，"
+              "确认没送达再带 --force 重发。"
+              % (mb.get("verdict") or "?", mb.get("at") or "?"), file=sys.stderr)
+        return 9
+
     # 写路径白名单：平台没实测过写入路径就**不许真实写**。
     # 闸门层（write_gate）一直有这条；CLI 层以前没有 —— 于是「绕过闸门直接 wa.py send」
-    # 可以写到不该写的地方。两层的写权限必须同源，否则白名单只是装饰。
-    allowed = list(p.get("write_allowed") or [])
-    if (p.get("write_method") or "") not in allowed:
-        print("平台 %s 的写入路径 %r 不在实测白名单 %s 里：拒绝真实写。\n"
-              "先按 references/web-ai-platforms.md 实测回填 platforms.py。"
-              % (p.get("key"), p.get("write_method"), allowed or "（空）"), file=sys.stderr)
+    # 可以写到不该写的地方。两层的写权限必须**同源**（都走 platforms.write_path_ok），
+    # 否则白名单只是装饰，而且两层会各说一套、互相甩锅。
+    if not platforms.write_path_ok(p):
+        print("平台 %s 的写入路径 %r 不具备真实写条件：拒绝真实写。\n"
+              "  白名单=%s\n"
+              "  标定=%s\n"
+              "  要放开这条：按 references/web-ai-platforms.md 实测写路径并回填 "
+              "platforms.py 的 write_verified/write_verified_at，别改这里的判断。"
+              % (p.get("key"), p.get("write_method"),
+                 list(p.get("write_allowed") or []) or "（空）",
+                 platforms.calibration_gap(p)),
+              file=sys.stderr)
         return 8
 
     sid = ensure_session(st, path)
@@ -2218,6 +2450,12 @@ def cmd_send(a) -> int:
               % (fill.get("code"), fill.get("detail") or "",
                  "facts: %s" % json.dumps(fill.get("facts") or {}, ensure_ascii=False)),
               file=sys.stderr)
+        if fill.get("code") == "SELECTOR_AMBIGUOUS":
+            print("这是**选择器歧义**，不是页面坏了：收窄 platforms.py 里该平台的 "
+                  "sel.editor 候选（ChatGPT 的正解是 `form div.ProseMirror`，"
+                  "裸 div.ProseMirror 会命中多个同名节点）。"
+                  "反复重试同一条命令不会变好。", file=sys.stderr)
+            return 10
         return 6 if fill.get("code") in (platforms.FILL_SHORT, platforms.FILL_BLANK,
                                          platforms.FILL_NO_SEND) else 5
     ok, cur = read_state(p, sid)
@@ -2273,10 +2511,27 @@ def cmd_send(a) -> int:
     clas = confirm.classify_send_result(before_snap, after_snap, signals)
 
     if not clas["delivered"]:
-        print("点击后未确认消息真的发出（信号：无）。判定=%s：%s\n"
-              "可能平台侧拒绝或限流：先 wa.py probe 看状态、看页面弹窗，不要直接重试。"
-              % (clas["verdict"], clas["reason"]), file=sys.stderr)
-        return 8
+        # 两种失败必须分开说，因为它们接下来该做的事**相反**：
+        #   NOT_SENT               输入框还有字 → 没发出去，清掉重发是安全的
+        #   INCONCLUSIVE_NOT_SUCCESS 输入框空了但没有主信号 → **可能已经发出去了**，
+        #                            盲目重发就是第二条相同提问（实测踩过）
+        unconfirmed = clas["verdict"] == confirm.INCONCLUSIVE_NOT_SUCCESS
+        if unconfirmed:
+            st["maybe_sent"] = {"verdict": clas["verdict"],
+                                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "signals": clas["signals"],
+                                "conv_id": st.get("conv_id") or "",
+                                "text_sha": text_sha}
+            save_state(path, st)
+        print("点击后未确认消息真的发出（信号：%s）。判定=%s：%s\n%s"
+              % ("、".join(clas["signals"]) or "无", clas["verdict"], clas["reason"],
+                 ("⚠️ 输入框已清空 = 可能真的发出去了。**不要直接重试**："
+                  "先 python scripts/wa.py triage 看页面事实，"
+                  "确认没送达再带 --force 重发。" if unconfirmed else
+                  "输入框仍有内容 = 确实没发出去。先 wa.py probe 看状态/弹窗，"
+                  "再清空重发。")),
+              file=sys.stderr)
+        return 9 if unconfirmed else 8
 
     # ---- 新对话首轮：平台已跳到真实会话地址，把 state 换成它，后续轮次据此校验 ----
     if st.get("new_chat"):
@@ -2290,9 +2545,11 @@ def cmd_send(a) -> int:
         st["new_chat"] = False
 
     st["turn"] = int(st.get("turn") or 0) + 1
-    st["last_send_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    st["last_send_hash"] = text_sha
+    st["last_send_conv"] = st.get("conv_id") or ""   # 幂等判据的归属：同一条对话才算重复
     st["last_send_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     st["awaiting_reply"] = True
+    st.pop("maybe_sent", None)   # 本轮已有结论，滞留标记清掉（否则下一轮被误拦）
     send_base["conv_id"] = send_base.get("conv_id") or st.get("conv_id") or ""
     st["send_base"] = send_base
     st.setdefault("history", []).append({
@@ -2307,7 +2564,16 @@ def cmd_send(a) -> int:
                       "verdict": clas["verdict"],
                       "effective_delta": clas["effective_delta"],
                       "delta_source": clas["delta_source"],
-                      "signals": clas["signals"]},
+                      "signals": clas["signals"],
+                      # 下一步该敲什么，写在机器输出里而不是等人猜：
+                      # SENT_NO_REPLY 时 agent 的本能反应是「再发一次」，那正是重复提问的来源
+                      "next": ("python scripts/wa.py wait --timeout %d"
+                               % (int(p.get("timeout_s") or 900))
+                               if clas["verdict"] != confirm.SENT_NO_REPLY else
+                               "python scripts/wa.py wait --timeout %d；"
+                               "45 秒内没首字会自动转分诊（wa.py triage），"
+                               "**不要重发**——发出去已确认，只是回复还没认出来"
+                               % (int(p.get("timeout_s") or 900)))},
                      ensure_ascii=False, indent=2))
     return 0
 
@@ -2460,7 +2726,15 @@ def cmd_wait(a) -> int:
             # 累计三次近 20 秒，长任务里这 20 秒会白等；`session list` 一次只要几十毫秒。
             # 「死」是硬事实（session list 里没有），立刻处理；「活着但抖动」才等下轮再试。
             write_progress(path, "probe_failed")
-            if not session_alive(sid):
+            state = session_state(sid)
+            if state == "unknown":
+                # 看不清就**不重开窗口**：renew 的代价是一扇新窗 + 一条新会话，
+                # 而真实情况可能只是 bsk 在 JSON 前多打了一行提示。
+                notes.append("第 %d 轮探测失败且会话状态查不清（bsk 输出不可信）："
+                             "按「还活着」继续等，不开新窗。要排查请跑 wa.py triage"
+                             % (recovered + 1))
+                continue
+            if state == "dead":
                 if recovered < max_recover:
                     # bsk 会按空闲（默认 5 分钟）回收窗口。窗口没了不等于对话没了：
                     # 回复在平台侧已持久化，判据是「同一个 url 还能重新绑定」，

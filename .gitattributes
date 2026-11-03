@@ -1,0 +1,41 @@
+# 换行策略（2026-11-03）
+#
+# 为什么要专门写这个文件：本机 git 是 core.autocrlf=true，`git add` 时对
+# scripts/wa.py、tools/bsk_shim.py 等一堆文件报「LF will be replaced by CRLF」。
+# 对普通文本无所谓，但本项目有两类文件**按字节**说话：
+#
+#   · tools/bsk_shim.py → 安装到 ~/.local/bin 后要做「与仓库版逐字节一致」审计
+#     （docs/bsk-0.4.1-capabilities-and-upgrades.md 就是这么验收 L2 shim 的：
+#     127 行 / 5672B + sha256）。检出时把 LF 改成 CRLF，体积和哈希都会变，
+#     验收会得出「安装位被篡改」的假阳性——而这是一道安全门。
+#   · tests/fixtures/** 是**真机 DOM 录制件**，重放断言依赖内容原样；
+#     换行被动过，夹具与线上页面的可比性就没了。
+#
+# 规则：
+#   1. 默认：文本按内容自动判定，落库与工作树统一 LF（eol=lf 覆盖 autocrlf=true）。
+#      跨 agent / 跨机器（Windows 与 WSL 混用很常见）diff 才稳定。
+#   2. 上面那两类关掉一切归一化（-text），字节原样进出。
+#   3. 图片按二进制。
+* text=auto eol=lf
+
+# 显式声明文本（别让 git 猜）
+*.md      text eol=lf
+*.py      text eol=lf
+*.json    text eol=lf
+*.jsonl   text eol=lf
+
+# 二进制
+*.png     binary
+*.ico     binary
+*.jpg     binary
+*.zip     binary
+
+# 逐字节有安全/取证含义的文件：不许任何换行改写。
+# ⚠️ 必须放在**最后**：.gitattributes 是「后写的规则赢」，
+# 放在 `*.py text eol=lf` 前面会被那条通用规则盖掉（第一版就踩了这个坑，
+# git check-attr 显示 bsk_shim.py 的 text 仍是 set）。
+tools/bsk_shim.py        -text
+tools/install_l2_shim.py -text
+tests/fixtures/**        -text
+scripts/*.js             -text
+*.sqlite                 -text

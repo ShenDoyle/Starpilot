@@ -33,9 +33,6 @@ import io
 import json
 import sys
 
-_HARDENED = set()
-
-
 def _is_tty(st) -> bool:
     try:
         return bool(st.isatty())
@@ -46,7 +43,7 @@ def _is_tty(st) -> bool:
 def harden_streams(streams=None) -> None:
     """加固输出流：**编码问题永远不许吃掉判定，也别把中文变成乱码**。
 
-    分两种下游，处理完全不同（这是 2026-11-03 实测出来的分歧）：
+    分两种下游，处理完全不同（2026-11-03 实测出来的分歧）：
 
     1. **接的是管道**（agent / harness / bash 抓输出，`isatty()` 为假）：
        zh-CN Windows 上 Python 会按 cp936 建 stdout，而 Qoder / WorkBuddy / CI
@@ -56,22 +53,27 @@ def harden_streams(streams=None) -> None:
        只把 `errors` 改成 `backslashreplace`——编不进去的个别字符转义，
        而不是整条命令抛 UnicodeEncodeError。
 
-    幂等（按流对象记名），且任何异常都吞掉： StringIO、被宿主换掉的流、
-    不支持 reconfigure 的老版本，本来就不会炸。
+    幂等靠**读流的当前状态**判断，不靠「记住哪些对象处理过」：
+    第一版用 `id(st)` 去重，而 CPython 的 id 会在对象回收后被新对象复用 ——
+    全量跑单测时另一条流复用了旧 id，直接被跳过加固（test_safeprint 在
+    单跑时绿、整套跑时红就是这个原因）。看状态不会说谎，也不会误伤新对象。
     """
-    for st in (streams or (sys.stdout, sys.stderr)):
+    for st in (streams if streams is not None else (sys.stdout, sys.stderr)):
         try:
-            if st is None or id(st) in _HARDENED:
-                continue
-            if not hasattr(st, "reconfigure"):
+            if st is None or not hasattr(st, "reconfigure"):
                 continue
             enc = (getattr(st, "encoding", None) or "").lower().replace("-", "")
+            errs = (getattr(st, "errors", None) or "").lower().replace("-", "")
+            kw = {}
             if not _is_tty(st) and enc not in ("utf8", ""):
-                st.reconfigure(encoding="utf-8", errors="backslashreplace")
-            else:
-                st.reconfigure(errors="backslashreplace")
-            _HARDENED.add(id(st))
+                kw["encoding"] = "utf-8"
+            if errs != "backslashreplace":
+                kw["errors"] = "backslashreplace"
+            if not kw:
+                continue                 # 已经加固过了
+            st.reconfigure(**kw)
         except Exception:
+            # 不是真实控制台（StringIO、被宿主换掉的流）→ 本来就不会炸
             pass
 
 

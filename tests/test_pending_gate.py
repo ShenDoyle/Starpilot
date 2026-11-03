@@ -288,3 +288,114 @@ class TestTransport(unittest.TestCase):
             self.assertEqual(wa.list_sessions()[0]["id"], "iab")
         finally:
             os.environ.pop("STARPILOT_TRANSPORT", None)
+
+
+class TestEscapeLedgerDoesNotGrowPerSend(unittest.TestCase):
+    """逃生门台账必须按**目标**聚合，不能按发送次数线性增长。
+
+    实证（2026-11-03）：一次一发一个 id，加上「每条 P0-ESC 都要在回执里出现」
+    = 自激振荡：24 小时攒出 32 条，回执正文比交付物长；回执越长越容易不合格，
+    越不合格越走逃生门，逃生门又落一条——门变成了放大器。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.led = os.path.join(self.tmp, "pending.md")
+
+    def test_same_target_is_one_item_with_exact_count(self):
+        for i in range(7):
+            pending_gate.record_escape(self.led, "aabbccddee11", "写闸门拒写 %d" % i)
+        items = pending_gate.parse_pending(self.led)
+        self.assertEqual(len(items), 1, "同一目标必须合成一条")
+        self.assertEqual(items[0]["id"], "P0-ESC-aabbccddee11")
+        self.assertIn("违例 7 次", items[0]["detail"])
+        self.assertIn("写闸门拒写 6", items[0]["detail"], "最近理由要留得住")
+        self.assertNotIn("写闸门拒写 0", items[0]["detail"], "只留最近几条，不是全量复读")
+
+    def test_different_targets_are_different_items(self):
+        pending_gate.record_escape(self.led, "t1", "r1")
+        pending_gate.record_escape(self.led, "t2", "r2")
+        ids = [i["id"] for i in pending_gate.parse_pending(self.led)]
+        self.assertEqual(ids, ["P0-ESC-t1", "P0-ESC-t2"])
+
+    def test_receipt_needs_one_report_then_settle(self):
+        """报备一次 → settle 核销 → 之后不必再复读，但条目仍在账上。"""
+        pending_gate.record_escape(self.led, "t1", "写闸门 verified=false 拒写")
+        receipt = "### 违例栏\n- P0-ESC-t1 ✅ 已核验，未造成重复投递\n"
+        ok, why, missing = pending_gate.check_receipt(self.led, receipt)
+        self.assertTrue(ok, why)
+        res = pending_gate.settle(self.led, receipt, "第3轮")
+        self.assertEqual(res["settled"], ["P0-ESC-t1"])
+        # 核销后：本轮回执不提它也算合格
+        ok2, why2, missing2 = pending_gate.check_receipt(self.led, "本轮没有任何违例")
+        self.assertTrue(ok2, why2)
+        self.assertEqual(missing2, [])
+        # 但记录本身没消失，审计仍可查
+        items = pending_gate.parse_pending(self.led)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "settled")
+        self.assertIn("违例 1 次", items[0]["detail"])
+
+    def test_settle_refuses_items_not_reported(self):
+        """没在回执里出现的条目不许被核销——否则 settle 就是「让违例消失」的后门。"""
+        pending_gate.record_escape(self.led, "t1", "r1")
+        pending_gate.record_escape(self.led, "t2", "r2")
+        res = pending_gate.settle(self.led, "只有 P0-ESC-t1 ✅ 报过了", "第4轮")
+        self.assertEqual(res["settled"], ["P0-ESC-t1"])
+        st = {i["id"]: i["status"] for i in pending_gate.parse_pending(self.led)}
+        self.assertEqual(st["P0-ESC-t2"], "deferred", "未报备的条目必须留在待报状态")
+
+    def test_blocked_items_still_cannot_hide(self):
+        """BLOCKED 豁免项同样「报一次可核销」，但没报就绝对不行。"""
+        p = os.path.join(self.tmp, "blocked.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("- [P0][P0-B1] 某豁免 | blocked(用户裁定放行) | 来源:第1轮\n")
+        ok, _, missing = pending_gate.check_receipt(p, "本轮回执只谈别的")
+        self.assertFalse(ok)
+        self.assertIn("P0-B1", missing)
+        ok2, _, _ = pending_gate.check_receipt(p, "P0-B1 ⚠️ 已在本轮说明豁免理由")
+        self.assertTrue(ok2)
+
+
+class TestPendingGateCliIsActuallyRunnable(unittest.TestCase):
+    """`python scripts/pending_gate.py <子命令>` 必须真的能跑起来。
+
+    这里踩过一次典型的「静默失败伪装成门禁」：入口写的是 `main(sys.argv)`，
+    而 main() 约定第 0 位是**子命令名**——于是 SKILL.md 教给 agent 的每条命令
+    都返回 rc=2 并打出整篇 docstring。rc=2 在本模块语义里接近「不通过」，
+    agent 读到的是「我被门禁拦住了」，真相是「命令根本没执行」。
+    单测以前直接 `main([...])`，永远照不到这一面，所以这条必须走真子进程。
+    """
+
+    def _run(self, *args):
+        import subprocess
+        script = os.path.join(str(Path(__file__).resolve().parents[1]),
+                              "scripts", "pending_gate.py")
+        return subprocess.run([sys.executable, script] + list(args),
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="backslashreplace",
+                              timeout=60)
+
+    def test_check_receipt_via_real_cli(self):
+        tmp = tempfile.mkdtemp()
+        led = os.path.join(tmp, "pending.md")
+        with open(led, "w", encoding="utf-8") as f:
+            f.write("- [P0][P0-1] 事情 | open | 来源:第1轮\n")
+        fb = os.path.join(tmp, "fb.md")
+        with open(fb, "w", encoding="utf-8") as f:
+            f.write("P0-1 ❌ 未做，理由：页面改版\n")
+        p = self._run("check-receipt", led, "--file", fb)
+        self.assertNotEqual(p.returncode, 2,
+                            "又被 usage 挡在门外：%s" % p.stdout[:200])
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('"receipt"', p.stdout)
+        bad = self._run("check-receipt", led, "--file", led)
+        self.assertEqual(bad.returncode, 1, bad.stdout)
+
+    def test_settle_requires_receipt_file(self):
+        tmp = tempfile.mkdtemp()
+        led = os.path.join(tmp, "pending.md")
+        pending_gate.record_escape(led, "t1", "r1")
+        p = self._run("settle", led)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("SETTLE_NEEDS_RECEIPT", p.stdout)

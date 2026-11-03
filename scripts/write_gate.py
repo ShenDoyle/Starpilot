@@ -256,9 +256,15 @@ def cmd_plan(a) -> int:
 
     st = wa.load_state(wa_state_path(root, a.state))
     p = platforms.get(a.platform or st.get("platform"))
-    if not p.get("verified"):
+    # 写路径的门槛是 write_verified（见 platforms.write_path_ok 的来龙去脉）：
+    # 拿整链路口径 `verified` 拦写，只会把 agent 推到逃生门上，
+    # 而逃生门绕开的正是本闸门。拦错地方 = 保护为零、噪声满账。
+    if not platforms.write_path_ok(p):
         return blocked("WRITE_BLOCKED_PLATFORM_UNVERIFIED",
-                       "平台 %s 未实测" % p.get("key"), {"platform": p.get("key")})
+                       "平台 %s 的写路径未复测（%s）" % (
+                           p.get("key"), platforms.calibration_gap(p)),
+                       {"platform": p.get("key"),
+                        "calibration": platforms.calibration_gap(p)})
     if p.get("write_method") not in allowed_write_methods(p):
         return blocked("WRITE_BLOCKED_WRITE_METHOD",
                        "平台 %s 只允许 %s，实际配置 %s" % (
@@ -283,6 +289,11 @@ def cmd_plan(a) -> int:
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "stage_id": a.stage or "",
         "platform": p.get("key"),
+        # 标定层级如实带进计划：write_only 的平台上，后面那条 VERIFIED 的依据
+        # 是「离线重标定的锚点」而不是「5/5 真机验收」——这层区别必须留在账上，
+        # 不然审计时没人看得出这条结论踩得多实。
+        "calibration": platforms.calibration_gap(p),
+        "loop_accepted": platforms.loop_accepted(p),
         "write_method": p.get("write_method"),
         "write_allowed": allowed_write_methods(p),
         "target_url": url,
@@ -655,9 +666,12 @@ def cmd_send(a) -> int:
 
     st = wa.load_state(wa_state_path(root, a.state))
     p = platforms.get(a.platform or st.get("platform"))
-    if not p.get("verified"):
+    if not platforms.write_path_ok(p):
         return blocked("WRITE_BLOCKED_PLATFORM_UNVERIFIED",
-                       "平台 %s 未实测" % p.get("key"), {"approval_id": a.approval},
+                       "平台 %s 的写路径未复测（%s）" % (
+                           p.get("key"), platforms.calibration_gap(p)),
+                       {"approval_id": a.approval,
+                        "calibration": platforms.calibration_gap(p)},
                        risk=riskmod.classify("platform_unverified"))
     if p.get("write_method") not in allowed_write_methods(p):
         return blocked("WRITE_BLOCKED_WRITE_METHOD",
@@ -853,6 +867,12 @@ def cmd_verify(a) -> int:
     if bad and verdict == "VERIFIED":
         verdict = "MISMATCH -> PAUSED_HUMAN"
     rc = 0 if not bad else (5 if verdict.startswith("MISMATCH") else 6)
+    # 这条 VERIFIED 踩得多实，取决于平台的标定层级：
+    # loop_accepted = 整条闭环真机验收过；write_only = 只有写路径复测过，
+    # 计数锚点是离线重标定的（夹具回放验的）。两个词不许混用。
+    plat = platforms.get(dry.get("platform") or "")
+    verify_basis = ("loop_accepted" if platforms.loop_accepted(plat)
+                    else "write_only_platform:%s" % platforms.calibration_gap(plat))
     # 核验结论落 journal：audit 的 inconclusive 计数以它为准（可审计，不靠回忆）
     append_journal(run_dir, {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -860,6 +880,7 @@ def cmd_verify(a) -> int:
         "approval_id": a.approval,
         "send_id": getattr(a, "send_id", "") or "",
         "verdict": verdict,
+        "verify_basis": verify_basis,
         "result": ("ok" if not bad
                    else ("mismatch" if verdict.startswith("MISMATCH") else "inconclusive")),
         "reply_count_delta": delta,
@@ -870,6 +891,7 @@ def cmd_verify(a) -> int:
     })
     out = {"ok": not bad, "approval_id": a.approval,
            "verdict_scope": delta_source,
+           "verify_basis": verify_basis,
            "effective_delta": delta,
            "count_anchor_disagree": bool(res.get("count_anchor_disagree")),
            "anchors": res.get("anchors") or {},

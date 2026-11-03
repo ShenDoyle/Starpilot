@@ -24,23 +24,29 @@ import safeprint  # noqa: E402
 
 
 class _FakeStream(object):
-    """可控 isatty / encoding / reconfigure 的假流，用来验加固策略。
+    """可控 isatty / encoding / errors / reconfigure 的假流，用来验加固策略。
 
     刻意**不**继承 io.StringIO：`io._TextIOBase.encoding` 是只读描述符，
     子类里 `self.encoding = ...` 会 AttributeError（本文件的第 5 条红测就是这么来的）。
+    reconfigure 会真的把状态写回自身——幂等判断靠的就是这份状态。
     """
 
     def __init__(self, encoding="gbk", tty=False):
         self.encoding = encoding
+        self.errors = "strict"
         self._tty = tty
         self.reconfigured = {}
         self.buf = []
+        self.reconfigure_calls = 0
 
     def isatty(self):
         return self._tty
 
     def reconfigure(self, **kw):
+        self.reconfigure_calls += 1
         self.reconfigured.update(kw)
+        for k, v in kw.items():
+            setattr(self, k, v)
 
     def write(self, s):
         self.buf.append(s)
@@ -75,11 +81,28 @@ class TestHardenPolicy(unittest.TestCase):
     def test_idempotent(self):
         st = _FakeStream(encoding="gbk", tty=False)
         safeprint.harden_streams([st])
-        first = dict(st.reconfigured)
+        self.assertEqual(st.reconfigured.get("encoding"), "utf-8")
+        calls = st.reconfigure_calls
         st.reconfigured.clear()
         safeprint.harden_streams([st])
-        self.assertEqual(st.reconfigured, {}, "第二次不该再动同一条流")
-        self.assertEqual(first.get("encoding"), "utf-8")
+        self.assertEqual(st.reconfigure_calls, calls, "第二次不该再动同一条流")
+
+    def test_new_stream_after_gc_is_still_hardened(self):
+        """幂等**不许**按对象 id 记名：CPython 的 id 会在对象回收后被复用。
+
+        第一版用 `id(st)` 去重，整套单测跑下来某条新流复用了旧 id → 被当成
+        「已经加固过」跳过；单跑 test_safeprint 是绿的、全量跑是红的。
+        现在改成读流自己的状态判断，这条把教训钉住。
+        """
+        first = _FakeStream(encoding="gbk", tty=False)
+        safeprint.harden_streams([first])
+        old_id = id(first)
+        del first
+        second = _FakeStream(encoding="gbk", tty=False)
+        safeprint.harden_streams([second])       # 就算 id 撞上了也必须加固
+        self.assertEqual(second.encoding, "utf-8")
+        self.assertEqual(second.errors, "backslashreplace")
+        self.assertIsInstance(old_id, int)       # 只是让 del 后的 id 有意义地被引用
 
     def test_plain_stringio_survives(self):
         """没有 reconfigure / 没有 encoding 的流（被 redirect_stdout 换掉的）：
