@@ -159,6 +159,9 @@ python scripts/wa.py read --out runtime/wa/turn-1.md    # 读回复，原文落�
 python scripts/wa.py send --platform kimi --file runtime/wa/feedback-1.md
 python scripts/wa.py wait --platform kimi --timeout 900 # 三时钟：45s 没首字就走分诊，不硬等 15 分钟
 python scripts/wa.py triage                             # 卡住了？一条只读命令判风控/漂移/改版/没发出去
+python scripts/wa.py doctor --explain                    # 体检 + 把结论翻译成「下一条该敲什么」（含禁止动作）
+python scripts/wa.py dialog                              # 只读：页面上有没有挂着 beforeunload/confirm 在挡关闭
+python scripts/wa.py ask-human --prompt "请扫码登录"       # 官方人工介入通道（默认只演练，加 --go 才打扰人）
 python scripts/wa.py probe --platform claude            # 新平台先标定再绑定
 ```
 
@@ -203,7 +206,7 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t tests   # 381 条，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t tests   # 668 条，纯标准库
 python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```

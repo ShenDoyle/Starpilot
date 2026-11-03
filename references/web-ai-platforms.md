@@ -287,6 +287,31 @@ python scripts/wa.py read --platform yourkey
 >    ——probe 读到的 `msg_count=0` 可能是「加载中的假空」（「工具自证≠事实」第四变种，
 >    见 lessons `L-GEMINI-FOREIGN-CONV-ff592c`）。bind 已内置稳定等待后再做归属判定。
 
+### 附录 · ChatGPT 2026-11-02 / 11-03 改版后的实测契约（离线快照重放）
+
+来源：只读 session 的 `bsk get-html` 快照（2026-11-03 17:45–18:00，Edge 151，页 `lang=zh-CN`），
+裁剪后固化成 `tests/fixtures/chatgpt/`，`tests/test_platforms_replay.TestChatGPTReplay` 离线重放。
+**先录夹具再改选择器**：11-02 那次改版之所以能把整条链路搞瘫 24 小时，就是因为
+ChatGPT 没有夹具——选择器失效在单测阶段一条都不红，红在线上每次发送都判 `SENT_NO_REPLY`。
+
+| 元素 | 2026-11-03 实测 | 备注 |
+|---|---|---|
+| 编辑器 | `form div.ProseMirror`（**唯一命中 1**） | 裸 `div.ProseMirror` 页上有 5–8 个（消息渲染块 + `chatgpt-writing-block` 同名），多匹配时 bsk 直接拒绝 `selector matched N elements`，clear/fill 全失败、输入框残留清不掉 |
+| 助手消息身份 | `div[data-chatgpt-selection-message-id]`（6 条，节点自带 UUID，互不重复） | 旧 `[data-message-author-role]` 属性**命中 0**，整族消失 |
+| 轮次容器 | `div[data-chatgpt-search-message-ids]`（12 = 6 提问 + 6 回复） | DOM 口径的消息总数，**与界面语言无关**；助手值里同一 UUID 空格重复两次 → 取第一个 token |
+| 用户消息 | `div[data-user-message-bubble]`（6） | ⚠️ 气泡自己**没有** UUID，身份在祖先轮次容器上 → 必须 `key_attrs` + `key_up`（向上 8 层） |
+| 助手正文 | `div[data-markdown-text-style="assistant-message"]`（6） | 读正文的退化候选 |
+| 角色头 | `h4[data-conversation-role="user|assistant"]`（各 6） | 语义在改版后延续，但类名超长，写测试时注意窗口 |
+| **禁用** | `data-chatgpt-search-unit-key`（`fallback-turn-N:…`） | **相对编号**，虚拟窗口移动就重编号 → 当身份用会把历史消息认成新消息 |
+| 发送键 | **未定标**：空编辑器时四条候选全部命中 0（`type=submit` 整页 0 个） | 与 Gemini 同样是**条件渲染**。定标必须「编辑器有字时」再录一份快照 |
+| 停止键 | `data-testid="stop-button"` 命中 0；`aria-label*="停止"` 文案存在于别处 | 所以 `generating` 不能只看它，见 `wa._generating_composite` |
+| marker | `ChatGPT 说：` ×6、`你说：` ×6（中文界面） | 界面切英文即失效，已加 `You said:` 备选并允许 `count_from_users` 走 DOM 兜底 |
+| 语音键 | `composer-speech-button` 命中 0 | 探测噪声源之一，不作为判据 |
+
+标定状态口径（`platforms.calibration_gap`）：**写路径 `write_verified=True`（11-02 复测），
+整链路 `verified=False`** —— 计数锚点已重标定，但发送键未定标、专用测试对话的
+5/5 独立问答验收未跑。不拿「计数能用」冒充「链路已实测」。
+
 ---
 
 ## 五、跨平台通用经验

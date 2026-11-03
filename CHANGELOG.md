@@ -2,6 +2,94 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 0.1.7 候选（2026-11-03，Agent↔网页 AI 通信可靠性：闸门自锁、发送幂等、查询三态、bsk 0.4.1 同步）
+
+不升版号（`SKILL.md` 仍 0.1.6）：发版与推送由用户决定，避免 `upgrade.py` 的远端比较把
+这批发改覆盖掉。以下按「根因 → 修法」记，四条互相咬合，单看任何一条都像在治标。
+
+### 修复
+- **写闸门口径修反了**（`platforms.write_path_ok` / `loop_accepted` / `calibration_gap`）。
+  `verified` 回答的是「发出去之后还能不能自动认出回复」，`write_verified` 回答的是
+  「往这个框打字点这个键会不会真发出去」。闸门只看 `verified`，于是 ChatGPT
+  （写路径 11-02 复测通过、计数锚点当时失效）**每一轮编排写都被拒**，唯一出路是
+  逃生门 `STARPILOT_ALLOW_DIRECT_SEND` 直发——而直发绕开的恰恰是幂等守卫与写后核验：
+  闸门想保护的东西被自己的口径逼到保护之外。CLI 与闸门改为同源判据（同一函数），
+  核验结论新增 `verify_basis`，`write_only` 平台上那条 VERIFIED 不许冒充整链路验收。
+- **逃生门台账从 O(发送次数) 打断**（`pending_gate.record_escape/settle`）。
+  一次一发一个新 id + 「每条 P0-ESC 都要在之后每一轮回执出现」= 自激振荡：
+  24 小时 32 条，回执正文比交付物长，回执越长越不合格，越不合格越发不走正路。
+  现在按目标聚合（稳定 id + 精确计数 + 最近理由），报备一次后 `settle` 核销；
+  核销只免除重复报备义务，条目仍在台账上可查。**留痕靠聚合，不靠复读。**
+- **CLI 发送补幂等 + 三态失败分报**（`wa.py cmd_send`）。`last_send_hash` 以前只写不读。
+  现在：内容哈希 + conv_id 命中即拒；「输入框已空但无主信号」落 `maybe_sent` 滞留态，
+  拦住下一轮的盲目重发；退出码按处置分开——**8 = 确实没发出去（重发安全）**、
+  **11 = 写路径没标定（去 probe，别重发）**、**12 = SEND_UNCERTAIN（别重发）**、
+  **10 = 选择器歧义（收窄选择器，重试无用）**；9 仍是 `WINDOW_BUSY`。
+  成功输出带 `next` 字段，`SENT_NO_REPLY` 时明写「等，不要重发」。
+- **查询失败不再当成「没有」**（`BskQueryError` + `list_sessions/list_browsers(strict=)` +
+  `session_state()` 三态）。旧代码在 rc≠0 或输出解析失败时返回 `[]`，等待循环据此
+  判「会话没了」→ 重开窗口；`ensure_session` 据此开新会话。用户感受就是
+  「网页故障、窗口越开越多」，而故障是自查过程自己造的。现在 `unknown` 一律
+  **拒绝开窗**并让人去 `doctor`。
+- **bsk 输出的 JSON 扫描器重写**（`parse_bsk_json`）。旧的两处 ad-hoc 解析：
+  `json.loads(整段)` 遇 banner 行必挂；`evaluate` 的「找以 `{` 开头的行」吃不下
+  pretty-print。新实现用**闭括号栈**做平衡扫描——第一版用单个 closer 变量，
+  `{"sessions":[{}]}` 只解析到内层数组、外层键全丢，测试当场抓到。
+- **`generating` 不再单点依赖停止按钮**（`_generating_composite`）。JS 里
+  `generating: !!stop`；停止按钮是平台改版第一个删的东西（ChatGPT 11-03 快照
+  `data-testid="stop-button"` 命中 0），只信它会让 45s 首字钟把正在流式的长回答
+  误杀、让 send 的「别在生成中再发」守卫失效。现在 `stop OR 末条文本在变长`
+  （阈值与 `platforms.DOC_GROWTH_MIN` 同口径），并留 `generating_basis`。
+- **会话 id 取值分级**：`session start --json`（bsk 自报）→ 会话列表 → 带上下文的
+  正则兜底（要求紧邻 `session` 字样），最后一档**必打警告**。裸 `\b[a-z0-9]{4}\b`
+  会把 `edge`/`true` 当 id，拿错 id = 往别人的会话打字。
+- **`pending_gate.py` 的 CLI 一直跑不起来**：入口 `main(sys.argv)` 而 `main` 约定
+  第 0 位是子命令名 → SKILL 里教的每条命令都返回 rc=2 并打整篇 docstring，
+  而 2 在本模块语义接近「不通过」，agent 读到的是「门禁拦我」，真相是「命令没启动」。
+  改 `sys.argv[1:]`，并加真子进程回归测试（单测以前直接 `main([...])`，照不到这一面）。
+- **控制台编码吃掉判定**（`scripts/safeprint.py`）：cp936 下打印 U+FFFD/↔ 抛
+  UnicodeEncodeError，需求卡片闸门在 `print` 那行崩成 `GATE_CRASH`，把
+  `NO_CONFIRMATION` / `CLARIFIED_EMPTY` 的实话顶掉；基线 3 条单测在本机红、
+  `PYTHONUTF8=1` 下绿。现在管道→UTF-8（宿主按 UTF-8 解码，中文不再乱码）、
+  真控制台→保留本机代码页只改 `errors`；子进程统一 `PYTHONIOENCODING`
+  （父进程的 `encoding=` 管不到子进程自己的 stdout，子进程先崩、父进程拿到半截 JSON）。
+  幂等判断改成读流状态而非记 `id()`——`id` 会被回收复用，全量跑单测时真跳过过加固。
+
+### 新增（bsk 0.4.1 同步）
+- `bskcompat.supports()` 能力探测（问 `<cmd> --help`，不信版本号）+ `step()` / `dialog_status()`。
+- `step` 原子发送通道（默认关，`STARPILOT_STEP_SEND=1`）：一次往返替代
+  sync→动作→再探测，且 never retried。开启需**发送键唯一命中**；ChatGPT 的发送键
+  仍未定标（空编辑器不渲染，快照四条候选全 0 命中），所以默认不启用。
+- `TAB_CLOSE_UNKNOWN` 先跑 `dialog status`：卡住关闭的多半是 beforeunload，
+  如实报出来并交人处置（星舵不替用户按「确定离开」）。
+- `triage` 落 `observe` VOM 快照到 `runtime/wa/obs/`：卡住现场成为可离线复核的历史证据
+  （`bsk view <file> --find <文案>`），不必再动浏览器。
+- `wa.py dialog`（只读）、`wa.py ask-human`（官方 request-help，默认演练，`--go` 才打扰人）。
+- `wa.py doctor --explain`：把体检事实翻译成**有序下一步命令 + 禁止动作**。
+  上下文预算小、遵循度低的 agent 不必自己推断「那我该敲什么」。
+- `.gitattributes`：`core.autocrlf=true` 下保护 L2 shim 与 DOM 夹具的**逐字节一致**
+  （shim 安装位靠 sha256/体积验收，换行被改写会得出「安装位被篡改」的假阳性）。
+
+### 标定（离线，用真机快照）
+- 新增 `tests/fixtures/chatgpt/`（messages/composer/meta），来自只读 session 的
+  `get-html` 快照裁剪。ChatGPT 计数锚点重标定：`data-chatgpt-selection-message-id`
+  （助手，节点自带 UUID）与 `data-chatgpt-search-message-ids`（轮次容器；用户气泡
+  自己不带，靠 `key_up` 向上取）；旧 `data-message-author-role` 实测命中 0。
+  `reply_count` 改为按身份去重计数，`msg_count` 在中文 marker 落空时退回 DOM 口径（英文界面）。
+- **`verified` 保持 false**：还差发送键定标与专用测试对话 5/5 独立问答验收。
+  不拿「计数能用」冒充「链路已实测」。
+
+### 测试
+- 610 → **668** 条：新增 `test_safeprint`(10) / `test_send_idempotency`(10) /
+  `test_bsk_query_robustness`(24) / `test_bsk_caps`(16) + ChatGPT 回放 8 条
+  + pending-gate 台账/CLI 7 条。基线 3 条红测转绿。
+
+### 已知未做（如实）
+- 发送键与 stop 标记的**真机定标**：需要编辑器有字时再录一份快照。
+- 4 条 P0-ESC 的页面级重复核对维持 UNKNOWN（虚拟窗口外，滚动通道被页面活性竞态阻断）。
+- 扩展协议与 daemon 混版风险已在本机排除（两侧都是 0.4.1/protocol 1.8），
+  但 0.4.1 起「混版不支持」是硬约束，已进 `doctor --explain` 的告警表。
+
 ## 0.1.6（2026-11-02，窗口/tab 资源治理闭环 + 介入语义修正）
 
 ### 变更
