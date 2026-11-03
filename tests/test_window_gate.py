@@ -23,6 +23,8 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 import wa  # noqa: E402
+import tabclaims  # noqa: E402
+import winlease  # noqa: E402
 
 
 def _state(tmp, **kw):
@@ -335,10 +337,39 @@ class TestTabScopeDictFormat(unittest.TestCase):
 
 
 class TestReapOwnTabs(unittest.TestCase):
-    """tab 回收（2026-11-02 用户指令：tab 累积）。只收自己会话 Agent Window 的
-    同地址重复与空白残留；用户窗口（scope=user）一律不碰。"""
+    """tab 回收（2026-11-02 裁定后重写）：判据来自所有权账本，不再靠 URL 猜。
 
-    def _run(self, tabs, dry=False):
+    bsk 的 tab list 不提供「谁开的」，所以旧用例（不登记账本就期望关标签）
+    已被裁定推翻——现在**没有 owner_key / 账本里没有记录就一个都不关**。
+    这里按新契约重建：先记账，再验证「只关闭自己持有 + 非活动 + 重复/空白」。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._db = os.environ.get(tabclaims.DB_ENV)
+        self._au = os.environ.get(tabclaims.AUDIT_ENV)
+        os.environ[tabclaims.DB_ENV] = os.path.join(self.tmp, "tab-claims.db")
+        os.environ[tabclaims.AUDIT_ENV] = os.path.join(self.tmp, "audit.jsonl")
+
+    def tearDown(self):
+        for k, v in ((tabclaims.DB_ENV, self._db), (tabclaims.AUDIT_ENV, self._au)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed(self, tab_ids, owner_key="ws", run_id="r1"):
+        conn = tabclaims.connect()
+        try:
+            for tid in tab_ids:
+                tabclaims.claim(conn, "s1", str(tid), owner_key, run_id=run_id,
+                                lease_id="L1", fencing_token=7)
+        finally:
+            conn.close()
+
+    def _run(self, tabs, dry=False, owner_key="ws", run_id="r1"):
         closes = []
 
         def fake_bsk(args, timeout=30, **kw):
@@ -350,7 +381,8 @@ class TestReapOwnTabs(unittest.TestCase):
             return 0, "{}", ""
 
         with mock.patch.object(wa, "bsk", side_effect=fake_bsk):
-            rep = wa.reap_own_tabs("s1", "https://chatgpt.com/c/conv", dry=dry)
+            rep = wa.reap_own_tabs("s1", "https://chatgpt.com/c/conv", dry=dry,
+                                   owner_key=owner_key, run_id=run_id)
         return rep, closes
 
     def test_closes_duplicates_and_blanks_keeps_newest(self):
@@ -362,17 +394,47 @@ class TestReapOwnTabs(unittest.TestCase):
             {"tab_id": 4, "url": "https://other.example/x", "scope": "agent"},
             {"tab_id": 5, "url": "https://user.example/y", "scope": "user"},
         ]
+        self._seed([1, 2, 3, 4])
         rep, closes = self._run(tabs)
         # 空白残留（有正常标签）+ 同地址重复的旧副本被回收；活动副本和独立标签保留
         self.assertEqual(sorted(closes), ["1", "2"])
         self.assertEqual(rep["user_scope"], 1)   # 用户标签只报告不动
         self.assertNotIn("5", closes)
 
+    def test_no_owner_key_closes_nothing(self):
+        """没有 owner_key = 无法证明归属 → 一个都不关（裁定：宁可积累也不误关）。"""
+        tabs = [{"tab_id": 1, "url": "about:blank", "scope": "agent"},
+                {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"}]
+        self._seed([1, 2])
+        rep, closes = self._run(tabs, owner_key="")
+        self.assertEqual(closes, [])
+        self.assertTrue(all(r.get("why") == "no_owner_key"
+                            for r in rep["report_only"]))
+
+    def test_unclaimed_tab_never_closed(self):
+        """账本里没有记录的标签不属于任何任务 → 只报告，不关。"""
+        tabs = [{"tab_id": 1, "url": "about:blank", "scope": "agent"},
+                {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
+                {"tab_id": 3, "url": "https://chatgpt.com/c/conv", "scope": "agent"}]
+        self._seed([3])          # 只有 3 是「我」的
+        rep, closes = self._run(tabs)
+        self.assertEqual(closes, [])
+        why = {r["tab_id"]: r["why"] for r in rep["report_only"]}
+        self.assertEqual(why.get("1"), "not_owner")
+
+    def test_other_owners_tab_never_closed(self):
+        tabs = [{"tab_id": 1, "url": "about:blank", "scope": "agent"},
+                {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"}]
+        self._seed([1, 2], owner_key="other-ws", run_id="r9")
+        rep, closes = self._run(tabs)
+        self.assertEqual(closes, [])
+
     def test_all_blank_keeps_one(self):
         tabs = [
             {"tab_id": 1, "url": "about:blank", "scope": "agent"},
             {"tab_id": 2, "url": "about:blank", "scope": "agent", "active": True},
         ]
+        self._seed([1, 2])
         rep, closes = self._run(tabs)
         self.assertEqual(closes, ["1"])  # 只剩空白页时保留最新一个（导航目标）
 
@@ -382,10 +444,22 @@ class TestReapOwnTabs(unittest.TestCase):
             {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
             {"tab_id": 3, "url": "https://chatgpt.com/c/conv", "scope": "agent"},
         ]
+        self._seed([1, 2, 3])
         rep, closes = self._run(tabs, dry=True)
         self.assertEqual(closes, [])
         self.assertEqual(len(rep["closed"]), 2)
         self.assertTrue(all(c.get("note") == "DRY-RUN" for c in rep["closed"]))
+
+    def test_ledger_unavailable_closes_nothing(self):
+        """账本打不开 = 无法证明归属 = 一个都不许关（fail-closed）。"""
+        tabs = [{"tab_id": 1, "url": "about:blank", "scope": "agent"},
+                {"tab_id": 2, "url": "https://chatgpt.com/c/conv", "scope": "agent"}]
+        os.environ[tabclaims.DB_ENV] = self.tmp   # 目录当文件 → connect 失败
+        rep, closes = self._run(tabs)
+        self.assertEqual(closes, [])
+        self.assertIn("error", rep)
+        self.assertTrue(all(r.get("why") == "ledger_unavailable"
+                            for r in rep["report_only"]))
 
     def test_close_failure_recorded_not_raised(self):
         def fake_bsk(args, timeout=30, **kw):
@@ -395,9 +469,12 @@ class TestReapOwnTabs(unittest.TestCase):
                     {"tab_id": 2, "url": "https://x", "scope": "agent"}]}), ""
             return 1, "", "borrow required"
 
+        self._seed([1, 2])
         with mock.patch.object(wa, "bsk", side_effect=fake_bsk):
-            rep = wa.reap_own_tabs("s1")
+            # 默认 dry=True（裁定：默认只报告）；这里要验证真实关闭失败被记录不抛
+            rep = wa.reap_own_tabs("s1", owner_key="ws", run_id="r1", dry=False)
         self.assertEqual(rep["closed"], [])
+        self.assertTrue(rep["close_failed"])   # 失败进 close_failed，不抛异常
         self.assertEqual(len(rep["close_failed"]), 1)
 
     def test_tab_list_failure_is_reported_not_fatal(self):
@@ -447,3 +524,160 @@ class TestHealReuseBeforeCreate(unittest.TestCase):
         rep, calls = self._heal("", "")
         self.assertTrue(rep["ok"])
         self.assertIn(["tab", "create", "--session", "sess1"], calls)
+
+
+class TestNavigateGate(unittest.TestCase):
+    """导航所有权硬门（裁定 §2）：证明不了归属就不许写。
+
+    判据来自账本 + 窗口租约，不看 URL、不看「同 session」。这里把 bsk 与
+    winlease.read 都替身掉，只验证状态迁移本身。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
+        self._db = os.environ.get(tabclaims.DB_ENV)
+        self._au = os.environ.get(tabclaims.AUDIT_ENV)
+        os.environ[tabclaims.DB_ENV] = os.path.join(self.tmp, "c.db")
+        os.environ[tabclaims.AUDIT_ENV] = os.path.join(self.tmp, "a.jsonl")
+        self.path, self.st = _state(self.tmp, run_id="r1", browser="inst1")
+        self.st["run_id"] = "r1"
+        wa._remember_ctx(self.st, self.path)
+        self.lease = {"lease_id": "L1", "fencing": 3, "lease_until": time.time() + 300}
+        p = mock.patch.object(wa.winlease, "read", side_effect=lambda inst: self.lease)
+        p.start()
+        self.addCleanup(p.stop)
+        tabs = [{"tab_id": 1, "url": "https://chatgpt.com/c/x", "scope": "agent",
+                 "active": True, "window_id": 9}]
+        q = mock.patch.object(wa, "_agent_tabs", return_value=tabs)
+        q.start()
+        self.addCleanup(q.stop)
+
+    def tearDown(self):
+        for k, v in ((tabclaims.DB_ENV, self._db), (tabclaims.AUDIT_ENV, self._au)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _owner(self):
+        return wa._win_owner(self.st, self.path)["workspace"]
+
+    def _seed(self, owner, lease_id="L1", fencing=3, intent="reused", state=None,
+              must=0):
+        conn = tabclaims.connect()
+        try:
+            tabclaims.claim(conn, "sess1", "1", owner, run_id="r1",
+                            lease_id=lease_id, fencing_token=fencing, intent=intent)
+            if state:
+                conn.execute("UPDATE tabs SET state=? WHERE tab_id='1'", (state,))
+            if must:
+                conn.execute("UPDATE tabs SET must_reinspect=1 WHERE tab_id='1'")
+        finally:
+            conn.close()
+
+    def test_no_ctx_fails_closed(self):
+        wa._LAST_CTX["st"] = None
+        try:
+            g = wa.navigate_gate("sess1", "https://x")
+        finally:
+            wa._remember_ctx(self.st, self.path)
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "no_owner_ctx")
+
+    def test_iab_exempt(self):
+        self.assertTrue(wa.navigate_gate("iab", "https://x")["ok"])
+
+    def test_unclaimed_is_claimed_then_allowed(self):
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertTrue(g["ok"], g)
+        self.assertEqual(g["why"], "claimed_now")
+
+    def test_own_tab_allowed(self):
+        self._seed(self._owner())
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertTrue(g["ok"], g)
+
+    def test_other_owner_alive_refused(self):
+        self._seed("someone-else", lease_id="L1", fencing=3)   # 租约还是活的
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "lease_alive")
+
+    def test_expired_lease_but_holder_alive_refused(self):
+        """租约过期 ≠ 任务已死（2026-11-02 复审裁定）：进程还在就不许接管。"""
+        rec = winlease.make_owner(workspace=self.tmp, run_id="other")
+        rec["lease_id"] = "L-OLD"
+        rec["lease_until"] = time.time() - 5          # 授权已过期
+        self.lease = rec                              # 但 pid 就是本测试进程（活）
+        self._seed("someone-else", lease_id="L-OLD", fencing=1)
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "owner_unknown_pid_alive")
+
+    def test_cross_host_lease_expired_refused(self):
+        """跨主机不能凭本地租约失效接管：必须另有隔离/停止证据。"""
+        self.lease = {"lease_id": "L-OLD", "lease_until": time.time() - 5,
+                      "host": "another-box", "pid": 4242, "pid_start": 1.0}
+        self._seed("someone-else", lease_id="L-OLD", fencing=1)
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "owner_unknown_host_mismatch")
+
+    def test_no_lease_record_refused(self):
+        """租约文件没了 = 拿不到进程身份 = 证明不了死亡 → 不接管。"""
+        self.lease = None
+        self._seed("someone-else", lease_id="L-OLD", fencing=1)
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "owner_unknown_no_lease")
+
+    def test_owner_dead_taken_over(self):
+        """旧授权失效 + 原持有者进程确认死亡 → 接管（组窗口复用的合法移交）。"""
+        self.lease = {"lease_id": "L-OLD", "fencing": 1,
+                      "lease_until": time.time() - 60,
+                      "host": __import__("socket").gethostname(),
+                      "pid": 999999, "pid_start": 1.0}     # 不存在的 PID
+        self._seed("someone-else", lease_id="L-OLD", fencing=1)
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertTrue(g["ok"], g)
+        self.assertEqual(g["why"], "took_over_stale")
+        self.assertEqual(g["evidence"], "holder_dead_pid_gone")
+        conn = tabclaims.connect()
+        try:
+            row = tabclaims.get(conn, "sess1", "1")
+        finally:
+            conn.close()
+        self.assertEqual(row["owner_key"], self._owner())
+        # 本用例里 mock 让「我们的租约」与「死者租约」共用一条记录，所以 lease_id
+        # 仍是 L-OLD；关键是 owner_key 换了人、审计记成 stale holder。
+        self.assertEqual(row["state"], tabclaims.STATE_CLAIMED)
+
+    def test_pid_reused_taken_over(self):
+        """PID 被别的进程复用（启动时间不符）→ 原持有者已死，可接管。"""
+        self.lease = {"lease_id": "L-OLD", "fencing": 1,
+                      "lease_until": time.time() - 60,
+                      "host": __import__("socket").gethostname(),
+                      "pid": os.getpid(), "pid_start": 1.0}   # 时间明显不符
+        self._seed("someone-else", lease_id="L-OLD", fencing=1)
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertTrue(g["ok"], g)
+        self.assertEqual(g["evidence"], "holder_dead_pid_reused")
+
+    def test_borrowed_refused(self):
+        self._seed(self._owner(), intent="borrowed")
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "borrowed_read_only")
+
+    def test_unknown_refused(self):
+        self._seed(self._owner(), state="unknown")
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertEqual(g["why"], "state_unknown")
+
+    def test_ledger_unavailable_fails_closed(self):
+        os.environ[tabclaims.DB_ENV] = self.tmp        # 目录当文件 → 打不开
+        g = wa.navigate_gate("sess1", "https://x")
+        self.assertFalse(g["ok"])
+        self.assertIn("TABCLAIM", g["why"])            # 报清「账本不可用」而不是沉默放行

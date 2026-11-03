@@ -138,9 +138,12 @@ bsk navigate --session <new_sid> "<同一个 conv_id 地址>"  # 5) 按 conv_id 
 | 用户窗口 | scope=user 的标签**只报告不动**，由人关闭 | `window_report` 的 bound_in_user 上报 |
 
 - 脚本层直接 `bsk tab create/close` = 违例（`contract_lint.no_raw_tab_ops` FAIL）。
-- L2 PATH shim 在调用层拦截：非 wa.py 来源的 `bsk session start` 须过全局计数，
-  无 `STARPILOT_WINDOW_GATE=1` 令牌直接拒绝并指引正路（shim 失败时 fail-open
-  并告警——可用性优先，正路那边仍有 L3+计数双保险）。
+- L2 PATH shim 在调用层拦截：wa.py 正路用**一次性 HMAC 票据**
+  （`STARPILOT_WINDOW_TICKET`，`winlease.gate_issue` 签发、shim 兑换即焚、120s
+  过期、不可重放）直接放行；无票的非 wa.py 来源须过全局计数，超限拒绝并指引正路。
+  **旧 `STARPILOT_WINDOW_GATE=1` 已废弃**（布尔量谁都能设，等于没有门）。
+- **fail-closed**：shim 自身故障（winlease 不可导入 / 计数读不出 / 记账写不进 /
+  票据校验异常）一律 rc=9 拒绝，不再 fail-open 放行。
 
 **人的想法转达**：流程中人提出的想法/意见/疑问（含选型类）必须原样整体转达
 webai，由 webai 出决策与方案；agent 只补事实与现场证据（SKILL §5.5b）。

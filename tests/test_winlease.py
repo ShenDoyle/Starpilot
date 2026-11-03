@@ -290,3 +290,64 @@ class TestWaitBudget(Base):
             self.assertEqual(winlease.wait_budget(), 30.0)
             # 有人值守的轮换预算=无人值守（用户裁定：人工介入不打断）
             self.assertEqual(winlease.wait_budget(False), 600.0)
+
+class TestHolderDeath(Base):
+    """接管前置证据：必须证明原持有者**进程**已经不在（租约过期只说明授权失效）。
+
+    这条用例不 mock：真的起一个子进程、读它的 owner 记录、再杀掉它、再判定。
+    """
+
+    def _spawn_owner(self):
+        import subprocess
+        code = ("import sys,json;sys.path.insert(0,%r);import winlease;"
+                "print(json.dumps(winlease.make_owner(workspace='x',run_id='r')))"
+                % os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, timeout=60).stdout.strip()
+        rec = json.loads(out)
+        # 子进程已经把 owner 记录交出来了，自己退出；等它真的没了
+        return rec
+
+    def test_pid_gone_detected(self):
+        rec = self._spawn_owner()
+        rec["pid"] = 0x7FFFFFF0                    # 不可能存在的 PID
+        dead, why = winlease.holder_dead(rec)
+        self.assertTrue(dead)
+        self.assertEqual(why, "pid_gone")
+
+    def test_live_process_not_dead(self):
+        rec = self._spawn_owner()
+        rec["pid"] = os.getpid()
+        rec["pid_start"] = winlease.pid_start_time(os.getpid())
+        dead, why = winlease.holder_dead(rec)
+        self.assertFalse(dead)
+        self.assertEqual(why, "pid_alive")
+
+    def test_pid_reuse_detected(self):
+        rec = self._spawn_owner()
+        rec["pid"] = os.getpid()
+        rec["pid_start"] = 1.0                     # 明显不是本进程的启动时间
+        dead, why = winlease.holder_dead(rec)
+        self.assertTrue(dead)
+        self.assertEqual(why, "pid_reused")
+
+    def test_other_host_not_dead(self):
+        rec = self._spawn_owner()
+        rec["host"] = "some-other-host"
+        dead, why = winlease.holder_dead(rec)
+        self.assertFalse(dead)
+        self.assertEqual(why, "host_mismatch")
+
+    def test_missing_pid_start_is_conservative(self):
+        rec = self._spawn_owner()
+        rec["pid"] = os.getpid()
+        rec.pop("pid_start", None)
+        dead, why = winlease.holder_dead(rec)
+        self.assertFalse(dead)                     # 无法排除复用 → 当活着
+        self.assertEqual(why, "start_unknown")
+
+    def test_make_owner_records_pid_start(self):
+        rec = winlease.make_owner(workspace="w")
+        self.assertTrue(rec.get("pid_start"))
+        self.assertEqual(rec.get("host"), __import__("socket").gethostname())
+

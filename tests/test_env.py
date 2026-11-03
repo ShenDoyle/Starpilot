@@ -40,7 +40,12 @@ class TestFindBsk(unittest.TestCase):
     def test_falls_back_to_path(self):
         d = tempfile.mkdtemp()
         p = _touch(os.path.join(d, "bsk"))
-        self.assertEqual(ev.find_bsk(env={}, which=lambda n: p), p)
+        # 必须隔离「本机真实安装目录」：find_bsk 会先探 ~/.local/bin/bsk.bin.exe，
+        # 本机装过 bsk 时它会先命中，测试就会随环境变红（2026-11-02 复审要求：
+        # 测试不得依赖本机安装状态，也不许跳过失败项）。
+        with mock.patch.object(ev.os.path, "expanduser",
+                               side_effect=lambda s: "/nonexistent" + s):
+            self.assertEqual(ev.find_bsk(env={}, which=lambda n: p), p)
 
     def test_none_when_nothing(self):
         with mock.patch.object(ev.os.path, "expanduser", side_effect=lambda s: "/nonexistent" + s):

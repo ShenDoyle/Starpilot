@@ -149,8 +149,13 @@ PLATFORMS = {
         # 已实测的写入路径：只有 exec（execCommand）这一条被允许真实写
         "write_allowed": ["exec"],
         "sel": {
-            # 2026-11-02 实测：编辑器是 ProseMirror 根节点；旧 #prompt-textarea 作后备
-            "editor": ["div.ProseMirror", "#prompt-textarea",
+            # 2026-11-02 实测（第二变种，晚间）：页面上现在有 **8 个** div.ProseMirror
+            # （消息气泡里的渲染块 + 写作块全是同名节点）。选择器一旦匹配多个，
+            # bsk 的 focus/press 直接拒绝（`selector matched 8 elements`），
+            # 于是 clear/fill 全部失败，输入框残留永远清不掉。
+            # 唯一能命中主输入框的是 `form div.ProseMirror`（实测 length=1）。
+            "editor": ["form div.ProseMirror", "div.ProseMirror",
+                       "#prompt-textarea",
                        "main div[contenteditable=\"true\"]",
                        "div[contenteditable=\"true\"]"],
             # 2026-11-02 实测：发送是表单提交按钮（aria=发送）；testid 已弃用，留作后备
@@ -1212,6 +1217,48 @@ def js_fill(p, text):
                           head: t.slice(0, 40), tail: t.slice(-40) });
 """ % (_css(s["editor"]), payload, payload, payload)
         return "(() => {\n%s\n%s\n})()" % (_JS_PICK, body)
+
+
+def js_fill_append(p, text):
+    """在编辑器**末尾追加**文本（不覆盖已有内容）——长文分块写入用。
+
+    为什么需要分块（2026-11-02 实测）：ChatGPT 的 exec 一次性 insertText 3000+ 字，
+    页面重排 + ProseMirror 事务会让 CDP 会话挂住（`Previous operation is still
+    settling` / `A page frame is not responding`），随后整个会话连 tab list 之外的
+    动作全部不可用，只能重启会话。分块后每块事务更小，实测不再挂。
+
+    光标落点用 Range.collapse(false) 折叠到编辑器末尾；textarea 直接拼 value。
+    """
+    s = p["sel"]
+    payload = json.dumps(text, ensure_ascii=False)
+    body = """
+  const el = pick(%s);
+  if (!el) return JSON.stringify({ ok: false, why: 'no-editor' });
+  el.focus();
+  const isTA = (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT');
+  if (isTA) {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      desc.set.call(el, (el.value || '') + %s);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch (e) {
+      el.value = (el.value || '') + %s;
+    }
+  } else {
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (e) {}
+    try { document.execCommand('insertText', false, %s); } catch (e) {}
+  }
+  const t = isTA ? (el.value || '') : (el.innerText || '');
+  return JSON.stringify({ ok: true, len: t.trim().length, tail: t.slice(-30) });
+""" % (_css(s["editor"]), payload, payload, payload)
+    return "(() => {\n%s\n%s\n})()" % (_JS_PICK, body)
 
 
 

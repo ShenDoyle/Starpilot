@@ -269,13 +269,18 @@ DeepSeek 同对话 2 个副本；12/13 落在**用户窗口**（扩展处于共�
 
 - 装置：`~/.local/bin/bsk.exe` 改名 `bsk.bin.exe`，原位放 `bsk.cmd`——仅
   `session start` 路由到 `bsk_shim.py`，其余子命令零开销直通真身；
-- 令牌：wa.py 的 `_bsk_raw` 对 session start 注入 `STARPILOT_WINDOW_GATE=1`
-  （正路已过租约+计数，shim 放行，不二次计数）；
-- 无令牌（非 wa.py 来源）：过全局计数账本（锁目录 `session-starts.json`，与 wa.py
+- 票据（2026-11-02 复审改造）：wa.py 的 `_bsk_raw` 对 session start 注入
+  `STARPILOT_WINDOW_TICKET`（`winlease.gate_issue` 签发的一次性 HMAC 票据：
+  `nonce.ts.hmac`，落 `~/.starpilot/locks/gate-tickets/`，shim 兑换即焚、120s
+  过期）。正路已过租约+计数，凭票放行、不二次计数；
+  **旧 `STARPILOT_WINDOW_GATE=1` 已废弃**——可伪造的布尔量不构成门。
+- 无票据（非 wa.py 来源）：过全局计数账本（锁目录 `session-starts.json`，与 wa.py
   同一份）——未超限：记账放行；超限：拒绝（rc=9）并指引走 `wa.py`；
-- 失效语义：shim 自身故障 **fail-open 并告警**（可用性优先；正路侧仍有
-  L3 唯一入口 + lint 双保险）。`env.py --install` 重装 bsk 会还原 exe、绕过 shim，
-  需重跑 shim 安装器。
+- 失效语义（复审后改）：**fail-closed**——shim 自身故障（winlease 不可导入、
+  计数读不出、记账写不进、票据校验抛异常）一律拒绝（rc=9），不再 fail-open。
+  `env.py --install` 重装 bsk 会还原 exe、绕过 shim，需重跑 shim 安装器；
+  **升级顺序**：先同步 `scripts/`（含 winlease 票据能力）再重装 shim，否则票据
+  签不出 → 正路被自己的 shim 拒绝。
 
 ### 11.9 介入语义修正（2026-11-02 用户裁定）
 

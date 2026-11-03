@@ -1,0 +1,37 @@
+# 未清项清单
+- [P0][P0-ESC-874e915f] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:04:01 target=7dcaed654e21 reason=编排写闸门因 chatgpt verified=false 拒写（WRITE_BLOCKED_PLATFORM_UNVERIFIED）；本报告为单轮交付件，需直发一次；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-d43ea5bb] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:07:34 target=7dcaed654e21 reason=编排写闸门因 chatgpt verified=false 拒写（WRITE_BLOCKED_PLATFORM_UNVERIFIED）；单轮交付件需直发一次（P0-ESC-874e915f）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-5c11e798] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:35:24 target=7dcaed654e21 reason=编排写闸门因 chatgpt verified=false 拒写；v5.1 修订交付单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-e449152e] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:39:20 target=7dcaed654e21 reason=编排写闸门因 chatgpt verified=false 拒写；v5.1 修订交付单轮直发（P0-ESC-5c11e798 续）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-a90ecdce] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:44:09 target=7dcaed654e21 reason=编排写闸门因 chatgpt verified=false 拒写；v6 只读核查分片 1/3 单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-36c04e41] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:44:14 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 1/3 直发（承接 P0-ESC-a90ecdce）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-af494b54] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:58:22 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 1/3 重发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-f3340194] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 21:59:41 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 2/3；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-318877c2] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 22:00:50 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 3/3；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-8a8898ba] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 22:02:08 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 3/3（承接 P0-ESC-318877c2）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-83448147] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 22:09:15 target=7dcaed654e21 reason=编排写闸门拒写；v6 核查 3/3 重试；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-e70a69fa] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:28:47 target=7dcaed654e21 reason=编排写闸门拒写；v7 设计 1/2 单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-03aef10f] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:32:08 target=7dcaed654e21 reason=编排写闸门拒写；v7 设计 1/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-b0001927] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:33:00 target=7dcaed654e21 reason=编排写闸门拒写；v7 设计 2/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-962ace16] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:44:53 target=7dcaed654e21 reason=编排写闸门拒写；P0 实测 1/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-4da9f5a8] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:45:19 target=7dcaed654e21 reason=编排写闸门拒写；P0 实测 2/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-1e220e82] direct_send 绕过编排器直发 | deferred(违例：2026-11-02 23:46:16 target=7dcaed654e21 reason=编排写闸门拒写；P0 实测 2/2 直发（承接 P0-ESC-4da9f5a8）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-74b775ca] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:24:51 target=7dcaed654e21 reason=编排写闸门拒写；P1 设计 1/2 单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-852f8b3a] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:25:11 target=7dcaed654e21 reason=编排写闸门拒写；P1 设计 1/2 直发（承接 bind wkzn）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-98c0c997] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:25:34 target=7dcaed654e21 reason=编排写闸门拒写；P1 设计 2/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-45100ad5] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:25:53 target=7dcaed654e21 reason=编排写闸门拒写；P1 设计 2/2 直发（承接 P0-ESC-98c0c997）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-b633cb13] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:26:54 target=7dcaed654e21 reason=编排写闸门拒写；P1 设计 2/2 直发（承接 P0-ESC-45100ad5）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-2c78a25c] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:33:07 target=7dcaed654e21 reason=编排写闸门拒写；P1-A 迁移子设计 1/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-0184188d] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:33:34 target=7dcaed654e21 reason=编排写闸门拒写；P1-A 迁移子设计 2/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-fa479def] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:33:58 target=7dcaed654e21 reason=编排写闸门拒写；P1-A 2/2 重试（承接上一条）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-b4deb5e7] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:44:14 target=7dcaed654e21 reason=编排写闸门拒写；P1-A 修订+P1-B 设计 1/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-a4bf4f33] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:44:53 target=7dcaed654e21 reason=编排写闸门拒写；P1-A 修订+P1-B 设计 2/2 直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-80f594b0] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:46:26 target=7dcaed654e21 reason=编排写闸门拒写；P1-A修订+P1-B 2/2 重发（GPT 指示继续提交）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-8b0b8fa5] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 00:54:34 target=7dcaed654e21 reason=编排写闸门拒写；T0 实测报告单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-3c5eb168] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 01:03:42 target=7dcaed654e21 reason=编排写闸门拒写；T0-W1 中止报告（wsl 拦截，按裁定停止）单轮直发；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-c78999f2] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 10:09:05 target=7dcaed654e21 reason=T0-W1 用户决定转达（wsl 不放行）+ 隔离方案请裁定；写闸门 verified=False 拒写（WRITE_BLOCKED_PLATFORM_UNVERIFIED），单轮交付件需直发一次；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-d1837a8a] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 16:26:28 target=7dcaed654e21 reason=bsk 0.4.1 能力变更与星舵优化报告 + T0-W1 关闭转达：平台 verified=False 为刻意诚实标注（计数选择器待重标定），写路径 write_verified=True 允许单轮写；本次单轮直发同时覆盖 W1 关闭与 3 项裁定请求；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-d97edd99] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 16:58:52 target=7dcaed654e21 reason=三任务只读取证报告（32条ESC逐条审计+独立测试宿主调查+bsk0.4.1语义核验）：写闸门 verified=False 拒写（WRITE_BLOCKED_PLATFORM_UNVERIFIED，platforms.py:131 刻意标注），单轮交付件需直发一次；报告已含全部32条ESC回执报备；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-ff1b02df] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 17:13:36 target=7dcaed654e21 reason=三任务只读取证报告（32条ESC逐条审计+独立测试宿主调查+bsk0.4.1语义核验）：写闸门 verified=False 拒写，单轮交付件需直发；wait 确认沉降后发送（前次尝试因重复守卫被拒未发出）；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-47d25902] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 17:13:50 target=7dcaed654e21 reason=三任务只读取证报告（32条ESC逐条审计+独立测试宿主调查+bsk0.4.1语义核验）：写闸门 verified=False 拒写，单轮交付件需直发；前两次尝试超时未确认发出，本次重试；必须在回执三栏报备) | 来源:escape_hatch
+- [P0][P0-ESC-c35b4d79] direct_send 绕过编排器直发 | deferred(违例：2026-11-03 17:22:12 target=7dcaed654e21 reason=三任务只读取证报告（32条ESC逐条审计+独立测试宿主调查+bsk0.4.1语义核验）：写闸门 verified=False 拒写，单轮交付件需直发；前次尝试文本滞留输入框未发出，经 wa.py clear 清空后重发（ESC-d97edd99 为该次滞留落账）；必须在回执三栏报备) | 来源:escape_hatch

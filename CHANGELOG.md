@@ -12,6 +12,21 @@
 - `contract_lint` 新增 `no_raw_tab_ops`（wa.py 之外禁裸调 tab create/close）；命令提取支持连字符子命令
 - SKILL §5.5 硬边界表扩为窗口/tab 双资源纪律；runbook window-session 新增 §8（tab 生命周期 + 介入语义）
 
+### 修复（Web AI 复审后，未发版）
+- **标签所有权账本** `scripts/tabclaims.py`：SQLite 权威（事务 + 主键 `(session,tab)`），
+  `tab-claims.jsonl` 仅审计；四项校验 owner_key/run_id/lease_id/fencing；状态机
+  claimed/closing/closed/unknown/orphan/owner_unknown；UNKNOWN 为隔离态不靠 TTL 解除。
+  接入点：`ensure_session`（三条复用/新建路径登记）、`heal_window_placement`、
+  `navigate_soft` 前 `navigate_gate` 硬门、`reap_own_tabs` 判据、`close_tab_guarded`。
+- **自动回收撤除**：ensure_session 两处 `reap_own_tabs` 调用删除（裁定：宁可暂时积累
+  标签也不误关别人的），`tab-reap` 默认 dry，需 `--apply`。
+- **L2 shim 改 fail-closed + 一次性票据**：废弃可伪造的 `STARPILOT_WINDOW_GATE=1`，
+  改 `STARPILOT_WINDOW_TICKET`（`winlease.gate_issue/gate_redeem`，HMAC + 用后即焚 +
+  120s）；shim 导入账本失败/计数读不出/记账失败/校验异常一律 rc=9（旧版 fail-open）。
+- `winlease` 补 `fencing` 世代号；`bskcompat` 适配 bsk 0.4.1（sync + 一次性 observation，
+  **JSON 解析**取 id）；ChatGPT 编辑器选择器改 `form div.ProseMirror`；长文分块写入
+  （800 字/0.35s）避免 CDP 挂死。
+
 ## 0.1.5（2026-11-02，窗口资源治理 v3：轮换协议/窗口组/禁无脑重开/全局看门狗，未单独发版）
 
 ### 变更

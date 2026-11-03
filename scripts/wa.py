@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confirm  # noqa: E402
 import platforms  # noqa: E402
 import statelock  # noqa: E402
+import tabclaims  # noqa: E402
 import winlease  # noqa: E402
 
 # ---------------------------------------------------------------- bsk 定位
@@ -76,6 +77,10 @@ def _transport_is_iab() -> bool:
 # 传输层为 iab 时不要求 bsk（自带浏览器驱动）；bsk 传输才需要可执行文件
 BSK = "" if _transport_is_iab() else bsk_path()
 
+# L2 shim 一次性票据的环境变量名（值由 winlease.gate_issue 生成，兑换即失效）。
+# 旧的 `STARPILOT_WINDOW_GATE=1` 已废弃——布尔量谁都能设，等于没有门（复审裁定）。
+GATE_TICKET_ENV = "STARPILOT_WINDOW_TICKET"
+
 
 def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, str]:
     """底层 bsk 调用统一入口。
@@ -103,12 +108,22 @@ def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, 
 
 def _bsk_raw(args: list, timeout: int) -> tuple[int, str, str]:
     env = None
-    # L2 shim 通行令牌（2026-11-02 用户指令「只要使用 bsk 必须遵守窗口规则」）：
-    # 本入口开窗已受 ensure_session 的租约+计数约束，向 shim 自证「走的是正路」，
-    # 免得被二道计数。只有 session start 需要令牌；其余子命令不加，避免 env 泄面。
+    # L2 shim 通行票据（2026-11-02 用户指令「只要使用 bsk 必须遵守窗口规则」；
+    # 同日复审裁定：原 `STARPILOT_WINDOW_GATE=1` 是可伪造的布尔量，任何人 set
+    # 一下就自称「内部正路」——改成一次性 HMAC 票据，只能由本入口签发、
+    # shim 兑换后即焚。只有 session start 需要票据；其余子命令不加，减少 env 泄面。
+    ticket_note = ""
     if len(args) >= 2 and args[0] == "session" and args[1] == "start":
-        env = dict(os.environ)
-        env["STARPILOT_WINDOW_GATE"] = "1"
+        try:
+            t = winlease.gate_issue()
+            env = dict(os.environ)
+            env[GATE_TICKET_ENV] = t["ticket"]
+        except Exception as e:
+            # 签不出票 = shim 会拒绝。这里不静默降级（那等于绕过门），
+            # 但也不假装成功：把原因带上，让失败可诊断。
+            ticket_note = "签发票据失败：%s" % (str(e)[:120])
+            sys.stderr.write("BSK-GATE: %s（L2 shim 将拒绝本次 session start）\n"
+                             % ticket_note)
     try:
         p = subprocess.run([BSK] + args, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout,
@@ -671,54 +686,139 @@ def _find_blank_tab(sid: str) -> str:
     return ""
 
 
-def reap_own_tabs(sid: str, bound: str = "", dry: bool = False) -> dict:
-    """回收**自己会话** Agent Window 里的陈旧标签（2026-11-02 用户指令：tab 累积）。
+def reap_own_tabs(sid: str, bound: str = "", dry: bool = True,
+                  owner_key: str = "", run_id: str = "") -> dict:
+    """列出/关闭**当前任务明确拥有**的陈旧标签（2026-11-02 Web AI 裁定后重写）。
 
-    边界（由 bsk `tab close` 双重保证：只关 Agent Window 内的标签）：
-    · 同地址重复（含绑定地址）：保留最新/活动的一个，其余关掉；
-    · 空白页残留：有正常标签时全关；只剩空白页时保留最新一个（新会话的导航目标）；
-    · scope=user 的标签一律**不碰**——数量上报，由人处理（bsk 无权关用户标签）。
+    bsk 的 `tab list` 不提供标签归属（只有 tab_id/window_id/active/scope），
+    `scope=agent` 只说明「在 Agent Window 里」，说明不了「谁开的」。所以回收
+    判据一律来自本地账本 `tabclaims`（SQLite 权威 + JSONL 审计），不看 URL 猜。
+
+    可关的硬条件（全部满足）：
+      · 账本里该 tab 的 owner_key（+run_id）＝当前任务；
+      · 状态 claimed、未标 must_reinspect、不是 borrowed（借用标签永不自动关）；
+      · 不是活动标签；
+      · 属于「明确空白残留」或「同任务同 URL 的第 2+ 个副本」。
+
+    其余一律只报告不关闭——裁定原话：「宁可暂时积累标签，也不能误关正在工作的
+    标签」。**默认 dry=True**，要真关必须显式 apply。
     """
-    rep = {"closed": [], "close_failed": [], "user_scope": 0, "dry": dry}
+    rep = {"closed": [], "report_only": [], "close_failed": [], "user_scope": 0,
+           "dry": dry, "session": sid}
     tabs = _agent_tabs(sid)
     if not tabs:
         rep["error"] = "tab list 失败或为空（会话可能已失效）"
         return rep
+    if not owner_key:
+        # 没有 owner 就无从判断归属 → 一律只报告（fail-closed 的不关一侧）
+        rep["report_only"] = [{"tab_id": t.get("tab_id"), "url": (t.get("url") or "")[:60],
+                               "why": "no_owner_key"} for t in tabs
+                              if t.get("scope") != "user"]
+        return rep
+    try:
+        conn = tabclaims.connect()
+    except tabclaims.TabClaimError as e:
+        # 账本不可用 = 无法证明归属 = 一个都不许关（fail-closed）
+        rep["error"] = e.as_dict()
+        rep["report_only"] = [{"tab_id": t.get("tab_id"), "url": (t.get("url") or "")[:60],
+                               "why": "ledger_unavailable"} for t in tabs
+                              if t.get("scope") != "user"]
+        return rep
+    try:
+        own_ids = {str(r["tab_id"]) for r in
+                   tabclaims.own_tabs(conn, sid, owner_key, run_id)}
+        # 对账：账本说有、BSK 已没有的，标 closed（不算我们关的）
+        rep["reconcile"] = tabclaims.reconcile(conn, sid, tabs)
+    finally:
+        conn.close()
+
+    agent_tabs = [t for t in tabs if t.get("scope") != "user"]
+    rep["user_scope"] = len(tabs) - len(agent_tabs)
+
+    # 分组只用于找「同任务同 URL 的副本」与「空白残留」，归属另由账本判定
     groups = {}
-    for t in tabs:
-        if t.get("scope") == "user":
-            rep["user_scope"] += 1
-            continue
+    for t in agent_tabs:
         u = _norm_url(t.get("url") or "")
         groups.setdefault(u if u not in BLANK_URLS else "__blank__", []).append(t)
-    close = []
     has_normal = any(u != "__blank__" for u in groups)
+
+    close, report = [], []
     for u, ts in groups.items():
-        ts_sorted = sorted(ts, key=lambda t: (bool(t.get("active")),
-                                              t.get("tab_id") or 0))
-        if u == "__blank__" and has_normal:
-            close.extend(ts_sorted)  # 有正常标签在，空白残留全关
-            continue
-        for t in ts_sorted[:-1]:  # 留最新/活动的那个
-            close.append(t)
-    for t in close:
-        tid = str(t.get("tab_id") or "")
-        u = (t.get("url") or "")[:60]
-        if not tid:
-            continue
-        if dry:
-            rep["closed"].append({"tab_id": tid, "url": u, "note": "DRY-RUN"})
-            continue
-        rc, out, err = bsk(["tab", "close", "--session", sid, tid], timeout=30)
-        if rc == 0:
-            rep["closed"].append({"tab_id": tid, "url": u})
+        ordered = sorted(ts, key=lambda t: (bool(t.get("active")),
+                                            t.get("tab_id") or 0))
+        if u == "__blank__":
+            # 空白页没有「有用副本」可言：还有正常标签时它们**全是残留**；
+            # 只剩空白页时必须留一个当导航目标。
+            keep = None if has_normal else ordered[-1]
+            candidates = list(ts) if has_normal else ordered[:-1]
         else:
-            rep["close_failed"].append({"tab_id": tid, "url": u,
-                                        "err": (err or out).strip()[:80]})
-    if rep["closed"]:
-        sys.stderr.write("tab 回收：关闭 %d 个陈旧标签（用户窗口标签 %d 个不动，由人处理）\n"
-                         % (len(rep["closed"]), rep["user_scope"]))
+            keep = ordered[-1]       # 同址保留最新/活动那个，其余算重复
+            candidates = ordered[:-1]
+        for t in candidates:
+            tid = str(t.get("tab_id") or "")
+            base = {"tab_id": tid, "url": (t.get("url") or "")[:60]}
+            if tid not in own_ids:
+                report.append(dict(base, why="not_owner"))
+            elif t.get("active"):
+                report.append(dict(base, why="active"))
+            else:
+                close.append(base)
+        # 保留的那个也报告出来，便于人核对（不关）
+        if keep is not None:
+            report.append({"tab_id": str(keep.get("tab_id") or ""),
+                           "url": (keep.get("url") or "")[:60], "why": "kept"})
+
+    rep["report_only"] = report
+    for c in close:
+        if dry:
+            rep["closed"].append(dict(c, note="DRY-RUN"))
+            continue
+        res = close_tab_guarded(sid, c["tab_id"], owner_key, run_id=run_id)
+        if res.get("ok"):
+            rep["closed"].append(c)
+        else:
+            rep["close_failed"].append(dict(c, err=res.get("code"),
+                                            detail=res.get("message", "")[:100]))
     return rep
+
+
+def close_tab_guarded(sid: str, tab_id: str, owner_key: str, *,
+                      run_id: str = "", fencing_token: int = 0,
+                      timeout: int = 30) -> dict:
+    """在资源保护下关闭一个标签（2026-11-02 裁定：tab close 页是副作用）。
+
+    顺序：账本 mark_closing（校验 owner/run/fencing）→ bsk tab close →
+    成功 `mark_closed`；结果不可判（超时 / cdp_failed / settling）→
+    `mark_unknown`（隔离 + must_reinspect，**不重试、不自动释放**）。
+    """
+    try:
+        conn = tabclaims.connect()
+    except tabclaims.TabClaimError as e:
+        return {"ok": False, "code": e.code, "message": e.message}
+    try:
+        try:
+            tabclaims.mark_closing(conn, sid, tab_id, owner_key, run_id=run_id,
+                                   fencing_token=fencing_token)
+        except tabclaims.TabClaimError as e:
+            return e.as_dict()
+        rc, out, err = bsk(["tab", "close", "--session", sid, str(tab_id)],
+                           timeout=timeout)
+        blob = ((err or "") + (out or "")).lower()
+        unknown = (rc == 124 or "timeout" in blob or "settling" in blob
+                   or "not responding" in blob or "cdp_failed" in blob)
+        if rc == 0:
+            tabclaims.mark_closed(conn, sid, tab_id)
+            return {"ok": True, "tab_id": str(tab_id)}
+        if unknown:
+            tabclaims.mark_unknown(conn, sid, tab_id, (err or out)[:120])
+            return {"ok": False, "code": "TAB_CLOSE_UNKNOWN",
+                    "message": "关闭结果未知，标签已隔离（must_reinspect），"
+                               "不许重试也不许当它不存在"}
+        tabclaims.mark_closed(conn, sid, tab_id)   # 明确失败（标签本就不存在等）
+        return {"ok": False, "code": "TAB_CLOSE_FAILED",
+                "message": (err or out).strip()[:120]}
+    finally:
+        conn.close()
 
 
 def heal_window_placement(st: dict, path: str, sid: str) -> dict:
@@ -734,6 +834,7 @@ def heal_window_placement(st: dict, path: str, sid: str) -> dict:
     if rep.get("ok") is not False:
         return rep
     bound = st.get("url") or ""
+    before = None          # None=复用语义；集合=本次新建的判定基线
     tid = find_tab_by_url(sid, bound)
     if tid:
         bsk(["tab", "select", "--session", sid, tid], timeout=30)
@@ -746,13 +847,18 @@ def heal_window_placement(st: dict, path: str, sid: str) -> dict:
             rc, out, err = navigate_soft(sid, bound)
             note = "复用空白标签 %s + 导航" % blank
         else:
+            before = {str(t.get("tab_id") or "") for t in _agent_tabs(sid)}
             rc, out, err = bsk(["tab", "create", "--session", sid], timeout=60)
             if rc != 0:
                 rep["heal"] = "tab create 失败：%s" % (err or out).strip()[:150]
                 return rep
             rc, out, err = navigate_soft(sid, bound)
             note = "tab create + 重新导航"
+    # 自愈动了页面 = 动了标签，必须同步账本：新建的记 opened，复用的记 reused。
+    # 登记失败不阻断自愈（rep 里带上结果，交给上层决定是否 fail-closed）。
+    rep_claim = claim_session_tabs(sid, st, path, before=before)
     rep2 = window_report(st, sid)
+    rep2["claim"] = rep_claim
     rep2["heal"] = ("%s%s" % (note, "成功" if rep2.get("ok") else
                     "后仍在用户窗口（扩展 Automation 设置为共享模式？更新扩展或改设置）"))
     if rep2.get("ok") and st is not None:
@@ -786,6 +892,9 @@ def window_verified(st: dict, path: str, sid: str, attempts: int = 3) -> str:
     """归属三态判定（探测重试 + 自愈一次）。结果写回 state 并带时间戳。"""
     if _transport_is_iab():
         return "iab"  # IAB 传输无窗口概念，不受此门约束
+    # 自愈会动标签（select / navigate / tab create），必须先有记账上下文，
+    # 否则 navigate_gate 拿不到 owner 就只能放行或一律拒绝，两种都不对。
+    _remember_ctx(st, path)
     v = "unknown"
     for i in range(attempts):
         rep = window_report(st, sid)
@@ -878,10 +987,10 @@ def cmd_window(a) -> int:
 
 
 def cmd_tab_reap(a) -> int:
-    """回收本会话 Agent Window 的陈旧标签（2026-11-02 用户指令：tab 累积）。
+    """列出/关闭当前任务**明确拥有**的陈旧标签（2026-11-02 Web AI 裁定后）。
 
-    只收两类：同地址重复（留最新/活动）与空白残留；用户窗口标签只报告不动。
-    ensure_session 的两条复用路径会自动跑本逻辑；这里给手动/巡检用。
+    归属判据来自账本（bsk 不提供标签所有权）。默认 dry（只报告），
+    加 --apply 才真关；非本任务持有、活动标签、借用标签一律不关。
     """
     path = state_path(a.state)
     st = load_state(path)
@@ -889,8 +998,11 @@ def cmd_tab_reap(a) -> int:
     if not sid:
         print("state 里没有会话：先 bind（回收无对象）。", file=sys.stderr)
         return 2
+    own = _win_owner(st, path)
     rep = reap_own_tabs(sid, st.get("url") or "",
-                        dry=bool(getattr(a, "dry_run", False)))
+                        dry=not bool(getattr(a, "apply", False)),
+                        owner_key=(own or {}).get("workspace") or "",
+                        run_id=(own or {}).get("run_id") or "")
     rep["session"] = sid
     print(json.dumps(rep, ensure_ascii=False, indent=2))
     return 0 if not rep.get("error") else 1
@@ -1095,6 +1207,232 @@ def enforce_single_session(keep: str = "", browser: str = "", owner: dict | None
         pass
 
 
+# 当前任务的 state / path 上下文（navigate 门需要它判断归属；ensure_session 写入）
+_LAST_CTX = {"st": None, "path": ""}
+
+
+def _remember_ctx(st: dict, path: str) -> None:
+    _LAST_CTX["st"], _LAST_CTX["path"] = st, path
+
+
+def _owner_ctx(st: dict, path: str, inst: str = "") -> dict:
+    """当前任务的归属四要素（owner_key / run_id / lease_id / fencing）。
+
+    四项缺一不可（裁定 §1）：只有 owner_key 能说明「谁」，lease_id + fencing
+    才能说明「这任租约还作数」，否则上一个任务留下的旧记录会被当成本任务的。
+    """
+    own = _win_owner(st, path)
+    inst = inst or _instance_id(st)
+    rec = winlease.read(inst) or {}
+    return {"owner_key": own.get("workspace") or "",
+            "run_id": own.get("run_id") or "",
+            "lease_id": rec.get("lease_id") or "",
+            "fencing": int(rec.get("fencing") or 0),
+            "inst": inst}
+
+
+def claim_tab(sid: str, tab_id: str, st: dict, path: str, *,
+              intent: str = tabclaims.INTENT_OPENED, url: str = "",
+              window_id=None, inst: str = "") -> dict:
+    """把单个标签登记到账本。**不抛异常**：登记失败只让后续导航门 fail-closed。"""
+    ctx = _owner_ctx(st, path, inst)
+    if not ctx["owner_key"] or not tab_id:
+        return {"ok": False, "why": "no_owner_key"}
+    try:
+        conn = tabclaims.connect()
+    except tabclaims.TabClaimError as e:
+        return {"ok": False, "code": e.code, "message": e.message}
+    try:
+        row = tabclaims.claim(conn, sid, str(tab_id), ctx["owner_key"],
+                              run_id=ctx["run_id"], lease_id=ctx["lease_id"],
+                              fencing_token=ctx["fencing"], instance_id=ctx["inst"],
+                              window_id=window_id, intent=intent, url=url)
+        return {"ok": True, "tab_id": str(tab_id), "fencing": row.get("fencing_token")}
+    except tabclaims.TabClaimError as e:
+        return e.as_dict()
+    finally:
+        conn.close()
+
+
+def _takeover_evidence(row: dict, inst: str = "") -> tuple:
+    """接管他人标签的证据链。返回 (allowed, why)。
+
+    2026-11-02 复审裁定：**租约失效是必要条件，不是充分条件**——它只说明旧授权
+    作废，不说明旧进程已死。必须同时证明：
+      ① 那任租约已失效（过期 / lease_id 换代 / 文件消失）；
+      ② 原持有者进程确实不在（host + pid + pid_start 三件套，防 PID 复用）。
+    证不出来 → OWNER_UNKNOWN，拒绝接管（不拿「等一会儿」冒充死亡证明）。
+    """
+    if not row:
+        return False, "owner_unknown_no_record"
+    try:
+        rec = winlease.read(row.get("instance_id") or inst) or {}
+    except Exception:
+        return False, "owner_unknown_lease_unreadable"
+    if not rec:
+        return False, "owner_unknown_no_lease"
+    same_lease = (rec.get("lease_id") or "") == (row.get("lease_id") or "")
+    try:
+        live = float(rec.get("lease_until") or 0) > time.time()
+    except Exception:
+        live = True
+    if same_lease and live:
+        return False, "lease_alive"          # 旧任务还活着，不许抢
+    dead, why = winlease.holder_dead(rec)
+    if not dead:
+        return False, "owner_unknown_%s" % why
+    return True, "holder_dead_%s" % why
+
+
+def _try_takeover(conn, sid: str, tid: str, ctx: dict, row: dict,
+                  url: str = "") -> dict:
+    """证据链通过才接管；否则返回失败（不抢）。"""
+    ok, why = _takeover_evidence(row, ctx["inst"])
+    if not ok:
+        return {"ok": False, "why": why}
+    try:
+        tabclaims.takeover(conn, sid, tid, ctx["owner_key"],
+                           run_id=ctx["run_id"], lease_id=ctx["lease_id"],
+                           fencing_token=ctx["fencing"], instance_id=ctx["inst"],
+                           reason=why, url=url)
+        return {"ok": True, "why": "took_over_stale", "evidence": why}
+    except tabclaims.TabClaimError as e:
+        return e.as_dict()
+
+
+def claim_session_tabs(sid: str, st: dict, path: str, inst: str = "",
+                       before=None) -> dict:
+    """把本会话 Agent Window 里的标签登记进账本（本任务持有）。
+
+    为什么要「登记已有的」：会话可能是上一个任务留下的（组窗口复用），
+    那些标签的归属在 bsk 侧查不到。这里按「先到先得」登记：账本里没有的记为
+    本任务 reused；已被别的任务登记的**不抢**，留给导航门去拒。
+
+    `before` 语义（区别 opened / reused，回收策略按这个区分对待）：
+      · None  → 没做前后对比，一律记 reused（保守：不当成自己新开的）；
+      · 集合  → 不在集合里的就是**本次新建**，记 opened。传空集合 = 全是新的。
+    """
+    ctx = _owner_ctx(st, path, inst)
+    if not ctx["owner_key"]:
+        return {"ok": False, "why": "no_owner_key"}
+    prev = None if before is None else set(str(x) for x in before)
+    claimed, opened, skipped = [], [], []
+    try:
+        conn = tabclaims.connect()
+    except tabclaims.TabClaimError as e:
+        # 账本不可用 = 无法证明归属 → 不猜、不登记；后续导航门会 fail-closed
+        sys.stderr.write("标签账本不可用（%s）：%s\n" % (e.code, e.message))
+        return {"ok": False, "code": e.code, "detail": e.message}
+    try:
+        for t in _agent_tabs(sid):
+            if t.get("scope") == "user":
+                continue
+            tid = str(t.get("tab_id") or "")
+            if not tid:
+                continue
+            intent = (tabclaims.INTENT_OPENED if (prev is not None and tid not in prev)
+                      else tabclaims.INTENT_REUSED)
+            try:
+                tabclaims.claim(conn, sid, tid, ctx["owner_key"],
+                                run_id=ctx["run_id"], lease_id=ctx["lease_id"],
+                                fencing_token=ctx["fencing"],
+                                instance_id=ctx["inst"],
+                                window_id=t.get("window_id"),
+                                intent=intent, url=t.get("url") or "")
+                claimed.append(tid)
+                if intent == tabclaims.INTENT_OPENED:
+                    opened.append(tid)
+            except tabclaims.TabClaimError as e:
+                # 旧任务留下的记录：原租约已失效就接管（组窗口复用的必经之路），
+                # 还活着就不抢。
+                if e.code in ("TAB_OWNED_BY_OTHER", "TAB_NOT_CLAIMABLE"):
+                    res = _try_takeover(conn, sid, tid, ctx,
+                                        tabclaims.get(conn, sid, tid) or {},
+                                        url=t.get("url") or "")
+                    if res.get("ok"):
+                        claimed.append(tid)
+                        continue
+                skipped.append({"tab_id": tid, "code": e.code})
+    finally:
+        conn.close()
+    if skipped:
+        sys.stderr.write("标签归属：%d 个标签仍在别的活任务名下，未接管（导航会被拒）\n"
+                         % len(skipped))
+    return {"ok": True, "claimed": claimed, "opened": opened, "skipped": skipped}
+
+
+def navigate_gate(sid: str, url: str) -> dict:
+    """导航前所有权硬门（2026-11-02 裁定 §2）。
+
+    只有「当前任务持有 + 租约有效 + fencing 未落后 + 状态可用」的标签可以导航；
+    无主标签先原子 claim 再放行；其余一律拒绝（别的任务持有 / 借用 /
+    正在关闭 / 已关闭 / unknown / must_reinspect）。
+    """
+    if sid == "iab":
+        # IAB 传输没有标签生命周期（宿主浏览器自己管），不适用本门
+        return {"ok": True, "why": "iab_no_tab_lifecycle"}
+    st, path = _LAST_CTX.get("st"), _LAST_CTX.get("path") or ""
+    if not st:
+        # 没有记账上下文 = 拿不到 owner_key/租约/fencing = 无法证明这个标签是我们的。
+        # 裁定 §2：证明不了就不许写。这里以前是 fail-open（「保持旧行为」），
+        # 2026-11-02 复审后改为 fail-closed——否则绕开 ensure_session 就能跳过所有权。
+        return {"ok": False, "why": "no_owner_ctx", "tab_id": "",
+                "message": "没有记账上下文（未经 ensure_session）：无法证明标签归属，拒绝导航"}
+    own = _win_owner(st, path)
+    owner_key = own.get("workspace") or ""
+    run_id = own.get("run_id") or ""
+    inst = _instance_id(st)
+    rec = winlease.read(inst) or {}
+    lease_id = rec.get("lease_id") or ""
+    fencing = int(rec.get("fencing") or 0)
+    ctx = {"owner_key": owner_key, "run_id": run_id, "lease_id": lease_id,
+           "fencing": fencing, "inst": inst}
+    tabs = [t for t in _agent_tabs(sid) if t.get("scope") != "user"]
+    if not tabs:
+        return {"ok": True, "why": "no_agent_tab"}
+    active = next((t for t in tabs if t.get("active")), tabs[0])
+    tid = str(active.get("tab_id") or "")
+    try:
+        conn = tabclaims.connect()
+    except tabclaims.TabClaimError as e:
+        # 账本不可用 → 不能证明归属 → 拒绝写入（fail-closed，但报清原因）
+        return {"ok": False, "why": e.code, "tab_id": tid, "message": e.message}
+    try:
+        ok, why, row = tabclaims.navigate_allowed(
+            conn, sid, tid, owner_key, run_id=run_id, lease_id=lease_id,
+            fencing_token=fencing)
+        if ok:
+            tabclaims.touch_url(conn, sid, tid, url, owner_key)
+            return {"ok": True, "why": why, "tab_id": tid}
+        if why == "unclaimed":
+            try:
+                tabclaims.claim(conn, sid, tid, owner_key, run_id=run_id,
+                                lease_id=lease_id, fencing_token=fencing,
+                                instance_id=inst, window_id=active.get("window_id"),
+                                intent=tabclaims.INTENT_REUSED, url=url)
+                return {"ok": True, "why": "claimed_now", "tab_id": tid}
+            except tabclaims.TabClaimError as e:
+                return {"ok": False, "why": e.code, "tab_id": tid,
+                        "message": e.message}
+        # 「别人的名字」不等于「别人还在用」，但「租约过期」也不等于「别人已经死了」。
+        # 只有证据链齐（旧授权失效 + 原持有者进程确认死亡）才接管，否则 OWNER_UNKNOWN。
+        if why in ("owned_by_other", "run_mismatch", "lease_mismatch",
+                   "stale_fencing"):
+            res = _try_takeover(conn, sid, tid, ctx, row or {}, url=url)
+            if res.get("ok"):
+                tabclaims.touch_url(conn, sid, tid, url, owner_key)
+                return {"ok": True, "why": res["why"], "tab_id": tid,
+                        "evidence": res.get("evidence")}
+            return {"ok": False, "why": res.get("why") or why, "tab_id": tid,
+                    "row": row,
+                    "message": ("该标签仍属另一个任务：%s。要接管必须证明原持有者"
+                                "进程已死（host+pid+pid_start），证不出来就拒绝。"
+                                % (res.get("why") or why))}
+        return {"ok": False, "why": why, "tab_id": tid, "row": row}
+    finally:
+        conn.close()
+
+
 def navigate_soft(sid: str, url: str, timeout: int = 180):
     """导航到 url，**容忍 `load` 事件不来**。
 
@@ -1106,6 +1444,11 @@ def navigate_soft(sid: str, url: str, timeout: int = 180):
     调用方必须再用「地址对不对 + 编辑器在不在」确认页面确实可用（那才是真正的判据）。
     返回 (rc, out, err)，err 里带上第一次失败原因，便于事后分辨「慢」与「坏」。
     """
+    gate = navigate_gate(sid, url)
+    if not gate.get("ok"):
+        return 3, "", ("导航被所有权门拒绝（%s，tab %s）：该标签不属于当前任务、"
+                       "或正处于 closing/unknown/借用状态。不抢别人的标签。"
+                       % (gate.get("why"), gate.get("tab_id")))
     rc, out, err = bsk(["navigate", url, "--session", sid, "--wait-until", "load"],
                        timeout=timeout)
     if rc == 0:
@@ -1182,12 +1525,21 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     if not browser and inst != "default":
         browser = inst
     own = _win_owner(st, path)
+    # 记账上下文：本进程内所有 navigate 都要过 `navigate_gate`，而门需要
+    # owner_key/run_id/lease/fencing。放在这里而不是各命令里，是因为
+    # ensure_session 是**唯一**拿租约的入口——绕开它就绕开了归属。
+    _remember_ctx(st, path)
     ids = [s.get("id") or s.get("session") or "" for s in list_sessions()]
     if sid and not renew:
         if sid in ids:
             winlease.claim_session(inst, sid, own)
             enforce_single_session(sid, browser, own)  # 只清自己名下/无主的
-            reap_own_tabs(sid, st.get("url") or "")    # tab 回收（2026-11-02 用户指令）
+            # 自动回收已停用（2026-11-02 Web AI 裁定）：bsk 的 tab list 不提供
+            # 创建者/任务归属（只有 tab_id/window_id/active/scope），凭 URL 猜归属
+            # 会误关别的任务正在用的标签。裁定原话：「宁可暂时积累标签，也不能
+            # 误关正在工作的标签」。回收改为显式手动入口 `wa.py tab-reap`
+            # （默认只报告），待标签归属账本落地后再谈自动化。
+            claim_session_tabs(sid, st, path, inst)   # 复用会话：只登记，不清理
             if browser and not st.get("browser"):
                 st["browser"] = browser  # env 给的实例也记下来，下次不必再传
                 save_state(path, st)
@@ -1200,7 +1552,10 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
             sid = gs[-1]
             winlease.claim_session(inst, sid, own)
             enforce_single_session(sid, browser, own)
-            reap_own_tabs(sid, st.get("url") or "")    # tab 回收（只收本任务名下陈旧标签）
+            # 组窗口复用路径**尤其不能**自动回收：组窗口本就是跨任务共享的会话，
+            # 这里的「同地址重复」很可能正是别的任务正在用的标签（2026-11-02
+            # Web AI 裁定）。只登记、不清理；清理走显式 `wa.py tab-reap`。
+            claim_session_tabs(sid, st, path, inst)   # 复用组窗口：只登记，不清理
             st["session"] = sid
             if browser and not st.get("browser"):
                 st["browser"] = browser
@@ -1222,9 +1577,20 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
     enforce_single_session("", browser, own)
     # 多浏览器（用户可能同时开多个 Edge profile）：state.browser 优先，其次 WA_BROWSER env
     args = ["session", "start", "--no-focus"]
+    # 0.4.1 新增 --name：任务名进 bsk 本地操作历史，session 归属可追溯
+    # （2026-11-03 优化：回应审计「session 无归属字段」缺口）。旧版不识别该
+    # 参数会整体失败，故失败且提示 unknown argument 时去掉重试一次。
+    sess_name = "starpilot-%s" % time.strftime("%m%d-%H%M%S")
+    args += ["--name", sess_name]
     if browser:
         args += ["--browser", browser]
     rc, out, err = bsk(args, timeout=120)
+    if rc != 0 and "unexpected argument" in (out + err).lower():
+        args = [a for a in args if a not in ("--name", sess_name)]
+        sess_name = ""
+        rc, out, err = bsk(args, timeout=120)
+    if rc == 0 and sess_name:
+        st["session_name"] = sess_name
     if rc != 0 and "multiple browsers" in (out + err).lower():
         inst = _first_browser_instance(rep["instances"])
         if inst:
@@ -1251,6 +1617,8 @@ def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
         st["browser"] = browser
     save_state(path, st)
     place_window(sid)
+    # 新会话：动作前这个会话一个标签都没有 → before=() 让登记记成 opened
+    claim_session_tabs(sid, st, path, inst, before=())
     bound = st.get("url") or ""
     if bound:
         rc, out, err, _reused = navigate_reuse(sid, bound)
@@ -1328,6 +1696,9 @@ def read_state(p: dict, sid: str, settle_ms: int = 600):
 
 # 写入路径：唯一实现放在本文件（wa 是传输层，闸门与 CLI 都走它）。
 NATIVE_MAX_CHARS = 12000   # 真实键盘输入要经命令行传值，超长有被截断/乱码的风险
+# exec/paste 写入的分块大小（2026-11-02 实测：单次 3000+ 字会挂死 CDP 会话）
+FILL_CHUNK = 800
+FILL_CHUNK_GAP = 0.35
 
 
 def fill_native(p: dict, text: str, sid: str, timeout: int = 180) -> dict:
@@ -1411,7 +1782,21 @@ def do_fill(p: dict, text: str, sid: str, timeout: int = 180, tries: int = 2) ->
                     "facts": chk.get("facts") or {}, "note": chk.get("note", "")}
             time.sleep(1)
             continue
-        ok, res = evaluate(platforms.js_fill(p, text), sid, timeout=timeout)
+        ok, res = True, None
+        # 长文分块写（2026-11-02 实测）：exec 一次性 insertText 3000+ 字会让页面
+        # 重排 + 编辑器事务过重，CDP 会话挂住（`Previous operation is still
+        # settling` / `A page frame is not responding`），之后整条会话连
+        # tab list 都不响应，只能重启会话重来——每条长报告都要多烧两轮。
+        # 首块用 js_fill（覆盖式），后续块用 js_fill_append（末尾追加）。
+        chunks = [text[j:j + FILL_CHUNK] for j in range(0, len(text), FILL_CHUNK)] or [""]
+        for ci, ch in enumerate(chunks):
+            js = (platforms.js_fill(p, ch) if ci == 0
+                  else platforms.js_fill_append(p, ch))
+            ok, res = evaluate(js, sid, timeout=timeout)
+            if not ok and res != "timeout":
+                break
+            if ci + 1 < len(chunks):
+                time.sleep(FILL_CHUNK_GAP)
         # 超时不算失败：长文本 RPC 超时但可能已写入，靠下面的字数自证
         if not ok and res != "timeout":
             last = {"ok": False, "method": method, "code": "fill_failed",
@@ -1451,6 +1836,9 @@ def clear_editor(p: dict, sid: str, tries: int = 2) -> dict:
     last = {"ok": False, "detail": "没有可用选择器"}
     for _ in range(max(1, tries)):
         for sel in eds:
+            # 先聚焦再全选：不聚焦时 Ctrl+A 落不到编辑器上（2026-11-02 实测：
+            # 直接 press Ctrl+A --selector 后再 Delete，输入框 226 字一字未少）
+            bsk(["focus", "--selector", sel, "--session", sid], timeout=60)
             bsk(["press", "Ctrl+A", "--selector", sel, "--session", sid], timeout=60)
             break
         bsk(["press", "Delete", "--session", sid], timeout=60)
@@ -2506,9 +2894,12 @@ def main(argv: list | None = None) -> int:
     p.set_defaults(func=cmd_window)
 
     p = sub.add_parser("tab-reap",
-                       help="回收本会话 Agent Window 的陈旧标签（同地址重复/空白残留）；"
-                            "用户窗口标签只报告不动")
-    p.add_argument("--dry-run", action="store_true")
+                       help="列出本会话 Agent Window 的陈旧标签（默认只报告）；"
+                            "加 --apply 才真关。用户窗口标签永不触碰")
+    p.add_argument("--apply", action="store_true",
+                   help="真的关闭（默认只报告）。bsk 不提供标签归属元数据，"
+                        "自动/默认关闭可能误关别的任务正在用的标签")
+    p.add_argument("--dry-run", action="store_true", help="兼容旧用法，等同默认行为")
     p.set_defaults(func=cmd_tab_reap)
 
     p = add_pl(sub.add_parser("lease", help="窗口租约：status/list 只读；release 放自己的；"

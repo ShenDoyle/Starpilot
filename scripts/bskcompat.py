@@ -40,21 +40,45 @@ import subprocess
 import time
 
 # 命中这些字样 = 缺 cooperate context 或 context 已过期，值得补救
+# 0.4.1（2026-11-02 自动升级）新增文案，全部要认得，否则补救不触发：
+#   · This action requires a valid control context from cooperate sync
+#   · this action needs an explicit current observation
+#   · This action requires an unused strict observation from cooperate sync
+#   · The media source changed; synchronize and replan
 _NEEDS_CONTEXT = (
     "requires the context returned by the latest cooperate sync",
+    "requires a valid control context",
+    "requires an unused strict observation",
+    "needs an explicit current observation",
     "observed content changed",
+    "media source changed",
     "shared page control or observation changed",
     "requires the context",
+    "control_context_invalid",
+    "document_changed",
 )
 
 # 这些子命令不触页面，补救没有意义
 _LOCAL_CMDS = {
     "session", "browsers", "doctor", "daemon", "status", "logs", "update",
-    "install-skill", "view", "debug",
+    "install-skill", "view", "debug", "cooperate",
+}
+
+# 会触页面的子命令：0.4.1 起这些**先** sync 再动作（预注入），不必先失败一次
+_PAGE_CMDS = {
+    "navigate", "navigate-back", "navigate-forward", "reload", "evaluate",
+    "fill", "press", "click", "hover", "wheel", "drag", "scroll-to",
+    "focus", "blur", "snapshot", "screenshot", "observe", "extract",
+    "get-html", "step", "emulate", "console", "network",
 }
 
 _CTX_RE = re.compile(r'"context_id"\s*:\s*"([^"]+)"')
+_OBS_RE = re.compile(r'"observation_id"\s*:\s*"([^"]+)"')
 _STOPPED_RE = re.compile(r'"stopped"\s*:\s*true')
+_VER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+_VER = None          # bsk 版本缓存：(major, minor, patch)
+_CTX_ARGS = ("--context", "--observation")
 
 
 def bsk_bin() -> str:
@@ -91,41 +115,128 @@ def _run(args, timeout):
 
 
 def _sync_context(sid):
-    """cooperate wait + sync，返回 context_id 或 None。"""
-    _run(["cooperate", "wait", "--session", sid], timeout=30)
-    rc, out, err = _run(["cooperate", "sync", "--session", sid], timeout=60)
-    blob = (out or "") + (err or "")
-    if _STOPPED_RE.search(blob):
-        return None  # 窗口被关/被停，救不了
-    m = _CTX_RE.search(blob)
-    return m.group(1) if m else None
+    """cooperate sync，返回 (context_id, observation_id) 或 None。
+
+    0.4.1（2026-11-02 实测）语义要点：
+
+    · sync **返回 rc!=0 就是没拿到上下文**（典型：`A page frame is not
+      responding` / `cooperation_sync_required`），此时绝不能当成功用——
+      否则动作不带 context 上去，只会报 `requires an unused strict
+      observation`，把真实病因盖掉。必须检查 rc。
+    · 这两种态 bsk 自己的 hint 就是「先 cooperate wait，再 sync」：wait 让
+      页面 frame 就绪，sync 才拿得到可用 observation。所以 wait 只在 **sync
+      失败后** 补救用，健康路径不跑（跑多了反而拖慢每次动作）。
+    · 0.4.1 起 navigate/fill/press 还要一个**一次性**的 strict observation
+      （`--observation`），也由 sync 返回；0.4.0 只认 context，多给参数会报错，
+      所以按版本决定是否带 observation。
+    """
+    blob = ""
+    for attempt in range(3):
+        rc, out, err = _run(["cooperate", "sync", "--session", sid,
+                             "--policy", "auto", "--json"], timeout=60)
+        blob = (out or "") + (err or "")
+        if _STOPPED_RE.search(blob):
+            return None  # 窗口被关/被停，救不了
+        if rc == 0:
+            pair = _parse_sync(out or "")
+            if pair:
+                return pair
+        # frame 未就绪：按 bsk hint 先 wait 等它就绪，再 sync 一次
+        _run(["cooperate", "wait", "--session", sid, "--json"], timeout=60)
+        time.sleep(1.0)
+    return None
+
+
+def _parse_sync(text):
+    """从 sync 输出里取 (context_id, observation_id)。
+
+    **必须用 JSON 解析，不能用正则扫第一个匹配**（2026-11-02 踩坑）：0.4.1 的
+    sync 响应里 `observation_id` 会出现多次（顶层 + 历史/嵌套里的旧值），正则
+    `"observation_id": "..."` 取到的是**旧的那个**，于是动作永远报
+    `requires an unused strict observation from cooperate sync` —— 表面上像是
+    「策略要求没满足」，实际是取错了 ID，排查会绕很远。
+    """
+    try:
+        d = json.loads(text)
+    except Exception:
+        d = None
+    if isinstance(d, dict):
+        ctx = d.get("context_id")
+        if isinstance(ctx, str) and ctx:
+            obs = d.get("observation_id")
+            return (ctx, obs if isinstance(obs, str) else "")
+        # 兼容包一层 data 的形状
+        inner = d.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("context_id"), str):
+            obs = inner.get("observation_id")
+            return (inner["context_id"], obs if isinstance(obs, str) else "")
+    mc = _CTX_RE.search(text or "")
+    if mc:
+        mo = _OBS_RE.search(text or "")
+        return (mc.group(1), mo.group(1) if mo else "")
+    return None
+
+
+def _version():
+    """bsk 版本（缓存）。取不到按 (0,0,0) 处理 = 不预注入、不传 observation。"""
+    global _VER
+    if _VER is None:
+        rc, out, err = _run(["--version"], 20)
+        m = _VER_RE.search((out or "") + (err or ""))
+        _VER = tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+    return _VER
+
+
+def _ctx_args(pair):
+    """把 sync 结果拼成命令行参数（老版本只给 --context）。"""
+    if not pair:
+        return []
+    ctx, obs = pair
+    args = ["--context", ctx]
+    if obs and _version() >= (0, 4, 1):
+        args += ["--observation", obs]
+    return args
+
+
+def _strip_ctx(args):
+    """去掉调用方自带的旧 --context/--observation，避免重复参数。"""
+    out, i = [], 0
+    while i < len(args):
+        if args[i] in _CTX_ARGS:
+            i += 2
+            continue
+        out.append(args[i])
+        i += 1
+    return out
 
 
 def run(bsk_fn, args, timeout):
     """bsk_fn(标准 subprocess 包装) 的上下文感知包装。
 
     bsk_fn: wa.py 的原 bsk()（保证超时/编码语义一致）。返回 (rc, out, err)。
+
+    流程（0.4.1 起）：触页面的命令**先** sync 拿到 (context, observation)，
+    带着参数一次做成；失败再按错误文案补救，最多两轮。本地命令零开销直通。
     """
-    rc, out, err = bsk_fn(args, timeout)
+    args = list(args)
+    cmd0 = args[0] if args else ""
+    if cmd0 in _LOCAL_CMDS:
+        return bsk_fn(args, timeout)
+    sid = _sid_of(args)
+    pre = None
+    if sid and cmd0 in _PAGE_CMDS and _version() >= (0, 4, 1):
+        pre = _sync_context(sid)   # 预注入：省掉「先失败一次」的来回
+    rc, out, err = bsk_fn(_strip_ctx(args) + _ctx_args(pre), timeout)
     if rc == 0:
         return rc, out, err
     blob = (err or "") + (out or "")
-    cmd0 = args[0] if args else ""
-    if cmd0 in _LOCAL_CMDS:
-        return rc, out, err
-    if not any(k in blob for k in _NEEDS_CONTEXT):
-        return rc, out, err
-    sid = _sid_of(args)
-    if not sid:
+    if not sid or not any(k in blob for k in _NEEDS_CONTEXT):
         return rc, out, err
     for _ in range(2):  # 最多两轮补救：sync→重试；页面又变了再 sync→重试
-        ctx = _sync_context(sid)
-        if not ctx:
+        pair = _sync_context(sid)
+        if not pair:
             return rc, out, err
-        if "--context" in args:
-            i = args.index("--context")
-            args = args[:i] + args[i + 2:] if len(args) > i + 2 else args[:i]
-        rc, out, err = bsk_fn(list(args) + ["--context", ctx], timeout)
+        rc, out, err = bsk_fn(_strip_ctx(args) + _ctx_args(pair), timeout)
         if rc == 0:
             return rc, out, err
         blob = (err or "") + (out or "")

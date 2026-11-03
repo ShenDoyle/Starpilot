@@ -27,6 +27,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -81,6 +83,9 @@ def make_owner(workspace: str = "", run_id: str = "", platform: str = "",
         "platform": platform or "",
         "host": socket.gethostname(),
         "pid": os.getpid(),
+        # 进程启动时间：与 host+pid 一起构成「同一进程」的证明，防 PID 复用
+        # （接管他人标签前必须证明原持有者确实死了，见 holder_dead）
+        "pid_start": pid_start_time(os.getpid()),
         "note": note or "",
     }
 
@@ -134,6 +139,12 @@ def is_live(rec: dict | None) -> bool:
     return remaining(rec) > 0
 
 
+def fencing_of(instance: str) -> int:
+    """当前世代的 fencing token（0 = 从没被占过）。"""
+    rec = read(instance)
+    return int((rec or {}).get("fencing") or 0)
+
+
 def status(instance: str) -> dict:
     rec = read(instance)
     if not rec:
@@ -148,6 +159,7 @@ def status(instance: str) -> dict:
         "sessions": sorted((rec.get("sessions") or {}).keys()),
         "remaining": round(remaining(rec), 1),
         "mode": rec.get("mode"),
+        "fencing": int(rec.get("fencing") or 0),
         "heartbeat_at": rec.get("heartbeat_at"),
         "takeover_from": rec.get("takeover_from"),
     }
@@ -215,6 +227,11 @@ def acquire(instance: str, owner: dict, *, ttl: float | None = None,
         live = is_live(rec)
         same = rec and rec.get("owner_key") == key
         if (not rec) or same or (not live):
+            # fencing token（2026-11-02 补）：单调递增的世代号。
+            # 旧持有者手里的 token 一定小于新持有者的，所以「旧任务拿着过期
+            # 凭据继续操作资源」可以被检测出来——这是 Web AI 复审反复要求的
+            # 那条防越权机制，此前只有租约没有 fencing。
+            prev_fence = int((rec or {}).get("fencing") or 0)
             fresh = {
                 "instance": instance,
                 "owner": owner,
@@ -222,6 +239,7 @@ def acquire(instance: str, owner: dict, *, ttl: float | None = None,
                 "host": owner.get("host") or socket.gethostname(),
                 "mode": "serial" if serial else "exclusive",
                 "lease_id": (rec or {}).get("lease_id") or uuid.uuid4().hex[:12],
+                "fencing": prev_fence if same else prev_fence + 1,
                 "sessions": (rec or {}).get("sessions") or {},
                 "heartbeat_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "lease_until": time.time() + ttl,
@@ -506,3 +524,213 @@ def wait_budget(attended: bool | None = None) -> float:
     if attended is None:
         attended = is_attended()
     return ATTENDED_WAIT_S if attended else UNATTENDED_WAIT_S
+
+
+# --------------------------------------------- L2 shim 一次性通行票据（HMAC）
+#
+# 2026-11-02 Web AI 复审裁定：「STARPILOT_WINDOW_GATE=1」是个**可伪造的布尔量**
+# ——任何调用者 set 一下就自称「内部正路」，等于没有门。改成一次性票据：
+#   · 密钥 gate.key（用户级锁目录，首次自动生成，0600）；
+#   · 票据 = nonce.ts.hmac(sha256, "nonce|ts")，同时落到 gate-tickets/<nonce>.ticket；
+#   · shim 兑换时校验 HMAC + 新鲜度（默认 120s）并**立即删除**文件 → 不可重放。
+# 票据只能由 wa.py 签发（它已过租约 + 全局计数），shim 只负责验证。
+GATE_KEY_NAME = "gate.key"
+GATE_TICKET_DIRNAME = "gate-tickets"
+GATE_TICKET_TTL = 120.0
+
+
+def gate_dir() -> str:
+    d = os.path.join(lease_dir(), GATE_TICKET_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def gate_key(create: bool = True) -> bytes:
+    """读（或首次生成）票据密钥。读不出且不允许创建 → 抛 OSError（fail-closed）。"""
+    p = os.path.join(lease_dir(), GATE_KEY_NAME)
+    if os.path.exists(p):
+        with open(p, "rb") as f:
+            k = (f.read() or b"").strip()
+        if len(k) >= 32:
+            return k
+        raise OSError("gate.key 损坏（%d 字节）" % len(k))
+    if not create:
+        raise OSError("gate.key 不存在（L2 shim 未初始化）")
+    k = os.urandom(32).hex().encode("ascii")
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return gate_key(create=False)
+    with os.fdopen(fd, "wb") as f:
+        f.write(k)
+    return k
+
+
+def _gate_sig(key: bytes, nonce: str, ts: str) -> str:
+    return hmac.new(key, ("%s|%s" % (nonce, ts)).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def gate_issue(ttl: float = GATE_TICKET_TTL) -> dict:
+    """签发一张一次性票据（wa.py 正路专用）。"""
+    key = gate_key()
+    nonce = uuid.uuid4().hex
+    ts = "%.0f" % time.time()
+    sig = _gate_sig(key, nonce, ts)
+    p = os.path.join(gate_dir(), nonce + ".ticket")
+    with open(p, "w", encoding="ascii") as f:
+        f.write(json.dumps({"nonce": nonce, "ts": ts, "sig": sig}))
+    _prune_used()
+    return {"ticket": "%s.%s.%s" % (nonce, ts, sig), "path": p, "ttl": ttl}
+
+
+def _prune_used(max_age: float = 3600.0) -> None:
+    """清掉过期墓碑（.used）。清不掉不影响签发，最多留点垃圾。"""
+    try:
+        d = gate_dir()
+        now = time.time()
+        for n in os.listdir(d):
+            if not n.endswith(".used"):
+                continue
+            fp = os.path.join(d, n)
+            try:
+                if now - os.path.getmtime(fp) > max_age:
+                    os.remove(fp)
+            except OSError:
+                continue
+    except Exception:
+        pass
+
+
+def gate_redeem(ticket: str, ttl: float = GATE_TICKET_TTL) -> dict:
+    """兑换票据：校验 HMAC + 新鲜度，**用后即焚**。任何不确定 → ok=False。"""
+    parts = (ticket or "").strip().split(".")
+    if len(parts) != 3:
+        return {"ok": False, "why": "malformed"}
+    nonce, ts, sig = parts
+    if len(nonce) != 32 or not all(c in "0123456789abcdef" for c in nonce):
+        return {"ok": False, "why": "malformed_nonce"}
+    try:
+        age = abs(time.time() - float(ts))
+    except Exception:
+        return {"ok": False, "why": "malformed_ts"}
+    if age > ttl:
+        return {"ok": False, "why": "expired", "age_s": round(age, 1)}
+    p = os.path.join(gate_dir(), nonce + ".ticket")
+    if not os.path.exists(p):
+        # 不存在 = 从没签发过，或已经被兑换过（一次性）
+        return {"ok": False, "why": "unknown_or_used"}
+    try:
+        with open(p, encoding="ascii") as f:
+            rec = json.load(f)
+    except Exception as e:
+        return {"ok": False, "why": "ticket_unreadable", "detail": str(e)[:80]}
+    if rec.get("nonce") != nonce or str(rec.get("ts")) != ts:
+        return {"ok": False, "why": "ticket_mismatch"}
+    try:
+        key = gate_key(create=False)
+    except OSError as e:
+        return {"ok": False, "why": "no_key", "detail": str(e)[:80]}
+    if not hmac.compare_digest(_gate_sig(key, nonce, ts), sig):
+        return {"ok": False, "why": "bad_signature"}
+    # 原子「抢烧」+ 墓碑：先把 .ticket 原子改名为 .used，**只有改名成功的进程**拿到
+    # 授权（直接 os.remove 有 TOCTOU，两进程可能都成功 → 双授权）。留下 .used
+    # 墓碑而不是删干净，是为了防「用过之后把文件副本贴回来再用一次」。
+    used = os.path.join(gate_dir(), nonce + ".used")
+    if os.path.exists(used):
+        return {"ok": False, "why": "unknown_or_used"}
+    try:
+        os.replace(p, used)
+    except FileNotFoundError:
+        return {"ok": False, "why": "unknown_or_used"}
+    except OSError as e:
+        return {"ok": False, "why": "ticket_not_burned", "detail": str(e)[:80]}
+    return {"ok": True, "why": "redeemed", "age_s": round(age, 1)}
+
+
+# ------------------------------------------- 持有者存活证明（接管的前置条件）
+#
+# 2026-11-02 复审裁定：「租约过期」只说明**旧授权失效**，不说明**旧进程已死**。
+# 拿租约超时当接管依据 = 允许新任务抢占一个可能还在跑的任务。所以必须先证明
+# 原持有者进程确实不在了，判据用「主机 + PID + 进程启动时间」三件套防 PID 复用；
+# 判断不出来一律当「还活着」（返回 dead=False），由调用方按 OWNER_UNKNOWN 拒绝。
+
+def pid_start_time(pid: int):
+    """进程启动时间（epoch 秒）或 None（取不到 / 进程不存在）。"""
+    if not pid or pid <= 0:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, 0, int(pid))     # QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        try:
+            ft = wintypes.FILETIME()
+            ct, et, kt, ut = (wintypes.FILETIME() for _ in range(4))
+            if not k32.GetProcessTimes(h, ctypes.byref(ct), ctypes.byref(et),
+                                       ctypes.byref(kt), ctypes.byref(ut)):
+                return None
+            ft = ct
+            ticks = (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+            return ticks / 1e7 - 11644473600.0      # FILETIME → Unix epoch
+        finally:
+            k32.CloseHandle(h)
+    try:
+        with open("/proc/%d/stat" % int(pid), "rb") as f:
+            parts = f.read().rsplit(b") ", 1)[1].split()
+        start_ticks = float(parts[19])              # field 22（1-based）
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        return time.time() - uptime + start_ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:
+        return None
+
+
+def pid_alive(pid: int) -> bool:
+    """进程是否还在。**Windows 上不能用 os.kill(pid, 0)**——那会真的杀进程。"""
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, 0, int(pid))
+        if h:
+            k32.CloseHandle(h)
+            return True
+        return ctypes.get_last_error() == 5          # ACCESS_DENIED = 存在但无权
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def holder_dead(rec: dict) -> tuple:
+    """判定租约里记的那任持有者是否确实不在了。返回 (dead, reason)。
+
+    dead=False 一律表示「没死 / 证明不了」——调用方不得据此接管。
+    """
+    if not rec:
+        return False, "no_record"
+    if (rec.get("host") or "") != socket.gethostname():
+        # 跨主机无法验证对方进程：必须有外部隔离/停止的证据，本地不猜
+        return False, "host_mismatch"
+    try:
+        pid = int(rec.get("pid") or 0)
+    except Exception:
+        pid = 0
+    if pid <= 0:
+        return False, "no_pid"
+    if not pid_alive(pid):
+        return True, "pid_gone"
+    want = rec.get("pid_start")
+    got = pid_start_time(pid)
+    if want and got and abs(float(want) - float(got)) < 2.0:
+        return False, "pid_alive"
+    if want and got:
+        return True, "pid_reused"        # PID 被别的进程复用了
+    return False, "start_unknown"        # 少了启动时间就无法排除复用 → 当活着
