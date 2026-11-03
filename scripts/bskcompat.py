@@ -108,7 +108,8 @@ def _run(args, timeout):
         return _RUN_FN(args, timeout)
     try:
         p = subprocess.run([_BIN] + list(args), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+                           encoding="utf-8", errors="backslashreplace",
+                           timeout=timeout)
     except subprocess.TimeoutExpired:
         return 124, "", "bsk 超时（%ss）：%s" % (timeout, " ".join(args[:2]))
     return p.returncode, p.stdout or "", p.stderr or ""

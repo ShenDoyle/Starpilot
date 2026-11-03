@@ -29,6 +29,13 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import safeprint  # noqa: E402
+
+# env.py 是 agent 开工前跑的第一条命令。它在 GBK 控制台上崩掉，
+# 后面所有「环境没问题」的结论都无从谈起。
+safeprint.harden_streams()
+
 MIN_PY = (3, 9)
 BACKENDS = ("bsk", "builtin")
 INSTALL_SH = "https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh"
@@ -189,7 +196,7 @@ def _run(argv, timeout, runner=None) -> dict:
     runner = runner or subprocess.run
     try:
         p = runner(argv, capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=timeout)
+                   encoding="utf-8", errors="backslashreplace", timeout=timeout)
     except Exception as e:  # 超时、找不到可执行文件等
         return {"rc": -1, "out": "", "err": "%s: %s" % (type(e).__name__, e)}
     return {"rc": p.returncode, "out": p.stdout or "", "err": p.stderr or ""}

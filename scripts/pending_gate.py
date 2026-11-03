@@ -33,6 +33,12 @@ import os
 import re
 import sys
 
+import safeprint
+
+# 门禁的拒绝理由全是中文，且是 agent 最需要看清的那句话。
+# cp936 控制台上打印时崩掉 = 门禁把「为什么拦你」弄丢了。
+safeprint.harden_streams()
+
 ITEM_RE = re.compile(
     r"^-\s*\[(?P<pri>P[012])\]\s*\[(?P<id>[A-Za-z0-9-]+)\]\s*"
     r"(?P<text>.+?)\s*\|\s*(?P<status>\w+)[（(]?(?P<detail>[^)）]*)[)）]?\s*(?:\|\s*(?P<src>.*))?$"

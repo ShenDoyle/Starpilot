@@ -1,0 +1,25 @@
+{
+  "platform": "chatgpt",
+  "recorded_at": "2026-11-03 18:00 (local, Asia/Shanghai)",
+  "source": "bsk get-html on a read-only session (starpilot-readonly-1103), conversation /c/6ae80db0-2820-83ea-adf6-482630f06332, Edge 151, page lang=zh-CN",
+  "how_trimmed": "删掉 script/style 正文、svg 图形数据、base64 内联资源，再把切片收敛到包含全部 12 个轮次容器的区域（含前后各 3KB 上下文）。元素树、class、data-* 属性一律保持真机原样。",
+  "counts": {
+    "assistant_turn_uuid": 6,
+    "turn_container_uuid": 12,
+    "user_bubble": 6,
+    "assistant_body": 6,
+    "role_header": 12
+  },
+  "critical_fact": "旧选择器 [data-message-author-role] 在 2026-11-02 改版后命中 0 —— reply_count 因此恒 0，每次发送都被判 SENT_NO_REPLY。新身份锚点是 data-chatgpt-selection-message-id（助手，节点自带）与 data-chatgpt-search-message-ids（轮次容器，用户消息要靠祖先取）。",
+  "NOT_TESTED": "composer.html 录制时输入框是空的：ChatGPT 的发送键是**条件渲染**，空态下页面上根本没有该按钮（实测 type=submit 命中 0）。所以本夹具**不能**证明发送键选择器可用，只证明「空态必须报失败」。发送键的真实标记需要在输入框有字时另录一份。",
+  "note": "重录方法：只读 session 里 navigate 到目标对话 → bsk get-html → 按本文件 how_trimmed 裁剪。发送键那份要先把编辑器填上字再录。",
+  "expected": {
+    "assistant": 6,
+    "all_messages": 12,
+    "user": 6,
+    "editor_in_composer": 1,
+    "old_role_attr": 0,
+    "send_candidates_in_composer": 0
+  },
+  "why_no_chatgpt_fixture_before": "2026-11-02 改版把 data-message-author-role 全删了，而仓库里只有 deepseek/gemini/kimi 三份夹具，ChatGPT 没有夹具 → 选择器失效在 unittest 阶段一条都不红，直到线上每次发送都判 SENT_NO_REPLY 才被发现。本夹具的存在意义就是把这类改版变成当场红。"
+}

@@ -232,5 +232,107 @@ class TestPlatformContract(unittest.TestCase):
             self.assertNotIn(k, verified, "%s 没实测过，不许标 verified" % k)
 
 
+class TestChatGPTReplay(unittest.TestCase):
+    """ChatGPT 2026-11-02 改版把 `data-message-author-role` 整个删了，而仓库里
+    **没有 ChatGPT 夹具** —— 于是选择器失效在 unittest 阶段一条都不红，一路红到线上：
+    `reply_count` 恒 0 ⇒ 每次发送都判 `SENT_NO_REPLY` ⇒ agent 以为没发出去 ⇒ 重发 ⇒
+    写闸门又被 `verified=false` 拦 ⇒ 走逃生门 ⇒ pending.md 攒下 32 条 P0-ESC。
+    这条链的起点就是一个没人录夹具的选择器。本类把它钉死。
+
+    夹具来源见 `meta.json`：真机 `bsk get-html` 快照（只读 session），裁剪只删
+    script/style 正文与 svg 图形数据，元素树与 data-* 原样保留。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = platforms.get("chatgpt")
+        cls.comp = domsel.load_fixture("chatgpt", "composer.html")
+        cls.msgs = domsel.load_fixture("chatgpt", "messages.html")
+        cls.meta = _meta("chatgpt")
+
+    def test_editor_narrow_selector_hits_exactly_one(self):
+        """页面上有 5 个 div.ProseMirror（消息渲染块 + 写作块同名），
+        裸选择器命中多个时 bsk 直接拒绝（selector matched N elements），
+        clear/fill 全失败、输入框残留清不掉。唯一命中主输入框的是 form 前缀。"""
+        sel, node, n = domsel.first_hit(self.comp, self.p["sel"]["editor"])
+        self.assertEqual(sel, "form div.ProseMirror",
+                         "编辑器首选被换掉了：它会命中多个节点")
+        self.assertEqual(n, self.meta["expected"]["editor_in_composer"])
+        broad = domsel.select_all(self.msgs, 'div.ProseMirror')
+        self.assertGreater(len(broad), 1,
+                           "正文区里确实存在同名 ProseMirror：必须靠 form 收窄")
+
+    def test_reply_anchor_is_self_attached_uuid(self):
+        """助手消息身份：节点自带 data-chatgpt-selection-message-id，且互不重复。"""
+        asst = domsel.select_all(self.msgs, self.p["sel"]["messages"][0])
+        self.assertEqual(len(asst), self.meta["expected"]["assistant"])
+        uuids = [a.attrs.get("data-chatgpt-selection-message-id") or "" for a in asst]
+        self.assertTrue(all(uuids), "有助手节点不带身份 UUID：锚点会退化成正文指纹")
+        self.assertEqual(len(set(uuids)), len(uuids), "助手 UUID 有重复：不能当身份")
+
+    def test_user_anchor_needs_ancestor_walk(self):
+        """用户气泡自己**没有** UUID，UUID 在轮次容器上 —— key_up 必须够长。
+
+        这一条是 `key_attrs` 与 `key_up` 两个字段存在的理由：只查节点自身的话，
+        用户侧永远取不到身份，anchor_delta 分不清「新提问」和「重发」。
+        """
+        users = domsel.select_all(self.msgs, self.p["sel"]["user_messages"][0])
+        self.assertEqual(len(users), self.meta["expected"]["user"])
+        self.assertEqual(sum(1 for u in users
+                             if u.attrs.get("data-chatgpt-search-message-ids")), 0,
+                         "用户气泡若自带 UUID，key_up 就可以缩短——先如实记录现状")
+        got = []
+        for u in users:
+            got.append(next((a.attrs.get("data-chatgpt-search-message-ids")
+                             for a in u.ancestors()
+                             if a.attrs.get("data-chatgpt-search-message-ids")), ""))
+        self.assertTrue(all(got), "向上走 key_up 层仍取不到轮次 UUID：会退回正文指纹口径")
+        self.assertEqual(len(set(got)), len(got))
+        self.assertGreaterEqual(self.p.get("key_up", 0), 4,
+                                "祖先深度不足：ChatGPT 的 UUID 在轮次容器上")
+
+    def test_message_container_count_is_language_independent(self):
+        """msg_containers 走 DOM（12 个轮次容器）：英文界面也算得出来。
+
+        旧口径靠中文 marker「你说：」数总数，界面一换语言 msg_count 就变 0 ——
+        发送校验的主信号因此消失，被判「没发出去」。
+        """
+        allm = domsel.select_all(self.msgs, self.p["sel"]["msg_containers"][0])
+        self.assertEqual(len(allm), self.meta["expected"]["all_messages"])
+        self.assertTrue(self.p.get("count_from_users"),
+                        "ChatGPT 必须允许 marker 落空时退回 DOM 口径")
+
+    def test_revoked_attribute_is_not_relied_on(self):
+        """已废弃的 role 属性在这份真机快照里命中 0：只许当兼容候选，不许当依据。"""
+        self.assertEqual(
+            len(domsel.select_all(self.msgs, '[data-message-author-role]')),
+            self.meta["expected"]["old_role_attr"])
+
+    def test_probe_js_carries_key_attrs(self):
+        js = platforms.js_probe(self.p)
+        self.assertIn("data-chatgpt-selection-message-id", js,
+                      "key_attrs 没进生成的 JS：锚点等于没接上")
+        self.assertIn("data-chatgpt-search-message-ids", js)
+        self.assertIn("new Set(asstKeys).size", js,
+                      "回复计数没按身份去重：虚拟列表重挂会把一条算成两条")
+
+    def test_send_control_absence_is_a_declared_gap(self):
+        """录制时编辑器是空的 → 发送键**条件渲染**，页面上根本没有它（实测 type=submit 命中 0）。
+
+        这条不许变绿成「选择器没问题」：它要求平台必须声明 `send_requires_text`，
+        这样「写完但发送键没出现」会当失败报出来（FILL_NO_SEND），
+        而不是对空气点一次然后白等一轮。发送键的真实标记仍待**有字时**重录夹具。
+        """
+        hits = sum(len(domsel.select_all(self.comp, s)) for s in self.p["sel"]["send"])
+        self.assertEqual(hits, self.meta["expected"]["send_candidates_in_composer"])
+        self.assertTrue(self.p.get("send_requires_text"),
+                        "ChatGPT 的发送键是条件渲染的：必须声明，否则空态会被当成可点")
+
+    def test_verified_stays_false_until_loop_acceptance(self):
+        """计数锚点重标定 ≠ 整链路实测。5/5 独立问答验收 + 发送键定标前不许翻 True。"""
+        self.assertFalse(self.p.get("verified"))
+        self.assertIn("重标定", self.p.get("notes", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

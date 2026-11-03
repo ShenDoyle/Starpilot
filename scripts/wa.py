@@ -35,9 +35,16 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confirm  # noqa: E402
 import platforms  # noqa: E402
+import safeprint  # noqa: E402
 import statelock  # noqa: E402
 import tabclaims  # noqa: E402
 import winlease  # noqa: E402
+
+# 导入即加固输出流：本文件的每一句实话（拒绝原因、判定、triage 结论）都打在
+# stdout/stderr 上，zh-CN Windows 控制台默认 cp936，遇到 GBK 编不进去的字符
+# （页面原文里的 U+FFFD、平台文案、emoji）会直接 UnicodeEncodeError ——
+# 判定死在打印那一行，比打印难看严重得多。详见 scripts/safeprint.py。
+safeprint.harden_streams()
 
 # ---------------------------------------------------------------- bsk 定位
 
@@ -126,8 +133,8 @@ def _bsk_raw(args: list, timeout: int) -> tuple[int, str, str]:
                              % ticket_note)
     try:
         p = subprocess.run([BSK] + args, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout,
-                           env=env)
+                           encoding="utf-8", errors="backslashreplace",
+                           timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         return 124, "", "bsk 超时（%ss）：%s" % (timeout, " ".join(args[:2]))
     return p.returncode, p.stdout or "", p.stderr or ""

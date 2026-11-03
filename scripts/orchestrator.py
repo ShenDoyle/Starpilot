@@ -24,8 +24,16 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confirm  # noqa: E402
 import platforms  # noqa: E402
+import safeprint  # noqa: E402
 import wa  # noqa: E402
 import write_gate as wg  # noqa: E402
+
+# 导入即加固控制台（详见 scripts/safeprint.py）：
+# zh-CN Windows 的 stdout 默认 cp936，闸门打中文会抛 UnicodeEncodeError，
+# 结果是「GATE_CRASH 顶掉了闸门本来要报的判定」。宁可转义，不许丢实话。
+safeprint.harden_streams()
+# 子进程统一用 UTF-8 输出流；父进程这边只负责解码，管不到子进程怎么编码。
+CHILD_ENV = safeprint.utf8_child_env()
 
 CONTRACT = "docs/orchestrator-contract.md"
 
@@ -302,10 +310,10 @@ def run_gate(root: str, args: list, env_extra: dict = None, state: str = "") -> 
     if state:
         cmd += ["--state", state]
     cmd += args
-    env = dict(os.environ)
+    env = dict(CHILD_ENV)
     env.update(env_extra or {})
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=900, env=env)
+                       errors="backslashreplace", timeout=900, env=env)
     out = (p.stdout or "").strip()
     try:
         return p.returncode, json.loads(out)
@@ -555,13 +563,12 @@ def cmd_init(a) -> int:
     if getattr(a, "card", ""):
         card_res = _run_card_gate(a.card)
         if not card_res.get("ok"):
-            print(json.dumps({"ok": False, "stage": "requirement_gate",
+            safeprint.jprint({"ok": False, "stage": "requirement_gate",
                               "card": os.path.abspath(a.card),
                               "violations": card_res.get("violations"),
                               "hint": "需求没定型不许进规划（硬规则 2）：先把「未明确」清空、"
                                       "冲突裁定、拿到明确确认。本工具只拒绝，不会替你补。",
-                              "stats": card_res.get("stats")},
-                             ensure_ascii=False, indent=2))
+                              "stats": card_res.get("stats")})
             return 1
     run_id = a.run or wg.new_run_id(a.slug or "stage")
     d = os.path.join(root, "runs", run_id)
@@ -660,8 +667,8 @@ def cmd_bind(a) -> int:
         argv += ["--platform", a.platform]
     p = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                      "wa.py")] + argv,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=300)
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="backslashreplace", timeout=300, env=dict(CHILD_ENV))
     out = (p.stdout or "").strip()
     if p.returncode != 0:
         print(out or (p.stderr or ""), file=sys.stderr)
@@ -2219,7 +2226,8 @@ def _run_wa(root: str, argv: list, state_name: str = "", timeout: int = 180) -> 
         p += ["--state", wa_state_path(root, state_name)]
     try:
         r = subprocess.run(p, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout)
+                           errors="backslashreplace", timeout=timeout,
+                           env=dict(CHILD_ENV))
     except Exception as e:
         return 1, {"ok": False, "detail": "%s: %s" % (type(e).__name__, e)}
     txt = (r.stdout or "").strip()
@@ -2454,18 +2462,23 @@ def _run_card_gate(card_path: str) -> dict:
                                         "requirement_gate.py"),
            "--card", card_path, "--json"]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=60)
+                       errors="backslashreplace", timeout=60, env=dict(CHILD_ENV))
     out = (p.stdout or "").strip()
     try:
         return json.loads(out)
     except Exception:
+        # 判不出来就**照抄现场**，不许伪造一个码：
+        # 带不走原文时（stderr 里有子进程 traceback）也要把 rc 与原文一并报出来。
         return {"ok": False, "violations": [{"code": "GATE_CRASH",
-                                             "section": "", "detail": out[:200]}]}
+                                             "section": "",
+                                             "detail": "rc=%s stdout=%r stderr=%s" % (
+                                                 p.returncode, out[:200],
+                                                 (p.stderr or "")[-400:])}]}
 
 
 def cmd_card(a) -> int:
     res = _run_card_gate(a.file or getattr(a, "file_opt", "") or "")
-    print(json.dumps(res, ensure_ascii=False, indent=2))
+    safeprint.jprint(res)
     return 0 if res.get("ok") else 1
 
 

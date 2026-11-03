@@ -124,28 +124,58 @@ PLATFORMS = {
     "chatgpt": {
         "label": "ChatGPT",
         "home": "https://chatgpt.com",
-        # 2026-11-02 实测 DOM 改版：编辑器 = div.ProseMirror（#prompt-textarea 已移除）、
-        # 发送 = form button[type=submit]（data-testid=send-button 已移除）。两项已回填；
-        # 但 assistant 消息节点的 data-message-author-role 属性也消失了，
-        # `reply_count_delta` 依赖的计数选择器**尚未找到替代**（正文读取走 marker
-        # 「ChatGPT 说：」仍可用）。计数口径未重标定前，verified 一律 false——
-        # 不拿「大部分还能用」冒充「已实测」。
+        # 2026-11-02 改版：`#prompt-textarea`、`data-testid=send-button`、
+        # `data-message-author-role` **全部消失**。
+        # 2026-11-03 用真机快照离线重放（tests/fixtures/chatgpt/）重新标定：
+        #   · 消息身份 = `data-chatgpt-selection-message-id`（助手，节点自带 UUID）
+        #     与 `data-chatgpt-search-message-ids`（轮次容器；用户消息自己不带，
+        #     要向上找祖先 —— 已由 key_attrs + key_up 表达）
+        #   · 实测命中：助手 6 / 轮次容器 12 / 用户气泡 6，旧属性命中 0
+        # `verified` 仍保持 **false**，因为还差两件事（不是「大部分能用」的借口，
+        # 是口径本身）：① 发送键的真实标记（快照是空编辑器录的，条件渲染的按钮
+        # 压根不在页面上，`type=submit` 命中 0）；② 专用测试对话上 5/5 独立问答验收。
+        # 计数口径已重标定，写路径 11-02 复测过，但整链路口径没过 5/5 就不许翻 True。
         "verified": False,
         # 写路径（editor 写入 + send 点击）2026-11-02 当天单独复测通过：
         # 2367 字全文写入、指纹 6/6 命中、点击后地址出现 /c/<uuid>。
-        # 它是「写没问题」，不等于「整条 loop 可自动跑」（计数口径还没重标定）。
+        # ⚠️ 但 11-03 快照显示 form 内已无 `type="submit"` 按钮（空输入态不渲染），
+        # 所以这条只对「当时那一次的写入」负责，发送键标记**待重新实测**。
         "write_verified": True,
         "write_verified_at": "2026-11-02",
-        "notes": "2026-11-02 DOM 改版：editor/send 已回填实测值且写路径复测通过；"
-                 "assistant 计数选择器待重标定（role 属性消失），整链路口径的 verified 保持 false。",
+        "notes": "2026-11-02 DOM 改版后：editor=`form div.ProseMirror`（裸写 "
+                 "div.ProseMirror 会命中多个：消息/写作块同名，bsk 直接拒绝 "
+                 "selector matched N elements）；消息计数锚点已于 2026-11-03 用真机快照"
+                 "重标定为 data-chatgpt-selection-message-id / "
+                 "data-chatgpt-search-message-ids（旧 data-message-author-role 命中 0）。"
+                 "**仍待重标定**：发送键真实标记（空编辑器时不渲染，快照里 type=submit "
+                 "命中 0）与 stop 标记；整链路 5/5 独立问答验收未跑 —— 这两件事没做完 "
+                 "verified 保持 false，不拿「计数能用」冒充「链路已实测」。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chatgpt.com/c/<uuid>；出现 / 或 /new 即为新对话，拒绝绑定。",
         "write_method": "exec",
+        # 发送键**条件渲染**（实测：空输入态整个 form 里没有发送按钮）。
+        # 所以「写完但发送键没出现」= 编辑器没接受这份内容，必须当失败报，
+        # 不许对着空气点一次、白耗一轮预算再回来猜。Gemini 是同一条教训。
+        "send_requires_text": True,
         # ChatGPT 的正文区混着 UI 文案，实测必须「先按标记切、再读节点」，否则 last_len 会带上按钮字
         "prefer_marker": True,
-        "markers": ["ChatGPT 说："],
-        "tail_junk": ["ChatGPT 可能会出错"],
-        "user_msg_regex": "你说：",
+        # ⚠️ marker 是**界面文案**，随语言变：快照页是 lang=zh-CN。
+        # 英文备选是防御性写的，**未经实测**（真机英文页面没录过），
+        # 命中不了时靠 messages 选择器那条路读正文。
+        "markers": ["ChatGPT 说：", "ChatGPT says:"],
+        "tail_junk": ["ChatGPT 可能会出错", "ChatGPT can make mistakes"],
+        "user_msg_regex": "你说：|You said:",
+        # marker 全部没命中时（改版 / 别的语言界面）用 user_messages 的 DOM 节点数兜底。
+        # 只在 ChatGPT 上开：它是「消息总数」口径唯一有 DOM 锚点的平台
+        # （msg_containers = 轮次容器，实测 12 条），别的平台动了会改既有口径。
+        "count_from_users": True,
+        # 消息身份属性（按顺序找）：节点自带优先，找不到再向上走 key_up 层。
+        # 用户气泡自己不带 UUID，UUID 在轮次容器上 —— 所以必须有 key_up。
+        # 绝不用 data-chatgpt-search-unit-key：它的 `fallback-turn-N` 是**相对编号**，
+        # 虚拟窗口移动就重编号，当身份用会把历史消息误认成新消息。
+        "key_attrs": ["data-chatgpt-selection-message-id",
+                      "data-chatgpt-search-message-ids"],
+        "key_up": 8,
         # 已实测的写入路径：只有 exec（execCommand）这一条被允许真实写
         "write_allowed": ["exec"],
         "sel": {
@@ -159,6 +189,8 @@ PLATFORMS = {
                        "main div[contenteditable=\"true\"]",
                        "div[contenteditable=\"true\"]"],
             # 2026-11-02 实测：发送是表单提交按钮（aria=发送）；testid 已弃用，留作后备
+            # ⚠️ 2026-11-03 快照（空输入态）里这四条**全部命中 0**：发送键是条件渲染的，
+            # 没字的时候页面上没有它。候选保留，但**必须在编辑器有字时重录一份**才能定标。
             "send": ["form button[type=\"submit\"]",
                      "button[data-testid=\"send-button\"]",
                      "main button[aria-label=\"发送\"]",
@@ -166,11 +198,17 @@ PLATFORMS = {
             "stop": ["button[data-testid=\"stop-button\"]",
                      "main button[aria-label*=\"停止\"]",
                      "main button[aria-label*=\"Stop\"]"],
-            # ⚠️ 2026-11-02：这三个 role 属性在实测页面里已查不到（计数口径失效）。
-            # 保留为后备（部分地区/灰度可能仍存在），但**不得据此宣称已验证**。
-            "messages": ["[data-message-author-role=\"assistant\"]"],
-            "msg_containers": ["[data-message-author-role]"],
-            "user_messages": ["[data-message-author-role=\"user\"]"],
+            # 助手消息：节点自带 UUID（一轮一条），既是正文容器也是身份锚点。
+            # 旧 role 属性留在最后当灰度回滚的兼容位，**不得据此宣称已验证**。
+            "messages": ["div[data-chatgpt-selection-message-id]",
+                         "div[data-markdown-text-style=\"assistant-message\"]",
+                         "[data-message-author-role=\"assistant\"]"],
+            # 轮次容器（一问一答各一条，实测 12）：DOM 口径的消息总数，
+            # 不再依赖中文 marker，英文界面也算得出来。
+            "msg_containers": ["div[data-chatgpt-search-message-ids]",
+                               "[data-message-author-role]"],
+            "user_messages": ["div[data-user-message-bubble]",
+                              "[data-message-author-role=\"user\"]"],
             "alert": ["[role=\"alert\"]"],
             "speech": ["[data-testid=\"composer-speech-button\"]",
                        "button[aria-label*=\"语音\"]",
@@ -939,10 +977,13 @@ def js_probe(p):
   if (ure) {
     try { userCount = (full.match(ure) || []).length; } catch (e) { userCount = 0; }
   }
+  // marker 没命中（改版、或界面切成英文）时退回 DOM 口径，而不是退回 0：
+  // 退回 0 会让 msg_count 变成「总数」，同一轮里前后两次数的是不同的东西。
+  if (!userCount && %s) { userCount = users.length; }
   const total = all.length || asst.length;
   const msgCount = userCount || total;
   // 助手回复条数（平台无关口径）：一条提问对一条回复 ⇒ 这个数只涨 1
-  const replyCount = asst.length;
+  let replyCount = asst.length;
   // 用户消息条数（DOM 口径）：用于区分「一条回复被拆成 N 个气泡」与「真的重发了 N 条」
   const userMsgCount = users.length;
 
@@ -1047,6 +1088,23 @@ def js_probe(p):
   // 纯十六进制（≥8 位，uuid 带横线因此不匹配）**且** 这个祖先本身的类名像消息容器。
   // 单看十六进制会命中路由哈希、组件 uid、layout 容器的随机 id。
   const MSGISH_CLS = /(message|conversation|turn|chat|response)/i;
+  // 平台**显式声明**的消息身份属性（2026-11-03 加，ChatGPT 改版后唯一可靠锚点）：
+  // 只有平台自己知道「哪个属性是消息身份」，通用代码不许自己猜（Gemini 裁定同源）。
+  // 值是空格分隔的有可能重复（ChatGPT 的助手容器把自己的 UUID 写了两遍），
+  // 所以取第一个非空 token：整串当 key 会让同一条消息在重排后换个 key。
+  const KEY_ATTRS = __KEY_ATTRS__;
+  const KEY_UP = __KEY_UP__;
+  const keyAttr = (el) => {
+    for (const a of KEY_ATTRS) {
+      let v = null;
+      try { v = el.getAttribute(a); } catch (e) { v = null; }
+      if (v) {
+        const t = String(v).trim().split(/\\s+/)[0];
+        if (t) { return 'u:' + t; }
+      }
+    }
+    return '';
+  };
   const keyOf = el => {
     const box = boxOf(el);
     if (box) {
@@ -1054,8 +1112,11 @@ def js_probe(p):
       if (bid) { return 't:' + bid; }
     }
     let n = el;
-    for (let d = 0; d < 4 && n; d++, n = n.parentElement) {
+    for (let d = 0; d < KEY_UP && n; d++, n = n.parentElement) {
       if (!n.getAttribute) { continue; }
+      // 平台声明的身份属性优先：它就是「这条消息是谁」，比任何推断都硬
+      const ua = keyAttr(n);
+      if (ua) { return ua; }
       const k = n.getAttribute('data-virtual-list-item-key');
       if (k !== null && k !== '') { return 'k:' + k; }
       const mid = n.getAttribute('data-message-id') || n.getAttribute('data-id');
@@ -1070,6 +1131,10 @@ def js_probe(p):
   };
   const asstKeys = asst.map(keyOf).filter(Boolean);
   const allKeys = all.map(keyOf).filter(Boolean);
+  // 有平台身份锚点时按**去重后的身份数**计回复条数：
+  // 虚拟列表把同一条消息重挂两次，节点数会 +2，而消息只有一条 ——
+  // 计数虚高直接后果是 anchor_delta 算出 >1，被误判成「重发」。
+  if (asstKeys.length) { replyCount = new Set(asstKeys).size; }
 
   return JSON.stringify({
     url: location.href,
@@ -1133,11 +1198,15 @@ def js_probe(p):
         json.dumps(p.get("markers") or [], ensure_ascii=False),
         json.dumps(p.get("tail_junk") or [], ensure_ascii=False),
         json.dumps(p.get("user_msg_regex") or "", ensure_ascii=False),
+        "true" if p.get("count_from_users") else "false",
     )
     # 轮次容器选择器（可空）：只在平台显式声明时才按容器 id 取锚点，
     # 避免「看见长得像 id 的属性就当消息身份」。
     return (js.replace("__ANCHOR_BOX__", json.dumps(p.get("anchor_box") or ""))
               .replace("__REGEN_SEL__", json.dumps(p.get("regen_selector") or ""))
+              .replace("__KEY_ATTRS__", json.dumps(p.get("key_attrs") or [],
+                                                   ensure_ascii=False))
+              .replace("__KEY_UP__", str(int(p.get("key_up") or 4)))
               .replace("__IGNORE__", json.dumps(read_ignore_of(p), ensure_ascii=False)))
 
 

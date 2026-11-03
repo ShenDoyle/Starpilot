@@ -23,6 +23,13 @@ import os
 import re
 import sys
 
+import safeprint
+
+# 本模块常被 orchestrator 当子进程拉起，父进程拿到的是它的 stdout。
+# zh-CN Windows 上子进程的 stdout 默认 cp936：打中文违规详情时子进程自己先崩，
+# 父进程只收到半截 JSON → 被误报成 GATE_CRASH，真正的「需求没定型」判定丢了。
+safeprint.harden_streams()
+
 # 允许出现在表格里的占位符（模板原样带来的空值）
 PLACEHOLDERS = {"", "-", "—", "（不超过 30 字，说清「谁、在什么场景下、要什么结果」）",
                 "待确认 / 已确认 / 部分确认（不算通过）",
