@@ -8,6 +8,49 @@ version: "0.1.6"
 
 > 需求建立后，网页版 AI 规划完整方案，本地 Agent 取回指令、一步一步执行，每步如实回报，最终收口交付。
 
+## 0.0 三十秒主干（先读这一屏，其余都是分册）
+
+本文件其余章节是**细则与判据**，很长；不同 agent 的上下文预算和遵循度差别很大，
+以前从第一屏就开始读规则，读不完就动手，是「沟通不顺畅」的一半来源。
+主干只有这五条 + 一张卡住出路表，读完就可以安全动手。
+
+**正路五步**
+
+```bash
+python scripts/env.py                                  # ① 环境（Python / bsk / 扩展）
+python scripts/wa.py bind "<对话地址>" --platform <key>  # ② 绑定一条对话（全程只这一条）
+python scripts/wa.py read --out runtime/wa/turn-1.md    # ③ 读网页 AI 的原文
+python scripts/orchestrator.py loop --once --file <反馈.md>  # ④ 走闸门：演练→批准→真发→核验
+python scripts/wa.py wait --timeout 900                 # ⑤ 等回复（45s 没首字自动转分诊）
+```
+
+**卡住时只敲这一条**（它会把该做的下一步按顺序念给你）：
+
+```bash
+python scripts/wa.py doctor --explain
+```
+
+**失败出路表——退出码决定你下一步做什么，不许自己发明第三步动作**
+
+| 现象 / rc | 真相 | 该做 | 禁止 |
+|---|---|---|---|
+| `send` rc=3 | 上一轮还没结论，或输入框有残留 | `wa.py wait` 或 `wa.py triage` | 加 `--force` 硬发 |
+| `send` rc=8 | **确实没发出去**（输入框还有字） | 清空后重发一次 | 当成网络问题反复重试 |
+| `send` rc=12 `SEND_UNCERTAIN` | **疑似已发出但没确认**（框空了、没主信号），或同一条正文已经发过且还没确认回复 | `wa.py triage` 看页面事实 | 直接重发——那会造成同一条提问两遍 |
+| `send` rc=10 | 选择器**多匹配**被 bsk 拒了（`selector matched N elements`） | 收窄 `platforms.py` 的 `sel.editor`（ChatGPT 正解 `form div.ProseMirror`） | 反复重试同一条命令 |
+| `send` rc=11 | 该平台写路径**没标定** | `wa.py probe --platform <key>` 标定后回填 `write_verified` | 撞逃生门 |
+| `verdict=SENT_NO_REPLY`（rc=0） | 已送达，回复还没被认出 | `wa.py wait`（输出里的 `next` 就是这条） | 重发 |
+| rc=7 `ORCHESTRATOR_REQUIRED` | 有编排 run，必须走闸门 | `orchestrator.py loop --once` | 用逃生门（它绕开的正是幂等与写后核验） |
+| rc=6 `WINDOW_UNVERIFIED` | 归属没确认，打错窗口=往用户窗口打字 | `wa.py window status` | 任何绕过 |
+| rc=9 `WINDOW_BUSY` | 实例被别的任务占着（跨任务不抢占） | 等对方收口，或另开一个浏览器实例 | 停对方的会话 |
+| 闸门 rc=2 `error_code=WRITE_BLOCKED_*` | 闸门按口径拦（授权/模式/目标不符） | 看 JSON 里的 `error_code` 与 `next_step` | 猜是哪一个 |
+| 「读不到回复」四连 | 实例重了 / 掉线 / 会话没了 / state 指错 | `wa.py doctor --explain` | 再开一个窗口去赌 |
+
+**两条铁律**（细则见 §1）：读尽量自动，写必须留人；失败必须响亮——
+判定不确定时**显式说不确定**，不许默认通过，也不许把推测写成「已验证」。
+
+---
+
 ## 0. 这是什么
 
 把「思考」交给网页版 AI，「执行」留在本地 Agent。每一轮的固定动作：

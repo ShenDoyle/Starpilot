@@ -208,7 +208,10 @@ class TestWriteWhitelistIsShared(unittest.TestCase):
             file = ""
             force = True
         rc = wa.cmd_send(A())
-        self.assertEqual(rc, 8, "写路径不在白名单时必须拒绝（退出码 8），且不碰浏览器")
+        # rc=11（原来占 8）：8 现在专门表示「确实没发出去，重发是安全的」，
+        # 而「写路径没标定」的处置完全相反（去标定，别重发）。
+        # 两种失败共用一个码，agent 就一定会做错下一步 —— 见 SKILL.md §0.0 出路表。
+        self.assertEqual(rc, 11, "写路径不在白名单时必须拒绝（退出码 11），且不碰浏览器")
 
 
 if __name__ == "__main__":

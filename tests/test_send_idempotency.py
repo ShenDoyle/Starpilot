@@ -112,7 +112,7 @@ class TestContentIdempotency(_Harness):
         st2["awaiting_reply"] = False      # 模拟 awaiting_reply 已被别的路径清掉
         wa.save_state(self.st_path, st2)
         rc2, _, err2 = self._send("同一句话")
-        self.assertEqual(rc2, 9, err2)
+        self.assertEqual(rc2, 12, err2)
         self.assertIn("--force", err2)
         self.assertIn("已经发过一次", err2)
 
@@ -178,7 +178,7 @@ class TestThreeStateFailure(_Harness):
         self._seq = [cleared] * 30
         wa.evaluate = lambda js, sid: (True, {"ok": False})
         rc, _, err = self._send("疑似发出去了")
-        self.assertEqual(rc, 9, err)
+        self.assertEqual(rc, 12, err)
         self.assertIn("不要直接重试", err)
         st = wa.load_state(self.st_path)
         self.assertTrue(st.get("maybe_sent"), "滞留态必须落进 state，否则下一轮拦不住")
@@ -187,7 +187,7 @@ class TestThreeStateFailure(_Harness):
                              "疑似发出去了".encode("utf-8")).hexdigest()[:16])
         # 紧接着再敲一次同样的话：必须被滞留态拦住
         rc2, _, err2 = self._send("疑似发出去了", "--platform", "chatgpt")
-        self.assertEqual(rc2, 9, err2)
+        self.assertEqual(rc2, 12, err2)
         self.assertIn("疑似已发出但未确认", err2)
 
     def test_sent_no_reply_rc0_tells_agent_to_wait_not_resend(self):
@@ -208,7 +208,7 @@ class TestWritePathWhitelistIsSharedSource(_Harness):
 
     def test_unverified_platform_refused_by_cli(self):
         rc, _, err = self._send("任何内容", "--platform", "claude")
-        self.assertEqual(rc, 8, err)
+        self.assertEqual(rc, 11, err)
         self.assertIn("不具备真实写条件", err)
         self.assertIn("unverified", err)
 

@@ -922,9 +922,26 @@ def close_tab_guarded(sid: str, tab_id: str, owner_key: str, *,
             return {"ok": True, "tab_id": str(tab_id)}
         if unknown:
             tabclaims.mark_unknown(conn, sid, tab_id, (err or out)[:120])
+            # 0.4.1 `dialog status`：关闭卡住最常见的原因是页面挂着 beforeunload
+            # （「确定要离开吗」）。不查就只能报「结果未知」，人得自己想到去窗口看一眼。
+            # 只查不答：accept 等于替用户决定离开这个页面，那是有副作用的裁定。
+            why = ""
+            try:
+                import bskcompat
+                ds = bskcompat.dialog_status(bsk, sid)
+                if ds and ds.get("pending"):
+                    kinds = ", ".join(sorted({str(d.get("type") or "?")
+                                              for d in ds["pending"]}))
+                    why = ("\n页面上挂着原生对话框（%s）——很可能就是 beforeunload "
+                           "在拦关闭。请在窗口里人工处置（wa.py dialog 只读查看），"
+                           "星舵不替你按「确定离开」。" % kinds)
+                elif ds and ds.get("ok") is False:
+                    why = "\n（dialog status 也没查通：%s）" % ds.get("detail")
+            except Exception as e:
+                why = "\n（dialog 预检查没跑成：%s）" % str(e)[:80]
             return {"ok": False, "code": "TAB_CLOSE_UNKNOWN",
                     "message": "关闭结果未知，标签已隔离（must_reinspect），"
-                               "不许重试也不许当它不存在"}
+                               "不许重试也不许当它不存在" + why}
         tabclaims.mark_closed(conn, sid, tab_id)   # 明确失败（标签本就不存在等）
         return {"ok": False, "code": "TAB_CLOSE_FAILED",
                 "message": (err or out).strip()[:120]}
@@ -2123,6 +2140,30 @@ def _do_send_now(p: dict, sid: str) -> tuple:
         if rc != 0:
             return False, "press Enter 失败：%s" % ((err or out).strip()[:200])
         return True, "enter"
+    # 0.4.1 的 `step` 原子通道（默认关）：一个动作、never retried、一次往返。
+    # 开之前必须满足两个硬前提，否则一律回落到页内 JS 点击：
+    #   ① 该 bsk 真的有 step 子命令（问 CLI，不靠版本号猜）；
+    #   ② 发送键选择器在页面上**唯一命中**——多命中时 bsk 直接拒绝
+    #      （selector matched N elements），拿它点发送只会把故障换个样子。
+    # 为什么默认关：ChatGPT 的发送键标记在 2026-11-03 快照里四条候选全部 0 命中
+    # （空编辑器不渲染），还没定标。用未定标的选择器走真实点击 = 拿用户页面做试验。
+    if os.environ.get("STARPILOT_STEP_SEND") == "1":
+        import bskcompat
+        sel = ""
+        for cand in (p.get("sel") or {}).get("send") or []:
+            if count_matches(cand, sid) == 1:
+                sel = cand
+                break
+        if sel and bskcompat.supports(bsk, "step"):
+            rc, out, err = bskcompat.step(
+                bsk, "click", {"selector": sel}, sid,
+                save_full=os.environ.get("STARPILOT_STEP_EVIDENCE", ""))
+            if rc == 0:
+                return True, "step:click %s" % sel
+            return False, "step click 失败 rc=%s：%s" % (
+                rc, ((err or out).strip()[:200] or "无输出"))
+        sys.stderr.write("STARPILOT_STEP_SEND=1 但前提不满足（发送键未唯一命中，"
+                         "或本 bsk 无 step 子命令），回落页内 JS 点击。\n")
     ok, res = evaluate(js_click_send(p), sid)
     if not ok:
         return False, "click 发送失败：%s" % res
@@ -2376,8 +2417,9 @@ def cmd_send(a) -> int:
               "  先跑：python scripts/wa.py wait --timeout 900   # 等回复\n"
               "  或：  python scripts/wa.py triage                # 判卡在哪\n"
               "  确实要再发一遍（比如明知没送达）：加 --force 并说明理由。"
+              "（SEND_UNCERTAIN=12：这条码的含义是「别重发」，不是「失败了再试」）"
               % (st.get("last_send_at"), text_sha), file=sys.stderr)
-        return 9
+        return 12
 
     # ---- 「发出去了但没确认」的滞留态：禁止盲目重敲 ----
     # 上一次点击后编辑器已清空、却没有任何主信号证明送达（verdict=INCONCLUSIVE_*）：
@@ -2387,8 +2429,9 @@ def cmd_send(a) -> int:
         print("上一轮判定为「疑似已发出但未确认」（%s，%s）。\n"
               "  直接重发会造成同一条提问发两遍。先跑 wa.py triage 看页面事实，"
               "确认没送达再带 --force 重发。"
+              "（SEND_UNCERTAIN=12）"
               % (mb.get("verdict") or "?", mb.get("at") or "?"), file=sys.stderr)
-        return 9
+        return 12
 
     # 写路径白名单：平台没实测过写入路径就**不许真实写**。
     # 闸门层（write_gate）一直有这条；CLI 层以前没有 —— 于是「绕过闸门直接 wa.py send」
@@ -2404,7 +2447,7 @@ def cmd_send(a) -> int:
                  list(p.get("write_allowed") or []) or "（空）",
                  platforms.calibration_gap(p)),
               file=sys.stderr)
-        return 8
+        return 11
 
     sid = ensure_session(st, path)
     ok, cur = read_state(p, sid)
@@ -2531,7 +2574,7 @@ def cmd_send(a) -> int:
                   "输入框仍有内容 = 确实没发出去。先 wa.py probe 看状态/弹窗，"
                   "再清空重发。")),
               file=sys.stderr)
-        return 9 if unconfirmed else 8
+        return 12 if unconfirmed else 8
 
     # ---- 新对话首轮：平台已跳到真实会话地址，把 state 换成它，后续轮次据此校验 ----
     if st.get("new_chat"):
@@ -2910,12 +2953,104 @@ def cmd_read(a) -> int:
     return 0
 
 
+def _explain(out: dict, st: dict, rep: dict, wr: dict, sid: str,
+             left, p: dict) -> list:
+    """把体检事实翻成**有序的下一步命令**。
+
+    为什么需要这一层（2026-11-03，用户反馈「不同 agent 用起来总不顺畅」）：
+    `doctor` 原来给的是结构化事实 + 偶尔一句 hint。上下文预算小、遵循度低的
+    agent（Cursor / Codex / WorkBuddy 各家表现不同）读完事实之后仍然要自己
+    推断「那我该敲什么」，推断错了就是再开一个窗口、再发一遍消息。
+    把决策表写进代码，等于让最强的 agent 和最弱的 agent 得到同一条出路。
+    规则：**每条都带可复制的命令**；禁止的动作（重发、走逃生门）明说不许。
+    """
+    acts = []
+
+    def add(reason, cmd=None, forbid=""):
+        acts.append({"reason": reason, "command": cmd or "", "forbid": forbid})
+
+    if not BSK or not os.path.exists(BSK):
+        add("没装 bsk（星舵的核心依赖）",
+            "python scripts/env.py --install")
+        return acts
+    if not rep.get("instances"):
+        add("浏览器扩展没连上 daemon：daemon 在跑但一个实例都没注册",
+            "bsk doctor    # 看扩展是否 Connected；没连就在浏览器里启用扩展",
+            forbid="别用 session start 赌它会自动连好")
+    if rep.get("duplicates"):
+        add("同一个浏览器装了多份扩展：发送和读回会落在不同实例上（发得出去、永远读不到）",
+            duplicate_hint(rep))
+    for b in rep.get("instances") or []:
+        if b.get("skew"):
+            add("实例 %s 的扩展协议与 daemon 不一致（0.4.1 起 protocol 1.8，"
+                "**混版不支持**：会时好时坏，看起来像页面故障）" % b.get("id"),
+                "把浏览器里的 BrowserSkill 扩展升到 0.4.1（商店更新后重开浏览器）")
+    if not st.get("url"):
+        add("还没绑定对话", "python scripts/wa.py bind <对话地址> --platform <key>")
+    if not p.get("write_verified"):
+        add("平台 %s 的写路径没实测过：这是**该标定**，不是该绕过" % p.get("key"),
+            "python scripts/wa.py probe --platform %s" % p.get("key"),
+            forbid="禁用 STARPILOT_ALLOW_DIRECT_SEND 硬闯；逃生门绕开的正是幂等与写后核验")
+    if st.get("maybe_sent"):
+        add("上一轮「疑似已发出但未确认」（输入框已空、无主信号）——此刻重发就是第二条相同提问",
+            "python scripts/wa.py triage",
+            forbid="不要带 --force 重发，除非 triage 证明没送达")
+    if st.get("awaiting_reply"):
+        add("上一轮已发出、回复还没确认完成",
+            "python scripts/wa.py wait --timeout 900",
+            forbid="不要发下一条；先等这一条有结论")
+    if sid:
+        state = session_state(sid)
+        if state == "dead":
+            add("会话已被回收（窗口没了不等于对话没了：回复在平台侧）",
+                "python scripts/wa.py bind \"%s\"   # 同一个地址接上，别加 --new"
+                % (st.get("url") or ""),
+                forbid="不要 --new：上下文和回复都在原对话里")
+        elif state == "unknown":
+            add("会话状态查不清（bsk 输出不可信）：这不是「没了」，不能据此开窗",
+                "bsk status --json")
+    if wr and wr.get("ok") is False:
+        add("绑定页面不在本会话的 Agent Window 里（归属未确认，写操作一律被门拦住）",
+            "python scripts/wa.py window status",
+            forbid="不要 release 除非人工确认；打错窗口等于往用户正在用的窗口打字")
+    if left is not None and left <= 0 and sid:
+        add("租约已过期但窗口还挂着", "python scripts/wa.py reap --once")
+    led = pending_gate_path_for_working_set()
+    if led:
+        add("台账上有报过一次的违例条目没核销（不核销就会一直占回执预算）",
+            "python scripts/pending_gate.py settle \"%s\" --file <本轮回执> "
+            "--round 第N轮" % led)
+    if not acts:
+        add("环境体检没有异常项：卡住的话多半在页面侧，走只读分诊",
+            "python scripts/wa.py triage")
+    return acts
+
+
+def pending_gate_path_for_working_set() -> str:
+    """当前工作区台账里是否存在「可核销」的违例条目（只读判断）。"""
+    try:
+        import pending_gate
+        root = os.path.dirname(state_path(None)) or "."
+        led = pending_gate.pending_path_for(root, "", "")
+        if not os.path.exists(led):
+            return ""
+        items = pending_gate.parse_pending(led)
+        cand = [i for i in items
+                if i["id"].startswith("P0-ESC") and i["status"] != "settled"]
+        return led if cand else ""
+    except Exception:
+        return ""
+
+
 def cmd_doctor(a) -> int:
     """环境体检：实例、重复扩展、会话、state 摘要。
 
     存在的意义：所有「读不到回复」最后都落在四件事上 —— 实例重了、实例掉线了、
     会话没了、state 指向别的地址。做成一条命令，是为了让 agent 在重试之前先看一眼，
     而不是再开一个窗口去赌。
+
+    `--explain`：把事实翻译成**有序的下一步命令**（含禁止动作），给不同能力的
+    agent 同一条出路。见 _explain 的决策表。
     """
     rep = instance_report()
     sessions = [{k: s.get(k) for k in ("id", "browser", "window")} for s in list_sessions()]
@@ -2949,8 +3084,97 @@ def cmd_doctor(a) -> int:
     if sid and left is not None and left <= 0:
         out["hint"] = (out.get("hint", "") + " 租约已过期但窗口还挂着：启动收割器 "
                        "`python scripts/wa.py reap --once`（常驻：--watch）。").strip()
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    p = platforms.get(st.get("platform"))
+    out["calibration"] = {"write_path_ok": platforms.write_path_ok(p),
+                          "loop_accepted": platforms.loop_accepted(p),
+                          "detail": platforms.calibration_gap(p)}
+    if getattr(a, "explain", False):
+        acts = _explain(out, st, rep, wr, sid, left, p)
+        out["next_actions"] = acts
+        out["summary"] = acts[0]["reason"] if acts else "没有异常项"
+        safeprint.jprint(out)
+        # 人话一遍：agent 复制命令、人看结论，两遍都是同一次体检的结果
+        print("\n下一步（按顺序做，做完一条再回来跑 wa.py doctor）：")
+        for i, x in enumerate(acts, 1):
+            print("  %d. %s" % (i, x["reason"]))
+            if x["command"]:
+                print("     $ %s" % x["command"])
+            if x["forbid"]:
+                print("     ✗ %s" % x["forbid"])
+        return 0 if out["ok"] else 6
+    safeprint.jprint(out)
     return 0 if out["ok"] else 6
+
+
+def cmd_dialog(a) -> int:
+    """只读查看挂起的原生对话框（0.4.1 `bsk dialog status`）。
+
+    alert/confirm/prompt/beforeunload 挂起时，关闭与导航会卡在「settling /
+    not responding」这类看不出原因的信号上。本命令只查不答：
+    accept 是替用户决定「离开这个页面」，属有副作用的裁定，不自动化。
+    """
+    import bskcompat
+    path = state_path(getattr(a, "state", None))
+    st = load_state(path)
+    sid = st.get("session") or ""
+    if not sid:
+        print("state 里没有会话：先 wa.py bind", file=sys.stderr)
+        return 2
+    ds = bskcompat.dialog_status(bsk, sid)
+    if ds is None:
+        print("本 bsk 没有 dialog 子命令（需 0.4.1+）。当前版本：%s"
+              % (bsk(["--version"], 20)[1].strip() or "未知"), file=sys.stderr)
+        return 3
+    safeprint.jprint(ds)
+    return 0 if ds.get("ok") else 4
+
+
+def cmd_ask_human(a) -> int:
+    """请人到页面上完成一步（0.4.1 `bsk request-help`）：验证码 / 登录 / 确认。
+
+    为什么值得接官方通道而不是在终端里打一行提示：终端提示只有跑命令的 agent
+    看得见，正在用浏览器的人看不见；页面上的遮罩面板会把「要做什么」直接摆在
+    他眼前，还能用 --completion-criteria 自动判定人做完了。
+    默认只打印将要发起的请求，要真的打扰人才加 `--go`（打扰人是有代价的动作）。
+    """
+    path = state_path(getattr(a, "state", None))
+    st = load_state(path)
+    sid = st.get("session") or ""
+    if not sid:
+        print("state 里没有会话：先 wa.py bind", file=sys.stderr)
+        return 2
+    args = ["request-help", "--session", sid, "--prompt", a.prompt]
+    if a.title:
+        args += ["--title", a.title]
+    for t in (a.target or []):
+        args += ["--target", t]
+    if a.criteria:
+        args += ["--completion-criteria", a.criteria]
+    args += ["--timeout", a.timeout]
+    if not a.go:
+        safeprint.jprint({"ok": True, "dry_run": True, "would_run": ["bsk"] + args,
+                          "next": "确实要打扰人：加 --go 重跑"})
+        return 0
+    rc, out, err = bsk(args, timeout=max(60, _timeout_to_s(a.timeout) + 30))
+    sys.stdout.write(out or "")
+    if rc != 0:
+        sys.stderr.write((err or "")[:400])
+    return rc
+
+
+def _timeout_to_s(text: str) -> int:
+    """'5m' / '300s' / '300000ms' → 秒（bsk request-help 的时长写法）。"""
+    t = (text or "5m").strip().lower()
+    try:
+        if t.endswith("ms"):
+            return max(1, int(float(t[:-2]) / 1000))
+        if t.endswith("m"):
+            return int(float(t[:-1]) * 60)
+        if t.endswith("s"):
+            return int(float(t[:-1]))
+        return int(float(t))
+    except Exception:
+        return 300
 
 
 def cmd_triage(a) -> int:
@@ -2990,6 +3214,27 @@ def cmd_triage(a) -> int:
         "platform": p["key"],
         "platform_verified": p["verified"],
     }
+    # 0.4.1 `observe` 证据落盘（2026-11-03 采纳）：卡住的现场是**易失的**——
+    # 人赶来时页面可能已经变了，而重开一次 observe 又要动浏览器。
+    # VOM 观测存成文件后就成了历史证据：离线可复核（`bsk view <file> --find <文案>`），
+    # 不必再碰浏览器，也让人和 agent 看的是同一份现场。
+    try:
+        import bskcompat
+        if bskcompat.supports(bsk, "observe"):
+            rc, out2, err2 = bsk(["observe", "--session", sid, "--json"], timeout=60)
+            okj, blob = parse_bsk_json(out2)
+            if rc == 0 and okj:
+                d_ = os.path.join(os.path.dirname(path) or ".", "runtime", "wa", "obs")
+                os.makedirs(d_, exist_ok=True)
+                f_ = os.path.join(d_, "triage-%s.json" % time.strftime("%m%d-%H%M%S"))
+                with open(f_, "w", encoding="utf-8", newline="\n") as fh:
+                    json.dump(blob, fh, ensure_ascii=False, indent=1)
+                out["observation"] = {"file": f_,
+                                      "read_offline": "bsk view \"%s\" --find '<页面上的文案>'"
+                                                      % f_}
+    except Exception as e:
+        out["observation"] = {"ok": False, "detail": str(e)[:120]}
+
     # 兜底读取：选择器失效时，页面文本其实读得到——这一步只读，不刷新页面。
     # 刷新是最后手段（会杀掉正在生成的回复），而且刷新后必须重走发送流程，
     # 所以默认不做，要人显式加 --reload。
@@ -3221,7 +3466,27 @@ def main(argv: list | None = None) -> int:
     p.set_defaults(func=cmd_triage)
 
     p = add_pl(sub.add_parser("doctor", help="体检：浏览器实例 / 重复扩展 / 会话 / state"))
+    p.add_argument("--explain", action="store_true",
+                   help="把事实翻译成**有序的下一步命令**（含禁止动作）；"
+                        "不同能力的 agent 应该得到同一条出路")
     p.set_defaults(func=cmd_doctor)
+
+    p = add_pl(sub.add_parser("dialog", help="只读查看挂起的原生对话框（0.4.1 dialog status）"))
+    p.set_defaults(func=cmd_dialog)
+
+    p = add_pl(sub.add_parser("ask-human",
+                              help="请人到页面完成一步（0.4.1 request-help）；默认只演练"))
+    p.add_argument("--prompt", required=True, help="给人看的一句话：要做什么")
+    p.add_argument("--title", default="", help="面板标题（可选）")
+    p.add_argument("--target", action="append", default=[],
+                   help="要高亮的目标：快照 ref（@e3）或 CSS 选择器（#login），可重复")
+    p.add_argument("--criteria", default="",
+                   help='完成判据 JSON，例如 {"any":[{"url_contains":"/dashboard"}],'
+                        '"stable_for_ms":1000}')
+    p.add_argument("--timeout", default="5m", help="人的响应上限（默认 5m）")
+    p.add_argument("--go", action="store_true",
+                   help="真的发起请求（会占用人的注意力，默认只演练）")
+    p.set_defaults(func=cmd_ask_human)
 
     p = add_pl(sub.add_parser("state", help="查看 state（含锁持有者）"))
     p.set_defaults(func=cmd_state)

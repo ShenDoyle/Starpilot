@@ -253,3 +253,90 @@ def _sid_of(args):
         if v == "--session" and i + 1 < len(a):
             return a[i + 1]
     return None
+
+
+# ---------------------------------------------------------------- 0.4.1 能力层
+#
+# 只靠版本号决定「用不用某个子命令」是不够的：同一版本不同构建、
+# 或用户手动降级 CLI，能力就可能对不上。所以能力一律**问 CLI 自己**
+# （`<cmd> --help` 通不通），结果缓存一次；问不出来就当没有。
+# 探测是纯本地动作（--help 不触页面、不动 daemon），零风险。
+
+_CAPS = {}
+_STEP_ACTIONS = ("click", "press", "fill", "hover", "select", "drag",
+                 "scroll-to", "wheel", "navigate")
+
+
+def supports(runner, cmd: str) -> bool:
+    """这个 bsk 有没有 <cmd> 子命令。runner 是 wa.bsk 那一层的调用器。"""
+    if cmd in _CAPS:
+        return _CAPS[cmd]
+    try:
+        rc, out, err = runner([cmd, "--help"], 20)
+    except Exception:
+        rc = 1
+    help_markers = ("Usage:", "usage:", "Options:")
+    ok = rc == 0 and any(m in (out or "") + (err or "") for m in help_markers)
+    _CAPS[cmd] = ok
+    return ok
+
+
+def reset_caps() -> None:
+    """测试/升级 CLI 后清空能力缓存。"""
+    _CAPS.clear()
+
+
+def step(runner, action: str, params: dict, sid: str, *, until_visible: str = "",
+         expect: list = None, policy: str = "target", save_full: str = "",
+         wait_timeout_ms: int = 5000, timeout: int = 120):
+    """`bsk step`：一个动作 + 一个已知条件 + 同步状态，**never retried**。
+
+    为什么值得用它（0.4.1）：星舵原来每条页面动作都是「cooperate sync → 动作 →
+    再探测」三次往返，而 ChatGPT 这类页面在 sync 与动作之间持续变异，
+    context 秒级失效（实测：`observed content changed` 反复触发，
+    补救要再 sync 一轮）。step 把动作与就绪条件交给扩展原子执行，
+    往返次数从 3 降到 1，竞态窗口也随之收窄。
+
+    ⚠️ 不默认启用：`--expect` 的目标是**快照 ref（@e1）**而不是 CSS 选择器，
+    星舵现在全走选择器；照搬会把「目标事实校验」做成永远不满足。
+    因此这一步只在 `STARPILOT_STEP_SEND=1` 时走，并且
+      · 只用 `--until-visible`（CSS，正信号）+ `--save-full` 留证据；
+      · 动作后仍由页面事实判成败（platforms.fill_check / confirm 口径不变）——
+        bsk 的自我校验不是判据，这条是老教训，不因为换了原语就作废。
+    """
+    if action not in _STEP_ACTIONS:
+        return 2, "", "step 不支持的动作：%s（可选 %s）" % (action, ",".join(_STEP_ACTIONS))
+    args = ["step", "--session", sid, "--action", action,
+            "--params", json.dumps(params or {}, ensure_ascii=False),
+            "--policy", policy, "--wait-timeout-ms", str(int(wait_timeout_ms)),
+            "--json"]
+    if until_visible:
+        args += ["--until-visible", until_visible]
+    if expect:
+        args += ["--expect", json.dumps(expect, ensure_ascii=False)]
+    if save_full:
+        args += ["--save-full", save_full]
+    return runner(args, timeout)
+
+
+def dialog_status(runner, sid: str, timeout: int = 30):
+    """`bsk dialog status`：读挂起的原生对话框（alert/confirm/prompt/beforeunload）。
+
+    用在**收窗前**：beforeunload 挂起会让 `session stop` / tab close 卡在页面上，
+    表现是「收割失败」，而真相是页面在问用户「确定要离开吗」。
+    先查出来如实报，让人决定 accept 还是 dismiss——
+    星舵不替用户自动 accept（那等于替用户回答「离开这个页面」，是有副作用的决定）。
+    """
+    if not supports(runner, "dialog"):
+        return None
+    rc, out, err = runner(["dialog", "status", "--session", sid, "--json"], timeout)
+    if rc != 0:
+        return {"ok": False, "rc": rc, "detail": (err or out)[:200], "pending": []}
+    try:
+        data = json.loads((out or "").strip() or "{}")
+    except Exception:
+        return {"ok": False, "rc": 0, "detail": "dialog status 输出解析失败",
+                "pending": []}
+    items = data.get("dialogs") if isinstance(data, dict) else data
+    items = items if isinstance(items, list) else []
+    return {"ok": True, "pending": items, "raw": data}
