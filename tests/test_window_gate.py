@@ -681,3 +681,68 @@ class TestNavigateGate(unittest.TestCase):
         g = wa.navigate_gate("sess1", "https://x")
         self.assertFalse(g["ok"])
         self.assertIn("TABCLAIM", g["why"])            # 报清「账本不可用」而不是沉默放行
+
+
+class TestHomeFormNotPrefixMatched(unittest.TestCase):
+    """首页/新对话形态**不许**被前缀匹配成「和用户窗口同一路」（2026-11-04 实测修）。
+
+    真实现场：`bind --new` 把 bound 落成 `https://chatgpt.com/`，而用户窗口里开着
+    两条 ChatGPT 会话（`/c/6ae9689e…`、`/c/6ae80db0…`）。旧判据
+    `tab.startswith(bound)` 让 `bound_in_user=True` ⇒ `misplaced` ⇒ 写门把
+    `bind --new` 之后的第一次发送拦死。绑完整会话 URL 时一切正常，
+    绑首页时必然误判——症状就是「换个 agent、换个时刻就不顺」，
+    差别只在用户当时开没开着那个网页。
+    """
+
+    USER_TABS = ["https://chatgpt.com/c/6ae9689e-6124-83ea-a00c-06e02c123610",
+                 "https://chatgpt.com/c/6ae80db0-2820-83ea-adf6-482630f06332"]
+    AGENT_TABS = ["https://chatgpt.com/"]
+
+    def _report(self, bound):
+        import unittest.mock as mock
+        rep = {"agent": list(self.AGENT_TABS), "user": list(self.USER_TABS),
+               "ok": True}
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+            return wa.window_report({"url": bound, "platform": "chatgpt"}, "lhyh")
+
+    def test_home_bound_is_not_confused_with_users_conversations(self):
+        out = self._report("https://chatgpt.com/")
+        self.assertTrue(out["bound_in_agent"], "首页就在 Agent Window 里")
+        self.assertFalse(out["bound_in_user"],
+                         "用户窗口里是**会话页**，不是首页，不能算同一路")
+        self.assertTrue(out["ok"], "归属必须判正常，否则 bind --new 后第一次发送被误拦")
+
+    def test_conversation_bound_still_matches_query_variants(self):
+        """会话形态要继续容忍 `?utm=…` 这类尾巴——原来的宽松匹配是有理由的。"""
+        import unittest.mock as mock
+        rep = {"agent": ["https://chatgpt.com/c/6ae80db0-2820-83ea?utm=x"],
+               "user": ["https://chatgpt.com/c/99999"], "ok": True}
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+            out = wa.window_report({"url": "https://chatgpt.com/c/6ae80db0-2820-83ea"},
+                                   "s")
+        self.assertTrue(out["bound_in_agent"])
+        self.assertFalse(out["bound_in_user"])
+        self.assertTrue(out["ok"])
+
+    def test_same_conversation_open_in_both_windows_is_misplaced(self):
+        """同一条会话同时出现在用户窗口 = 真歧义，照旧拒绝（不许放松成放行）。"""
+        import unittest.mock as mock
+        dup = "https://chatgpt.com/c/6ae80db0-2820-83ea"
+        rep = {"agent": [dup], "user": [dup], "ok": True}
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+            out = wa.window_report({"url": dup}, "s")
+        self.assertTrue(out["bound_in_user"])
+        self.assertFalse(out["ok"])
+
+    def test_sibling_prefix_is_not_the_same_page(self):
+        """`/c/abc` 不能匹配 `/c/abcdef`：那是另一条对话，打错就是往别人对话里打字。"""
+        self.assertFalse(wa._same_place("https://x.com/c/abc", "https://x.com/c/abcdef"))
+        self.assertTrue(wa._same_place("https://x.com/c/abc", "https://x.com/c/abc?s=1"))
+        self.assertTrue(wa._same_place("https://x.com/c/abc", "https://x.com/c/abc/sub"))
+
+    def test_trailing_slash_forms_are_equivalent(self):
+        self.assertTrue(wa._same_place("https://chatgpt.com/", "https://chatgpt.com"))
+        self.assertTrue(wa._same_place("https://chatgpt.com/app", "https://chatgpt.com/app/"))
+
+    def test_different_host_never_matches(self):
+        self.assertFalse(wa._same_place("https://chatgpt.com/", "https://deepseek.com/"))

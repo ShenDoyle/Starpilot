@@ -316,20 +316,33 @@ class TestChatGPTReplay(unittest.TestCase):
         self.assertIn("new Set(asstKeys).size", js,
                       "回复计数没按身份去重：虚拟列表重挂会把一条算成两条")
 
-    def test_send_control_absence_is_a_declared_gap(self):
-        """录制时编辑器是空的 → 发送键**条件渲染**，页面上根本没有它（实测 type=submit 命中 0）。
+    def test_send_control_is_unique_submit_with_label(self):
+        """发送键定标（2026-11-04 真机，只打字未发送）：`form button[type=submit]` 唯一命中 1。
 
-        这条不许变绿成「选择器没问题」：它要求平台必须声明 `send_requires_text`，
-        这样「写完但发送键没出现」会当失败报出来（FILL_NO_SEND），
-        而不是对空气点一次然后白等一轮。发送键的真实标记仍待**有字时**重录夹具。
+        这条取代了上一版「发送键命中 0」的断言。上一版保护的是同一件事的**另一半**：
+        空编辑器时页面上根本没有发送键（录制实测：form 内 4 个按钮全是 type=button，
+        submit 命中 0），所以「写完看不见发送键」必须当失败报，不能对空气点一次。
+        两份事实现在都留在夹具与 meta.json 里，各有各的断言，不许互相覆盖。
         """
-        hits = sum(len(domsel.select_all(self.comp, s)) for s in self.p["sel"]["send"])
-        self.assertEqual(hits, self.meta["expected"]["send_candidates_in_composer"])
+        hits = domsel.select_all(self.comp, 'form button[type="submit"]')
+        self.assertEqual(len(hits), self.meta["expected"]["submit_in_composer"],
+                         "发送键必须唯一命中：多匹配会被 bsk 直接拒绝（selector matched N）")
+        b = hits[0]
+        self.assertEqual(b.attrs.get("type"), "submit")
+        self.assertEqual(b.attrs.get("aria-label"), "发送")
+        # 已废弃的 testid 仍然查不到，别把它当可用候选
+        self.assertEqual(len(domsel.select_all(
+            self.comp, 'button[data-testid="send-button"]')), 0)
+        # 首选候选就得是这条，顺序错了就会命中 0
+        self.assertEqual(self.p["sel"]["send"][0], 'form button[type="submit"]')
+
+    def test_send_requires_text_is_declared(self):
+        """条件渲染这条平台事实必须写在平台定义里（空态 0 个 submit 是实测得来的）。"""
         self.assertTrue(self.p.get("send_requires_text"),
                         "ChatGPT 的发送键是条件渲染的：必须声明，否则空态会被当成可点")
 
     def test_verified_stays_false_until_loop_acceptance(self):
-        """计数锚点重标定 ≠ 整链路实测。5/5 独立问答验收 + 发送键定标前不许翻 True。"""
+        """发送键与计数锚点都定标了 ≠ 整链路实测：5/5 独立问答没跑，就不许翻 True。"""
         self.assertFalse(self.p.get("verified"))
         self.assertIn("重标定", self.p.get("notes", ""))
 

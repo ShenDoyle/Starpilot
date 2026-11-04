@@ -131,25 +131,28 @@ PLATFORMS = {
         #     与 `data-chatgpt-search-message-ids`（轮次容器；用户消息自己不带，
         #     要向上找祖先 —— 已由 key_attrs + key_up 表达）
         #   · 实测命中：助手 6 / 轮次容器 12 / 用户气泡 6，旧属性命中 0
-        # `verified` 仍保持 **false**，因为还差两件事（不是「大部分能用」的借口，
-        # 是口径本身）：① 发送键的真实标记（快照是空编辑器录的，条件渲染的按钮
-        # 压根不在页面上，`type=submit` 命中 0）；② 专用测试对话上 5/5 独立问答验收。
-        # 计数口径已重标定，写路径 11-02 复测过，但整链路口径没过 5/5 就不许翻 True。
+        # 2026-11-04 真机定标发送键（bind --new 开专用测试对话，**只打字未发送**）：
+        #   · 编辑器有字时 `form button[type=submit]` 唯一命中 1，aria-label=发送；
+        #     `button[data-testid=send-button]` 命中 0（确认废弃）
+        #   · 空编辑器时 form 内 4 个按钮全是 type=button，submit 命中 0
+        #     ⇒ 发送键是条件渲染的，`send_requires_text` 必须声明
+        # `verified` 仍保持 **false**：只剩一件事没做——专用测试对话上 5/5 独立问答
+        # 验收（那要真发消息，属写动作，需用户另行放行）。
+        # 不拿「选择器都定标了」冒充「整链路已实测」。
         "verified": False,
-        # 写路径（editor 写入 + send 点击）2026-11-02 当天单独复测通过：
-        # 2367 字全文写入、指纹 6/6 命中、点击后地址出现 /c/<uuid>。
-        # ⚠️ 但 11-03 快照显示 form 内已无 `type="submit"` 按钮（空输入态不渲染），
-        # 所以这条只对「当时那一次的写入」负责，发送键标记**待重新实测**。
+        # 写路径（editor 写入 + send 点击）2026-11-02 复测通过；2026-11-04 再次定标
+        # 了发送键的存在与唯一性（但未实发）。
         "write_verified": True,
-        "write_verified_at": "2026-11-02",
+        "write_verified_at": "2026-11-04",
         "notes": "2026-11-02 DOM 改版后：editor=`form div.ProseMirror`（裸写 "
                  "div.ProseMirror 会命中多个：消息/写作块同名，bsk 直接拒绝 "
                  "selector matched N elements）；消息计数锚点已于 2026-11-03 用真机快照"
                  "重标定为 data-chatgpt-selection-message-id / "
-                 "data-chatgpt-search-message-ids（旧 data-message-author-role 命中 0）。"
-                 "**仍待重标定**：发送键真实标记（空编辑器时不渲染，快照里 type=submit "
-                 "命中 0）与 stop 标记；整链路 5/5 独立问答验收未跑 —— 这两件事没做完 "
-                 "verified 保持 false，不拿「计数能用」冒充「链路已实测」。",
+                 "data-chatgpt-search-message-ids（旧 data-message-author-role 命中 0）；"
+                 "发送键已于 2026-11-04 真机定标为 form button[type=submit]（aria=发送，"
+                 "唯一命中，条件渲染：空态 0 个）。**仍待**：专用测试对话 5/5 独立问答"
+                 "验收（未实发）—— 这条没跑完 verified 就保持 false，"
+                 "不拿「选择器已定标」冒充「整链路已实测」。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chatgpt.com/c/<uuid>；出现 / 或 /new 即为新对话，拒绝绑定。",
         "write_method": "exec",
@@ -188,9 +191,12 @@ PLATFORMS = {
                        "#prompt-textarea",
                        "main div[contenteditable=\"true\"]",
                        "div[contenteditable=\"true\"]"],
-            # 2026-11-02 实测：发送是表单提交按钮（aria=发送）；testid 已弃用，留作后备
-            # ⚠️ 2026-11-03 快照（空输入态）里这四条**全部命中 0**：发送键是条件渲染的，
-            # 没字的时候页面上没有它。候选保留，但**必须在编辑器有字时重录一份**才能定标。
+            # 2026-11-04 真机定标（编辑器**有字**时录制，夹具 tests/fixtures/chatgpt/composer.html）：
+            # `form button[type=submit]` 唯一命中 1、aria-label=发送；
+            # testid=send-button 命中 0（确认废弃，留作旧版兼容位）。
+            # ⚠️ 空编辑器时整张 form 里没有 submit（4 个按钮全是 type=button）——
+            # 发送键条件渲染，所以配套声明了 send_requires_text：
+            # 看不见发送键 = 平台没接受这份输入，不是「按钮暂时禁用」，不许点空气。
             "send": ["form button[type=\"submit\"]",
                      "button[data-testid=\"send-button\"]",
                      "main button[aria-label=\"发送\"]",

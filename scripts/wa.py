@@ -754,6 +754,37 @@ def tab_scope_report(sid: str) -> dict:
     return {"agent": _urls("agent"), "user": _urls("user")}
 
 
+def _url_key(u: str):
+    """(host, path) 归一键：忽略 query/hash，统一末尾斜杠。"""
+    s = urlparse(u or "")
+    path = (s.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    return ((s.netloc or "").lower(), path)
+
+
+def _same_place(bound_url: str, tab_url: str) -> bool:
+    """这个标签页和绑定的页面，是不是**同一个地方**。
+
+    为什么不能简单 `tab.startswith(bound)`（2026-11-04 实测修掉的原 bug）：
+    `bind --new` 绑的是站点首页 `https://chatgpt.com/`，而用户窗口里
+    **任何一条** ChatGPT 会话都以它开头 ⇒ `bound_in_user=True` ⇒ 判
+    `misplaced` ⇒ 写门把第一次发送拦死。同一份代码，绑完整会话 URL 时
+    一切正常，绑首页时必然误判——「换个时刻就不顺」就是它。
+    规则：
+      · 首页形态（path 为空或 `/`）只认同一路径，绝不前缀匹配到子页面；
+      · 会话形态按**路径段**对齐：`/c/abc` 认 `/c/abc` 与 `/c/abc/x`，
+        但不认 `/c/abcdef`（那是另一条对话，前缀匹配会把它当同一条）。
+    """
+    nb, pb = _url_key(bound_url)
+    nt, pt = _url_key(tab_url)
+    if nb != nt:
+        return False
+    if pb == "/":
+        return pt == "/"
+    return pt == pb or pt.startswith(pb + "/")
+
+
 def window_report(st: dict, sid: str) -> dict:
     """绑定地址落在哪个 scope：agent=正常；user=开到用户窗口，要自愈。"""
     rep = tab_scope_report(sid)
@@ -761,7 +792,7 @@ def window_report(st: dict, sid: str) -> dict:
 
     def _has(urls):
         if bound and isinstance(urls, list):
-            return any((u or "").split("?")[0][:60].startswith(bound) for u in urls)
+            return any(_same_place(bound, u) for u in urls)
         return None  # None = 探不到
 
     out = dict(rep)

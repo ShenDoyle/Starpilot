@@ -11,7 +11,7 @@
     "role_header": 12
   },
   "critical_fact": "旧选择器 [data-message-author-role] 在 2026-11-02 改版后命中 0 —— reply_count 因此恒 0，每次发送都被判 SENT_NO_REPLY。新身份锚点是 data-chatgpt-selection-message-id（助手，节点自带）与 data-chatgpt-search-message-ids（轮次容器，用户消息要靠祖先取）。",
-  "NOT_TESTED": "composer.html 录制时输入框是空的：ChatGPT 的发送键是**条件渲染**，空态下页面上根本没有该按钮（实测 type=submit 命中 0）。所以本夹具**不能**证明发送键选择器可用，只证明「空态必须报失败」。发送键的真实标记需要在输入框有字时另录一份。",
+  "NOT_TESTED": "整链路 5/5 独立问答验收仍未跑：本次只定标了发送键的**存在与唯一性**，没有真发过一条消息，因此回复识别（reply_count 锚点）的端到端正确性仍属未验证，verified 保持 false。",
   "note": "重录方法：只读 session 里 navigate 到目标对话 → bsk get-html → 按本文件 how_trimmed 裁剪。发送键那份要先把编辑器填上字再录。",
   "expected": {
     "assistant": 6,
@@ -19,7 +19,19 @@
     "user": 6,
     "editor_in_composer": 1,
     "old_role_attr": 0,
-    "send_candidates_in_composer": 0
+    "send_candidates_in_composer": 1,
+    "submit_in_composer": 1
   },
-  "why_no_chatgpt_fixture_before": "2026-11-02 改版把 data-message-author-role 全删了，而仓库里只有 deepseek/gemini/kimi 三份夹具，ChatGPT 没有夹具 → 选择器失效在 unittest 阶段一条都不红，直到线上每次发送都判 SENT_NO_REPLY 才被发现。本夹具的存在意义就是把这类改版变成当场红。"
+  "why_no_chatgpt_fixture_before": "2026-11-02 改版把 data-message-author-role 全删了，而仓库里只有 deepseek/gemini/kimi 三份夹具，ChatGPT 没有夹具 → 选择器失效在 unittest 阶段一条都不红，直到线上每次发送都判 SENT_NO_REPLY 才被发现。本夹具的存在意义就是把这类改版变成当场红。",
+  "composer": {
+    "recorded_at": "2026-11-04 10:08 (Asia/Shanghai)",
+    "how": "只打字不发送：bind --new 开专用测试对话 → do_fill 打进标记句 → evaluate 取 form.outerHTML → clear_editor 清空 → session stop。全程未点发送、未产生任何消息。",
+    "editor_state": "有字（19 字标记句）",
+    "finding": "发送键 = `form button[type=submit]`，aria-label=发送，唯一命中 1；`button[data-testid=send-button]` 命中 0（已废弃）。证实发送键条件渲染：空态整张 form 里 0 个 submit，有字才出现。",
+    "marker_text": "星舵发送键定标探针（不会发送，请忽略）"
+  },
+  "composer_empty_recorded_2026_11_03": {
+    "editor_state": "空",
+    "finding": "空编辑器时 form 内 4 个按钮全是 type=button（附件/语音/听写），0 个 submit —— 所以 send_requires_text 必须声明，「写完看不见发送键」= 平台没接受这份输入，不是可以点空气。"
+  }
 }
