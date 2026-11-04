@@ -136,12 +136,24 @@ PLATFORMS = {
         #     `button[data-testid=send-button]` 命中 0（确认废弃）
         #   · 空编辑器时 form 内 4 个按钮全是 type=button，submit 命中 0
         #     ⇒ 发送键是条件渲染的，`send_requires_text` 必须声明
-        # `verified` 仍保持 **false**：只剩一件事没做——专用测试对话上 5/5 独立问答
-        # 验收（那要真发消息，属写动作，需用户另行放行）。
-        # 不拿「选择器都定标了」冒充「整链路已实测」。
-        "verified": False,
+        # ⚠️ 这里曾有第二个 `"verified": False` 键（写新证据时忘了删旧的）。
+        # Python 字典字面量**后写的键静默覆盖先写的**，不报错也不警告——
+        # 与 lessons 里记过的 `PW.jstBox` 同名方法覆盖是同一类坑。改平台定义时
+        # 先跑一次重复键检查，别靠肉眼。
+        # 2026-11-04 走写闸门正路在**专用测试对话**上跑完 5/5 独立问答验收：
+        # 每轮五条判据全过（发送成功+编辑器转空+新 user 轮次 / 助手 UUID 集合增量恰 1 /
+        # 新增助手与本轮 user 相邻 / 单轮单发 / 新增身份均为发送前不存在者），
+        # 闸门核验每轮 VERIFIED，全程未用逃生门。⇒ verified 翻 true 的依据是这条实测，
+        # 不是「选择器都定标了所以大概能用」。
+        # 前一次 5/5（同日 11:43）第 5 轮判 CONTAMINATED：新增 3 个用户轮次正文互不相同，
+        # 其中两句是用户同期在同一对话里打的字——那是外部并发使用，不是发送缺陷
+        # （见 lessons L-42），所以那次没有翻 true，重跑干净的一轮才算数。
+        "verified": True,
+        "verified_at": "2026-11-04",
+        "verified_evidence": "runs/20261104T000000-chatgpt-acceptance-* + "
+                             "runtime/wa/accept-1104/acceptance-report.json（5/5 PASS）",
         # 写路径（editor 写入 + send 点击）2026-11-02 复测通过；2026-11-04 再次定标
-        # 了发送键的存在与唯一性（但未实发）。
+        # 发送键（唯一命中、条件渲染）。
         "write_verified": True,
         "write_verified_at": "2026-11-04",
         "notes": "2026-11-02 DOM 改版后：editor=`form div.ProseMirror`（裸写 "
@@ -150,13 +162,10 @@ PLATFORMS = {
                  "重标定为 data-chatgpt-selection-message-id / "
                  "data-chatgpt-search-message-ids（旧 data-message-author-role 命中 0）；"
                  "发送键已于 2026-11-04 真机定标为 form button[type=submit]（aria=发送，"
-                 "唯一命中，条件渲染：空态 0 个）；同日走写闸门实跑 5/5 验收，"
-                 "**第 1–4 轮五条判据全过**（SENT / effective_delta=1 / 新增助手 UUID 恰 1 / "
-                 "归属相邻 / 单轮单发 / 无历史误认），锚点重标定在真机上成立。"
-                 "第 5 轮 SENT_MULTI 经查是**用户同期在同一条对话里打字**所致"
-                 "（三句正文互不相同、journal 只一条 write_send），不是重发。"
-                 "⇒ 需要重跑一次「期间无人使用」的干净 5 轮才算验收完成，"
-                 "在此之前 verified 保持 false，不拿「4/5 + 一轮外部污染」冒充已验收。",
+                 "唯一命中，条件渲染：空态 0 个）；**2026-11-04 专用测试对话 5/5 独立问答"
+                 "验收全过**（走写闸门、禁逃生门，每轮 VERIFIED）⇒ verified=true。"
+                 "已知平台侧遗留：ChatGPT 会把 composer 草稿恢复进新开对话，"
+                 "键盘清不掉、由 exec 回落兜住（lessons L-39）。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chatgpt.com/c/<uuid>；出现 / 或 /new 即为新对话，拒绝绑定。",
         "write_method": "exec",

@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -224,12 +225,54 @@ class TestPlatformContract(unittest.TestCase):
         self.assertIn("deepseek", verified, "DeepSeek 2026-10-29 已实测通过")
         self.assertIn("gemini", verified, "Gemini 2026-10-29 已实测通过")
         self.assertIn("kimi", verified)
-        self.assertNotIn("chatgpt", verified,
-                         "2026-11-02 DOM 改版后计数选择器失效：重标定前不许标 verified")
-        self.assertIn("重标定", platforms.get("chatgpt").get("notes", ""))
+        self.assertIn("chatgpt", verified,
+                      "2026-11-04 专用测试对话 5/5 独立问答验收全过（走写闸门、禁逃生门）")
         self.assertIn("doubao", verified, "豆包 2026-10-29 已实测通过（Tiptap + exec + enter 发送）")
         for k in ("claude",):
             self.assertNotIn(k, verified, "%s 没实测过，不许标 verified" % k)
+
+    def test_chatgpt_verified_carries_evidence(self):
+        """翻 true 必须留证据指针，不能只留一个布尔。"""
+        p = platforms.get("chatgpt")
+        self.assertTrue(p.get("verified"))
+        self.assertRegex(p.get("verified_at") or "", r"^\d{4}-\d{2}-\d{2}$",
+                         "verified 必须有实测日期")
+        ev = p.get("verified_evidence") or ""
+        self.assertIn("acceptance", ev, "必须指到那份 5/5 验收报告/账本")
+        self.assertIn("5/5", p.get("notes", ""),
+                      "notes 要写清是靠 5/5 验收翻的，不是靠选择器定标")
+
+    def test_no_duplicate_keys_in_platform_literals(self):
+        """平台字典不许出现重复键：Python 后写的**静默覆盖**先写的。
+
+        2026-11-04 真踩到：改 ChatGPT 标定状态时新写了一个 `"verified": True`，
+        忘了删上面那条 `"verified": False`。字典字面量不报错、不警告，
+        后写的赢——如果顺序反了，平台就悄悄退回未验证，而所有单测照样绿。
+        与 lessons 记过的 `PW.jstBox` 同名方法覆盖是同一类坑，所以做成机器体检。
+        """
+        import ast
+        src = io.open(os.path.join(ROOT, "scripts", "platforms.py"),
+                      encoding="utf-8").read()
+        tree = ast.parse(src)
+        bad = []
+
+        def walk(node, where):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.Dict):
+                    keys = []
+                    for k in child.keys:
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                            if k.value in keys:
+                                bad.append("%s: 重复键 %r（行 %s）" % (
+                                    where, k.value, k.lineno))
+                            keys.append(k.value)
+                    walk(child, where)
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                        ast.ClassDef)):
+                    walk(child, child.name)
+
+        walk(tree, "platforms")
+        self.assertEqual(bad, [], "平台定义里有重复键：%s" % "; ".join(bad))
 
 
 class TestChatGPTReplay(unittest.TestCase):
@@ -341,10 +384,21 @@ class TestChatGPTReplay(unittest.TestCase):
         self.assertTrue(self.p.get("send_requires_text"),
                         "ChatGPT 的发送键是条件渲染的：必须声明，否则空态会被当成可点")
 
-    def test_verified_stays_false_until_loop_acceptance(self):
-        """发送键与计数锚点都定标了 ≠ 整链路实测：5/5 独立问答没跑，就不许翻 True。"""
-        self.assertFalse(self.p.get("verified"))
-        self.assertIn("重标定", self.p.get("notes", ""))
+    def test_verified_is_gated_on_documented_acceptance(self):
+        """翻 true 的唯一合法依据是验收证据；缺证据时 notes 必须写清还差什么。
+
+        这条断言在 2026-11-04 换过一次方向：原来锁 `verified is False`，理由是
+        「选择器定标 ≠ 整链路实测」。真跑完 5/5 独立问答验收（专用测试对话、
+        走写闸门、每轮 VERIFIED、禁逃生门）之后才允许翻 true。
+        两种状态都必须自带说明，避免出现「布尔为真但没人说得出为什么」。
+        """
+        if self.p.get("verified"):
+            self.assertTrue(self.p.get("verified_at"), "标了 verified 却没有实测日期")
+            self.assertTrue(self.p.get("verified_evidence"), "标了 verified 却没有证据指针")
+            self.assertIn("5/5", self.p.get("notes", ""))
+        else:
+            self.assertIn("重标定", self.p.get("notes", ""),
+                          "未验收时 notes 必须写清还差什么")
 
 
 if __name__ == "__main__":

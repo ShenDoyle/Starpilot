@@ -212,10 +212,17 @@ class TestWritePathWhitelistIsSharedSource(_Harness):
         self.assertIn("不具备真实写条件", err)
         self.assertIn("unverified", err)
 
-    def test_write_only_platform_allowed_by_cli(self):
-        """ChatGPT：写路径复测过、整链路未验收 ⇒ 允许真实写（否则只能走逃生门）。"""
-        self.assertTrue(platforms.write_path_ok(platforms.get("chatgpt")))
-        self.assertFalse(platforms.loop_accepted(platforms.get("chatgpt")))
+    def test_write_only_and_loop_accepted_are_separate_accounts(self):
+        """写路径与整链路是两笔账：CLI 只看前者，后者决定能不能宣称自动确认回复。
+
+        2026-11-04 之后 ChatGPT 两笔账都齐了（写路径复测 + 5/5 验收）。
+        断言仍分开写，是为了防止将来有人拿一个布尔同时代表两件事——
+        那正是当初把 agent 逼上逃生门的口径错误。
+        """
+        p = platforms.get("chatgpt")
+        self.assertTrue(platforms.write_path_ok(p))
+        self.assertTrue(platforms.loop_accepted(p))
+        self.assertTrue(p.get("write_verified"))
         self._seq = [self.after] * 25
         rc, out, err = self._send("走正路的一句话")
         self.assertEqual(rc, 0, err + out)

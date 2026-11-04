@@ -225,10 +225,12 @@ class TestWriteGate(TempWorkspace):
             self.assertTrue(p.get("verified"))
             self.assertIn(p.get("write_method"), p.get("write_allowed"),
                           "%s 的 write_method 必须在自己的白名单里" % key)
-        # chatgpt：整链路口径未 verified（计数选择器待重标定），但写路径当天单独复测过，
-        # 白名单保留是事实而不是放水——两件事分开记，不许互相冒充。
+        # chatgpt：2026-11-04 专用测试对话 5/5 独立问答验收全过 ⇒ 整链路 verified=true；
+        # 写路径的单独复测（write_verified）与它是两件事，各自留痕，不许互相冒充。
         cg = platforms.get("chatgpt")
-        self.assertFalse(cg.get("verified"))
+        self.assertTrue(cg.get("verified"),
+                        "2026-11-04 已跑完 5/5 验收（走写闸门、每轮 VERIFIED、禁逃生门）")
+        self.assertTrue(cg.get("verified_at"), "verified 必须带实测日期")
         self.assertTrue(cg.get("write_verified"))
         self.assertIn(cg.get("write_method"), cg.get("write_allowed"))
 
@@ -371,10 +373,14 @@ class TestMatrixAndSignals(TempWorkspace):
             if not r["verified"] and not p.get("write_verified"):
                 self.assertFalse(r["send_allowed"],
                                  "%s 未实测、写路径也没单独复测，就不许真写" % r["platform"])
-        # chatgpt 是「写路径已复测、整链路待重标定」的特例：写允许，但必须两账分明
+        # chatgpt 两账分明：写路径单独复测过、整链路已于 2026-11-04 验收通过。
+        # 注意本用例自己造的是简化 rows（只有 platform/verified/send_allowed），
+        # write_verified 要从平台定义取，别以为矩阵里一定有这一列。
         cg = {r["platform"]: r for r in rows}["chatgpt"]
         self.assertTrue(cg["send_allowed"])
-        self.assertFalse(cg["verified"])
+        self.assertTrue(cg["verified"])
+        self.assertTrue(platforms.get("chatgpt").get("write_verified"),
+                        "整链路 verified 不代替写路径复测记录，两笔账都要在")
 
     def test_editor_cleared_is_weak_signal_only(self):
         """输入框清空是**弱信号**：主信号不满足时必须报 INCONCLUSIVE_NOT_SUCCESS，
@@ -500,12 +506,13 @@ class TestVerifyAndRecovery(TempWorkspace):
                                   _Args(workspace=self.root, state="", probe=False)))
         rows = {r["platform"]: r for r in out["rows"]}
         self.assertGreaterEqual(len(rows), 5, "矩阵至少 5 行")
-        # 2026-11-02 DOM 改版后 chatgpt 整链路未验证：如实记 skipped_not_bound
-        # （skipped ≠ probed），不再是 deferred_rule1——那是「已实测但未绑定」的记号。
-        self.assertEqual(rows["chatgpt"]["read_probe"], "skipped_not_bound")
-        self.assertFalse(rows["chatgpt"]["verified"])
-        self.assertIn("重标定", platforms.get("chatgpt").get("notes", ""),
-                      "未验证状态必须写清待办，不能静默降级")
+        # 2026-11-04 起 chatgpt 整链路已验收（5/5）⇒ 回到「已实测但未绑定」的
+        # deferred_rule1 记号。此前它记 skipped_not_bound，是因为 verified=false
+        # 时它确实不属于「已实测平台」——记号跟着事实走，不跟着习惯走。
+        self.assertEqual(rows["chatgpt"]["read_probe"], "deferred_rule1")
+        self.assertTrue(rows["chatgpt"]["verified"])
+        self.assertIn("5/5", platforms.get("chatgpt").get("notes", ""),
+                      "verified 状态必须写清依据（哪次验收），不能只留一个布尔")
         # deferred_rule1 的语义仍要有平台承担：gemini 已实测但本轮未绑定
         self.assertEqual(rows["gemini"]["read_probe"], "deferred_rule1",
                          "已实测但未绑定 = 纪律搁置，不是技术失败")
