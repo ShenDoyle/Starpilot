@@ -860,6 +860,54 @@ STALL_READY = "reply_ready"
 STALL_STALE = "selector_stale"
 STALL_NOT_SENT = "send_not_taken"
 STALL_SILENT = "no_start"
+# 2026-11-04 新增：把「页面根本没把回复加载出来」从「没发出去」里分出来。
+# 用户反馈的"gpt 风控会加载回复失败，连之前的回复也不显示"落在这一档，
+# 而它和 STALL_SILENT 的处置相反：前者**只读等待/重试读**，后者才要查发送。
+# 混在一起就会让 agent 去重发消息——重发既是错的，又正好是风控最爱的特征。
+STALL_LOAD_FAILED = "page_load_failed"
+
+# HTTP 层证据的分类（配合 `bsk debug requests`，见 wa.net_evidence）：
+# 状态码是**平台自己给的**事实，比"看起来像风控"可靠一个量级。
+HTTP_RATE_LIMITED = "rate_limited"      # 429：明确限速，必须冷却
+HTTP_BLOCKED = "blocked"                # 403/451：拒绝访问（风控/合规拦截）
+HTTP_SERVER = "server_or_network"       # 5xx / 0 / 连接失败：网络或服务端问题
+HTTP_CLEAN = "clean"                    # 没有异常码：别把问题说成风控
+HTTP_UNKNOWN = "unknown"                # 取不到证据：不下结论（绝不默认通过）
+
+
+def classify_http(statuses) -> dict:
+    """把最近一批 HTTP 状态码归成一个结论，供分诊与冷却共用。
+
+    `statuses` 是 int 列表（可以含重复）。判据只认状态码本身：
+      · 429 → rate_limited（限速，要冷却，重试是强化信号）
+      · 403/451 → blocked（被拒，多半要人工介入）
+      · 5xx / 0（无响应）→ server_or_network（网络/服务端，别归因给风控）
+      · 其余 2xx/3xx → clean
+    优先级 blocked > rate_limited > server：把最需要人的排前面。
+    拿不到任何码 → unknown，**不许当成 clean**（静默成功是最危险的失败模式）。
+    """
+    codes = []
+    for s in (statuses or []):
+        try:
+            codes.append(int(s))
+        except (TypeError, ValueError):
+            continue
+    if not codes:
+        return {"kind": HTTP_UNKNOWN, "counts": {}, "detail": "没有 HTTP 证据"}
+    counts = {}
+    for c in codes:
+        counts[str(c)] = counts.get(str(c), 0) + 1
+    has = lambda *rs: any(r in codes for r in rs)
+    if has(403, 451):
+        kind = HTTP_BLOCKED
+    elif has(429):
+        kind = HTTP_RATE_LIMITED
+    elif any(c >= 500 or c == 0 for c in codes):
+        kind = HTTP_SERVER
+    else:
+        kind = HTTP_CLEAN
+    return {"kind": kind, "counts": counts,
+            "detail": "%d 条请求，状态分布 %s" % (len(codes), counts)}
 
 # 「页面在动」的阈值：文本增长多少才算「确实变了」。
 # 取 20 字符：流式输出一秒几十字，20 字远低于一秒的量；而 UI 抖动（计时器、

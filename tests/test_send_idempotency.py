@@ -57,8 +57,8 @@ class _Harness(unittest.TestCase):
                    "conv_id": platforms.conv_id_of(platforms.get("chatgpt"), self.URL)})
         wa.save_state(self.st_path, st)
         self._orig = {}
-        for name in ("ensure_session", "read_state", "do_fill", "do_send",
-                     "evaluate", "require_window_verified"):
+        for name in ("ensure_session", "read_state", "probe_once", "do_fill",
+                     "do_send", "evaluate", "require_window_verified"):
             self._orig[name] = getattr(wa, name)
         # 窗口归属门是真机才有的东西（session/lease 账本），本文件测的是
         # 幂等与失败分报，不是它 —— 直接放行，让它不参与断言。
@@ -71,10 +71,13 @@ class _Harness(unittest.TestCase):
         wa.ensure_session = lambda *a, **k: "sid-fake"
         self._seq = []
         wa.read_state = self._read_state
+        # 校验循环走 probe_once（一次 evaluate 的轻量读路），替身要喂同一个数据源：
+        # 测试表达的是「页面报什么」，不是「内部调了哪个函数」。
+        wa.probe_once = self._read_state
         wa.do_fill = lambda p, t, sid: {"ok": True, "code": platforms.FILL_OK,
                                         "facts": {}, "detail": ""}
         wa.do_send = lambda p, sid: (True, {"ok": True})
-        wa.evaluate = lambda js, sid: (True, {"ok": True})
+        wa.evaluate = lambda js, sid, timeout=60: (True, {"ok": True})
         # 别在测试里真等 30 秒
         self._sleep = wa.time.sleep
         wa.time.sleep = lambda s: None
@@ -157,7 +160,7 @@ class TestThreeStateFailure(_Harness):
         # 发送前那次探测必须是干净的：否则会被「输入框已有残留」的**前置**守卫
         # 拦在 rc=3（那条守卫本身就是对的——实测过的「文本滞留」就靠它发现）
         self._seq = [self.before] + [stuck] * 30
-        wa.evaluate = lambda js, sid: (True, {"ok": False})
+        wa.evaluate = lambda js, sid, timeout=60: (True, {"ok": False})
         rc, _, err = self._send("发不出去的话")
         self.assertEqual(rc, 8, err)
         self.assertIn("确实没发出去", err)
@@ -176,7 +179,7 @@ class TestThreeStateFailure(_Harness):
         cleared = _snap(editor_len=0, editor_blank=True, msg_count=2,
                         reply_count=1, asst_keys=["u:aaa"])
         self._seq = [cleared] * 30
-        wa.evaluate = lambda js, sid: (True, {"ok": False})
+        wa.evaluate = lambda js, sid, timeout=60: (True, {"ok": False})
         rc, _, err = self._send("疑似发出去了")
         self.assertEqual(rc, 12, err)
         self.assertIn("不要直接重试", err)

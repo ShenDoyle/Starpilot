@@ -1999,6 +1999,23 @@ def _generating_composite(p: dict, sid: str, d: dict) -> dict:
     return d
 
 
+def probe_once(p: dict, sid: str, timeout: int = 60):
+    """**一次** evaluate 拿状态：不滚动、不 settle 重试、不重复探测。
+
+    与 `read_state` 的分工（2026-11-04 加）：
+      · `read_state` 是「认真对待一次读数」——滚动到底、等虚拟化挂载、最多重试三轮，
+        代价是每次 2 个页面动作 + 1 次 cooperate sync，约 4 秒；
+      · `probe_once` 是「我只想知道有没有变化」——一次 evaluate 完事。
+    发送校验和等待循环都是**高频轮询**场景：20 轮 read_state = 四十多次页面往返，
+    这本身就构成机器特征（用户提的"操作拟人化"里，真正有价值的就是降这个负载，
+    而不是模拟鼠标轨迹）。读数失败就用失败的样子返回，不猜、不补一个默认值。
+    """
+    ok, data = evaluate(platforms.js_probe(p), sid, timeout=timeout)
+    if not ok:
+        return False, data
+    return True, _generating_composite(p, sid, platforms.normalize_probe(p, data))
+
+
 def read_state(p: dict, sid: str, settle_ms: int = 600):
     """滚动到底 → 等虚拟化挂载 → 读状态。读到空线程自动加长等待重试（窗口被遮挡时
     Chrome 会卸载虚拟化内容，单次短等待不可靠）。
@@ -2518,6 +2535,100 @@ def cmd_platforms(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 风控取证与冷却
+#
+# 注意：这一段必须放在 `@with_platform_lock` 与它装饰的函数**之外**。
+# 2026-11-04 就犯过一次：整块插在装饰器和 `def cmd_send` 之间，结果装饰器
+# 套到了本段的第一个函数上（它只收一个参数，调用直接 TypeError），
+# 而 cmd_send 悄悄失去平台锁——并发保护消失，单测却全绿。
+# tests/test_platforms_replay.py 里有结构断言盯着这件事。
+#
+# 用户反馈的「ChatGPT 风控导致回复加载失败，连之前的回复也不显示」在 DOM 上和
+# 「网络抖动」长得一模一样：doc_nodes 不涨、msg_count 不动、没有 generating。
+# 以前只能猜，而猜错的处置是**相反**的：
+#   · 限速(429) → 必须停手冷却，重试是最像机器人的特征；
+#   · 网络/服务端(5xx/0) → 只读重读即可，不该动消息；
+#   · 页面根本没动 → 查发送，不是查风控。
+# 所以第一刀是**取证**：`bsk debug requests` 的状态码是平台自己给的事实，
+# 比「看起来像风控」可靠一个量级。第二刀是**冷却**：证据说 429/403 就拒发，
+# 而不是让 agent 用重试去赌。
+
+
+def net_evidence(sid: str, limit: int = 25, timeout: int = 60) -> dict:
+    """最近若干请求的 HTTP 状态分布 → {kind, counts, detail, ok}。
+
+    拿不到证据时 kind=unknown，**不许当成 clean**：把「查不到」当成「没问题」
+    是本项目反复犯过的那一类错（list_sessions 返回 []、read_state 静默失败…）。
+    """
+    import bskcompat
+    if not bskcompat.supports(bsk, "debug"):
+        return {"ok": False, "kind": platforms.HTTP_UNKNOWN,
+                "detail": "本 bsk 没有 debug 子命令（需 0.4.x+），无 HTTP 证据"}
+    rc, out, err = bsk(["debug", "requests", "--session", sid,
+                        "--limit", str(limit), "--json"], timeout=timeout)
+    if rc != 0:
+        return {"ok": False, "kind": platforms.HTTP_UNKNOWN,
+                "detail": "debug requests rc=%s：%s" % (rc, (err or out)[:160])}
+    ok, data = parse_bsk_json(out)
+    if not ok:
+        return {"ok": False, "kind": platforms.HTTP_UNKNOWN,
+                "detail": "debug requests 输出解析失败"}
+    items = data.get("requests") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        items = []
+    codes = []
+    for it in items:
+        if isinstance(it, dict):
+            for k in ("status", "statusCode", "http_status", "response_code"):
+                if it.get(k) is not None:
+                    codes.append(it.get(k))
+                    break
+    cls = platforms.classify_http(codes)
+    cls["ok"] = True
+    cls["n"] = len(codes)
+    return cls
+
+
+RISK_COOLDOWN_BASE_S = 60
+RISK_COOLDOWN_MAX_S = 900
+
+
+def cooldown_left(st: dict) -> float:
+    return float(st.get("risk_cooldown_until") or 0) - time.time()
+
+
+def set_cooldown(st: dict, kind: str, detail: str = "") -> int:
+    """进入/加深冷却。指数退避，封顶 15 分钟。返回本次秒数。"""
+    n = int(st.get("risk_cooldown_streak") or 0) + 1
+    secs = min(RISK_COOLDOWN_MAX_S, RISK_COOLDOWN_BASE_S * (2 ** (n - 1)))
+    st["risk_cooldown_streak"] = n
+    st["risk_cooldown_until"] = time.time() + secs
+    st["risk_cooldown_kind"] = kind
+    st["risk_cooldown_detail"] = (detail or "")[:200]
+    st["risk_cooldown_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return secs
+
+
+def clear_cooldown(st: dict) -> None:
+    """一轮干净结果就清零计数：冷却是「别连续撞」，不是永久黑名单。"""
+    st.pop("risk_cooldown_until", None)
+    st.pop("risk_cooldown_streak", None)
+    st.pop("risk_cooldown_kind", None)
+    st.pop("risk_cooldown_detail", None)
+
+
+def note_risk_evidence(st: dict, ev: dict) -> int:
+    """按 HTTP 证据决定是否进冷却，返回秒数（0 = 不进）。
+
+    只有 blocked / rate_limited 才冷却——server_or_network 是网络问题，
+    拦发送等于把网络故障伪装成平台纪律，会让人以为星舵在闹脾气。
+    """
+    kind = (ev or {}).get("kind") or ""
+    if kind in (platforms.HTTP_BLOCKED, platforms.HTTP_RATE_LIMITED):
+        return set_cooldown(st, kind, (ev or {}).get("detail", ""))
+    return 0
+
+
 @with_platform_lock
 def cmd_send(a) -> int:
     path = state_path(a.state)
@@ -2566,6 +2677,21 @@ def cmd_send(a) -> int:
     if not st.get("url"):
         print("尚未绑定对话：先跑 wa.py bind <url>", file=sys.stderr)
         return 2
+
+    # ---- 风控冷却门（2026-11-04）----
+    # 上一轮拿到 429/403 时，本工具会进入指数退避冷却。冷却期内**拒绝发送**：
+    # 撞限速时重试是最像机器人的行为，只会把 5 分钟的风控拉得更长。
+    # 想越过它只有两条路：等到期，或用户明确授权（--force 并说明理由）。
+    left = cooldown_left(st)
+    if left > 0 and not a.force:
+        print("RISK_COOLDOWN：平台侧刚给出 %s（%s），冷却中，还剩 %.0f 秒。\n"
+              "  现在重发只会加重风控。等冷却到期后再发；"
+              "或先看证据：python scripts/wa.py triage --net\n"
+              "  用户明确要立刻发：加 --force 并说明理由。"
+              % (st.get("risk_cooldown_kind") or "?",
+                 st.get("risk_cooldown_detail") or "无细节", left),
+              file=sys.stderr)
+        return 14
 
     # ---- 窗口归属三态门（2026-11-02 GPT 审计 P0：null 不得放行）----
     # send 是写路径：打错窗口 = 往用户正在用的窗口打字。归属 unknown/misplaced
@@ -2716,7 +2842,10 @@ def cmd_send(a) -> int:
     after_snap = {}
     for _ in range(20):
         time.sleep(1.5)
-        ok, cur3 = read_state(p, sid)
+        # 高频轮询走轻量探测：一次 evaluate，而不是「滚动+探测+sync」的 read_state。
+        # 判据本身不变（同一个 js_probe、同一套 normalize、同一个 confirm 口径），
+        # 降的只是页面往返次数——这既是速度，也是不那么像机器人的样子。
+        ok, cur3 = probe_once(p, sid)
         if not ok:
             continue
         cur = cur3
@@ -2770,6 +2899,10 @@ def cmd_send(a) -> int:
     st["last_send_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     st["awaiting_reply"] = True
     st.pop("maybe_sent", None)   # 本轮已有结论，滞留标记清掉（否则下一轮被误拦）
+    # 这一轮正常送达 = 平台没在拦我们，冷却计数归零。
+    # 冷却是「别连续撞」的退避，不是永久黑名单——不清零就会越滚越长，
+    # 把一次 429 变成之后所有轮次的自我审查。
+    clear_cooldown(st)
     send_base["conv_id"] = send_base.get("conv_id") or st.get("conv_id") or ""
     st["send_base"] = send_base
     st.setdefault("history", []).append({
@@ -3440,6 +3573,27 @@ def cmd_triage(a) -> int:
         "platform": p["key"],
         "platform_verified": p["verified"],
     }
+    # ---- HTTP 取证（2026-11-04）----
+    # 「风控 / 网络 / 页面没动」三件事在 DOM 上长得一样，处置却相反。
+    # 状态码是平台自己给的事实：429 要冷却、5xx 是网络、什么都没有才谈得上查发送。
+    # 只在「不是正常态」时才取（健康轮次不额外打点，避免自己变成高频负载源）。
+    if getattr(a, "net", False) or not out["ok"]:
+        ev = net_evidence(sid)
+        out["network"] = ev
+        if ev.get("kind") in (platforms.HTTP_BLOCKED, platforms.HTTP_RATE_LIMITED):
+            secs = note_risk_evidence(st, ev)
+            if secs:
+                save_state(path, st)
+                out["cooldown_s"] = secs
+                out["next"] = ("平台侧给出 %s：已进冷却 %d 秒（指数退避，第 %s 次）。"
+                               "冷却期内别重发——重试正是风控最认的机器人特征。"
+                               % (ev["kind"], secs, st.get("risk_cooldown_streak")))
+        elif ev.get("kind") == platforms.HTTP_SERVER:
+            out["next"] = ("HTTP 层是 %s：这是网络/服务端问题，**不是风控**。"
+                           "只读重读或等恢复，不要重发消息。" % ev["detail"])
+        elif ev.get("kind") == platforms.HTTP_UNKNOWN:
+            out["next"] = ("拿不到 HTTP 证据（%s）：不下「是风控」的结论，"
+                           "也别当成没问题。" % ev.get("detail"))
     # 0.4.1 `observe` 证据落盘（2026-11-03 采纳）：卡住的现场是**易失的**——
     # 人赶来时页面可能已经变了，而重开一次 observe 又要动浏览器。
     # VOM 观测存成文件后就成了历史证据：离线可复核（`bsk view <file> --find <文案>`），
@@ -3687,6 +3841,9 @@ def main(argv: list | None = None) -> int:
     p = add_pl(sub.add_parser("triage", help="卡住判定：只读页面，说清卡在哪、下一步做什么"))
     p.add_argument("--relocate", action="store_true",
                    help="用备用读法复探（只读，不刷新）：分辨「选择器失效」与「确实没回复」")
+    p.add_argument("--net", action="store_true",
+                   help="强制取 HTTP 状态分布（bsk debug requests）：分清风控/网络/页面没动。"
+                        "非正常态时本来就会自动取")
     p.add_argument("--reload", action="store_true",
                    help="最后手段：非生成态下刷新页面（会丢掉页面状态，刷新后必须重走 bind + send）")
     p.set_defaults(func=cmd_triage)
