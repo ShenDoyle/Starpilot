@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.6"
+version: "0.1.7.1"
 ---
 
 # 星舵 Starpilot
@@ -29,6 +29,10 @@ python scripts/wa.py wait --timeout 900                 # ⑤ 等回复（45s �
 ```bash
 python scripts/wa.py doctor --explain
 ```
+
+**用时更新检查**（缓存 24h，不卡流程）：`python scripts/update_check.py`。
+有 ⬆ 就**口头提示用户**，用户拍板后才升级——Starpilot 走 `python scripts/upgrade.py --to-latest`；
+bsk 走 `python scripts/env.py --install`（活跃 bsk session 存在时禁升级）。只提示不擅自动。
 
 **失败出路表——退出码决定你下一步做什么，不许自己发明第三步动作**
 
