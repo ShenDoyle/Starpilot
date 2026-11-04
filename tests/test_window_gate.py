@@ -740,10 +740,18 @@ class TestHomeFormNotPrefixMatched(unittest.TestCase):
     AGENT_TABS = ["https://chatgpt.com/"]
 
     def _report(self, bound):
+        """走**退回规则**（拿不到窗口身份时）验证 URL 匹配语义本身。
+
+        2026-11-04 之后 window_report 还会调 tab_rows / agent_window_id；
+        这两个不 mock 就会真去 shell 调 bsk（测试依赖本机浏览器状态 = 会漂红）。
+        这里显式 stub 成"查不到"，让本类只测它宣称要测的那件事。
+        """
         import unittest.mock as mock
         rep = {"agent": list(self.AGENT_TABS), "user": list(self.USER_TABS),
                "ok": True}
-        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep), \
+             mock.patch.object(wa, "tab_rows", return_value=None), \
+             mock.patch.object(wa, "agent_window_id", return_value=""):
             return wa.window_report({"url": bound, "platform": "chatgpt"}, "lhyh")
 
     def test_home_bound_is_not_confused_with_users_conversations(self):
@@ -808,7 +816,9 @@ class TestMisplacedReasonAndExtensionFlags(unittest.TestCase):
     def _report(self, agent, user, bound="https://chatgpt.com/"):
         import unittest.mock as mock
         rep = {"agent": agent, "user": user}
-        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep), \
+             mock.patch.object(wa, "tab_rows", return_value=None), \
+             mock.patch.object(wa, "agent_window_id", return_value=""):
             return wa.window_report({"url": bound}, "s")
 
     def test_blank_agent_window_gets_its_own_reason(self):
@@ -824,19 +834,29 @@ class TestMisplacedReasonAndExtensionFlags(unittest.TestCase):
         self.assertFalse(out["agent_blank_only"])
         self.assertEqual(out["misplaced_reason"], "page_not_in_agent_window")
 
-    def test_explain_turns_blank_agent_into_an_extension_fix(self):
+    def test_explain_names_blank_agent_as_a_navigation_landing_problem(self):
+        """空白 Agent Window 的下一步必须是「查导航落点」，不是「去改扩展开关」。
+
+        这条断言换过一次：最初我把这个症状归因给扩展的共享标签页设置，
+        随后实测否证——`borrow_confirmation=always`、`request_help=enabled`
+        都已生效，症状照旧。留着那句归因，等于让下一个 agent 去查错方向，
+        所以这里明确断言它**不该出现**。
+        """
         import unittest.mock as mock
         self._stub_alive()
         wr = self._report(["about:blank"], ["https://chatgpt.com/"])
         with mock.patch.object(wa, "pending_gate_path_for_working_set",
                                return_value=""):
-            acts = wa._explain({}, {"url": "https://chatgpt.com/",
-                                    "platform": "chatgpt"},
+            acts = wa._explain({"extension": {"request_help": "enabled"}},
+                               {"url": "https://chatgpt.com/",
+                                "platform": "chatgpt"},
                                {"healthy": True, "duplicates": [],
-                                "instances": []}, wr, "s1", 100,
-                               platforms.get("chatgpt"))
+                                "instances": [{"id": "b1", "skew": False}]},
+                               wr, "s1", 100, platforms.get("chatgpt"))
         joined = json.dumps(acts, ensure_ascii=False)
-        self.assertIn("独立 Agent Window", joined, "要指到人能改的那一项设置上")
+        self.assertIn("没被导航进本会话的窗口", joined)
+        self.assertIn("window status", joined)
+        self.assertNotIn("改成", joined, "不该再让人去改一个已证实无关的开关")
         self.assertIn("不要改守卫", joined, "必须禁止用放松守卫来「解决」它")
 
     def test_explain_warns_when_request_help_is_disabled(self):
@@ -863,3 +883,101 @@ class TestMisplacedReasonAndExtensionFlags(unittest.TestCase):
         self.assertIn("扩展自报", got["source"])
         self.assertEqual(wa.extension_interaction(sessions, "nope"), {},
                          "查不到就返回空，不许编一个默认值")
+
+
+class TestWindowIdentityRule(unittest.TestCase):
+    """归属判据从「URL 集合」换成「窗口身份」（2026-11-04 实测重写）。
+
+    旧规则的致命处不是匹配得不够宽，而是**拿 URL 当身份**：同一个 URL 可以在
+    两个窗口各开一份。真实现场是用户窗口里正开着 `https://chatgpt.com/`，
+    于是 `bind --new`（绑首页）必然 `bound_in_user=True` ⇒ `misplaced` ⇒ 真实写被拒，
+    **哪怕 Agent Window 里那份好好的也在**。用户开没开着某个网页，决定了
+    同一条代码成不成功——这就是「换个时刻就不顺」最难复现的那一类。
+
+    新规则只问一件事：本会话 Agent Window 里那个标签，是不是绑定页面。
+    数据形状取自真机 `tab list`（tab_id / window_id / active / scope / url）。
+    """
+
+    HOME = "https://chatgpt.com/"
+    CONV = "https://chatgpt.com/c/6ae80db0-2820-83ea-adf6-482630f06332"
+
+    def _report(self, rows, awin, bound, scope_rep=None):
+        import unittest.mock as mock
+        rep = scope_rep or {"agent": [], "user": []}
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep), \
+             mock.patch.object(wa, "tab_rows", return_value=rows), \
+             mock.patch.object(wa, "agent_window_id", return_value=awin):
+            return wa.window_report({"url": bound}, "s1")
+
+    def test_same_url_in_both_windows_is_not_ambiguous(self):
+        """核心修复：Agent Window 有绑定页 ⇒ 用户窗口的副本不再算歧义。"""
+        rows = [
+            {"tab_id": 1, "window_id": 70, "active": True, "scope": "user",
+             "url": self.HOME},
+            {"tab_id": 2, "window_id": 56, "active": True, "scope": "agent",
+             "url": self.HOME},
+        ]
+        out = self._report(rows, "56", self.HOME)
+        self.assertEqual(out["basis"], "window_id")
+        self.assertTrue(out["ok"], "动作是会话作用域的，用户窗口开同一路不构成危险")
+        self.assertTrue(out["bound_in_user"], "仍然如实报告用户窗口有副本")
+
+    def test_agent_blank_and_page_in_user_window_still_refused(self):
+        """真机失败现场：Agent Window 只有 about:blank ⇒ 照旧拒绝。"""
+        rows = [
+            {"tab_id": 1, "window_id": 70, "active": True, "scope": "user",
+             "url": self.HOME},
+            {"tab_id": 2, "window_id": 56, "active": True, "scope": "agent",
+             "url": "about:blank"},
+        ]
+        out = self._report(rows, "56", self.HOME)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["agent_blank_only"])
+        self.assertEqual(out["misplaced_reason"],
+                         "agent_window_blank_page_in_user_window")
+
+    def test_conversation_bound_matches_only_its_own_window(self):
+        rows = [
+            {"tab_id": 1, "window_id": 70, "active": True, "scope": "user",
+             "url": self.CONV},
+            {"tab_id": 2, "window_id": 56, "active": True, "scope": "agent",
+             "url": "https://chatgpt.com/c/other-conv-9999"},
+        ]
+        out = self._report(rows, "56", self.CONV)
+        self.assertFalse(out["ok"], "会话开在用户窗口、agent 窗口是另一条对话 ⇒ 必须拒")
+        self.assertEqual(out["misplaced_reason"], "page_not_in_agent_window")
+
+    def test_window_identity_wins_over_scope_label(self):
+        """scope 与 window_id 都认：任一指向本会话窗口即算 agent 侧。"""
+        rows = [{"tab_id": 9, "window_id": 56, "active": True, "scope": "borrowed",
+                 "url": self.CONV}]
+        out = self._report(rows, "56", self.CONV)
+        self.assertTrue(out["ok"])
+
+    def test_falls_back_to_url_set_and_says_so(self):
+        """拿不到窗口身份时退回旧规则，并把依据标出来（不假装用了新判据）。"""
+        rep = {"agent": [self.HOME], "user": [], "ok": True}
+        out = self._report(None, "", self.HOME, scope_rep=rep)
+        self.assertEqual(out["basis"], "url_set(fallback)")
+        self.assertTrue(out["ok"])
+
+    def test_no_window_id_for_this_session_is_not_guessed(self):
+        """session list 里查不到本会话 ⇒ 退回规则，而不是随便挑一个窗口。"""
+        rows = [{"tab_id": 1, "window_id": 70, "active": True, "scope": "user",
+                 "url": self.HOME}]
+        out = self._report(rows, "", self.HOME,
+                           scope_rep={"agent": [], "user": [self.HOME], "ok": True})
+        self.assertEqual(out["basis"], "url_set(fallback)")
+        self.assertFalse(out["ok"])
+
+    def test_tab_rows_and_agent_window_id_fail_loudly_not_as_empty(self):
+        """两个新原语：rc≠0 / 解析失败 ⇒ None / ""，绝不返回空列表冒充「没有标签」。"""
+        orig = wa.bsk
+        try:
+            wa.bsk = lambda args, timeout=120: (1, "", "daemon gone")
+            self.assertIsNone(wa.tab_rows("s1"))
+            self.assertEqual(wa.agent_window_id("s1"), "")
+            wa.bsk = lambda args, timeout=120: (0, "banner line, no json", "")
+            self.assertIsNone(wa.tab_rows("s1"))
+        finally:
+            wa.bsk = orig

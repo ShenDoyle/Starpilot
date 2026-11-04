@@ -785,40 +785,116 @@ def _same_place(bound_url: str, tab_url: str) -> bool:
     return pt == pb or pt.startswith(pb + "/")
 
 
-def window_report(st: dict, sid: str) -> dict:
-    """绑定地址落在哪个 scope：agent=正常；user=开到用户窗口，要自愈。"""
-    rep = tab_scope_report(sid)
-    bound = (st.get("url") or "").split("?")[0][:60]
+def tab_rows(sid: str, timeout: int = 60):
+    """本会话可见标签的**原始行**：tab_id / window_id / active / scope / url。
 
-    def _has(urls):
-        if bound and isinstance(urls, list):
-            return any(_same_place(bound, u) for u in urls)
-        return None  # None = 探不到
+    返回 None = 查不动（与「查到了，是个空列表」严格区分，同 list_sessions 的纪律）。
+    为什么需要这一层：`tab_scope_report` 只留 URL，把窗口身份丢了，
+    于是「页面在哪个窗口」只能靠 URL 集合猜——见 window_report 的说明。
+    """
+    rc, out, err = bsk(["tab", "list", "--session", sid, "--json"], timeout=timeout)
+    if rc != 0:
+        return None
+    ok, data = parse_bsk_json(out)
+    if not ok:
+        return None
+    if isinstance(data, dict):          # bsk 实际返回 {"tabs":[...]}（2026-11-02 实测）
+        data = data.get("tabs") or []
+    if not isinstance(data, list):
+        return None
+    return [r for r in data if isinstance(r, dict)]
+
+
+def agent_window_id(sid: str, timeout: int = 60) -> str:
+    """会话自报的 Agent Window id；查不到返回空串，**不猜**。
+
+    2026-11-04 实测：`session start --json` 与 `session list --json` 都带
+    `agent_window_id`，`tab list` 每行带 `window_id` 与 `scope` ——
+    窗口身份是平台给的事实，不需要用 URL 去反推。
+    """
+    rc, out, err = bsk(["session", "list", "--json"], timeout=timeout)
+    if rc != 0:
+        return ""
+    ok, data = parse_bsk_json(out)
+    if not ok or not isinstance(data, list):
+        return ""
+    for s in data:
+        if isinstance(s, dict) and (s.get("session_id") or s.get("id") or "") == sid:
+            return str(s.get("agent_window_id") or "")
+    return ""
+
+
+def window_report(st: dict, sid: str) -> dict:
+    """绑定页面是不是落在**本会话的 Agent Window** 里。
+
+    ⚠️ 判据 2026-11-04 重写过一次，原因值得留档：
+    旧规则是「绑定 URL 出现在 agent 标签列表里、且**不出现**在 user 标签列表里」。
+    这是拿 **URL 集合**当身份，而 URL 不是身份——同一个 URL 可以在两个窗口各开一份。
+    实测现场：用户窗口里正好开着一份 `https://chatgpt.com/`，于是
+    `bind --new` 的绑定地址（首页形态）在 user 列表里必然命中 ⇒ 判 `misplaced` ⇒
+    真实写被闸门拒绝，**哪怕 Agent Window 里那份好好的也在**。
+    结论就是「同一条代码，用户开着什么网页决定成败」——最难复现的那类故障。
+
+    新规则用平台自报的**窗口身份**：`session list` 给 `agent_window_id`，
+    `tab list` 每行给 `window_id` / `scope`。动作本来就是会话作用域的，
+    所以只问一件事：**本会话 Agent Window 里那个标签，是不是绑定页面**。
+    用户窗口有没有同 URL 的副本，不构成歧义、不再参与判定。
+    拿不到窗口身份（老版 bsk、或查询失败）时**退回旧规则**，
+    并如实标 `basis`，不假装用的是新判据。
+    """
+    bound = (st.get("url") or "").split("?")[0][:60]
+    rep = tab_scope_report(sid)
+    rows = tab_rows(sid)
+    awin = agent_window_id(sid) if rows else ""
+
+    def _hit(items, key):
+        if bound and isinstance(items, list):
+            return any(_same_place(bound, (r.get(key) or "")) for r in items)
+        return None
 
     out = dict(rep)
-    out["bound_in_agent"] = _has(rep.get("agent"))
-    out["bound_in_user"] = _has(rep.get("user"))
-    if out["bound_in_agent"] is None and out["bound_in_user"] is None:
-        out["ok"] = None  # 探不到 = 未知，不误报
+    if rows and awin:
+        agent_rows = [r for r in rows
+                      if str(r.get("window_id") or "") == str(awin)
+                      or r.get("scope") == "agent"]
+        user_rows = [r for r in rows if r not in agent_rows]
+        out["basis"] = "window_id"
+        out["agent_window_id"] = awin
+        out["bound_in_agent"] = _hit(agent_rows, "url")
+        out["bound_in_user"] = _hit(user_rows, "url")   # 只作信息，不参与 ok
+        out["ok"] = bool(out["bound_in_agent"])
+        agent_tabs = [(r.get("url") or "") for r in agent_rows]
     else:
-        out["ok"] = bool(out["bound_in_agent"]) and not bool(out["bound_in_user"])
-    # ---- misplaced 要说得出**为什么**（2026-11-04 实测现场）----
-    # 同一句 "misplaced" 底下是两种完全不同的病，处置也相反：
-    #   · Agent Window 里只有 about:blank、绑定页面却在用户窗口
-    #     ⇒ 扩展没给本会话独立窗口（Automation/共享标签页设置），要**人改扩展**；
-    #   · Agent Window 里有别的页面
-    #     ⇒ 导航落点错了或会话被复用，走 window status / rebind 自查。
-    # 不分开报，agent 只会反复重试同一个动作，人看不出是配置问题。
-    agent_tabs = [u for u in (rep.get("agent") or []) if u is not None]
-    if out["ok"] is False and agent_tabs and all(
-            (u or "").strip() in BLANK_URLS for u in agent_tabs):
-        out["agent_blank_only"] = True
-        out["misplaced_reason"] = ("agent_window_blank_page_in_user_window"
-                                   if out["bound_in_user"] else
-                                   "agent_window_blank_not_bound")
+        # 退回 URL 集合规则：结论仍可用，但依据更弱，必须标出来
+        out["basis"] = "url_set(fallback)"
+        out["agent_window_id"] = ""
+        out["bound_in_agent"] = _hit([{"u": u} for u in (rep.get("agent") or [])
+                                      if u is not None], "u") \
+            if isinstance(rep.get("agent"), list) else None
+        out["bound_in_user"] = _hit([{"u": u} for u in (rep.get("user") or [])
+                                     if u is not None], "u") \
+            if isinstance(rep.get("user"), list) else None
+        if out["bound_in_agent"] is None and out["bound_in_user"] is None:
+            out["ok"] = None       # 探不到 = 未知，不误报
+        else:
+            out["ok"] = bool(out["bound_in_agent"]) and not bool(out["bound_in_user"])
+        agent_tabs = [u for u in (rep.get("agent") or []) if u is not None]
+
+    # ---- misplaced 要说得出**为什么**：同一句 misplaced 底下是两种相反的病 ----
+    #   · Agent Window 里只有 about:blank ⇒ 页面根本没导航进来（导航落点/自愈问题）；
+    #   · Agent Window 里有别的页面 ⇒ 会话被复用或绑错标签，走 window status / rebind。
+    # 不分开报，agent 只会反复重试同一个动作，人也看不出该改哪里。
+    out["agent_blank_only"] = bool(agent_tabs) and all(
+        (u or "").strip() in BLANK_URLS for u in agent_tabs)
+    if out["ok"] is False:
+        if out["agent_blank_only"]:
+            out["misplaced_reason"] = ("agent_window_blank_page_in_user_window"
+                                       if out.get("bound_in_user") else
+                                       "agent_window_blank_not_bound")
+        else:
+            out["misplaced_reason"] = "page_not_in_agent_window"
     else:
-        out["agent_blank_only"] = False
-        out["misplaced_reason"] = "" if out["ok"] is not False else "page_not_in_agent_window"
+        out["misplaced_reason"] = ""
     return out
 
 
@@ -3138,13 +3214,18 @@ def _explain(out: dict, st: dict, rep: dict, wr: dict, sid: str,
     if wr and wr.get("ok") is False:
         reason = wr.get("misplaced_reason") or ""
         if reason.startswith("agent_window_blank"):
-            add("扩展没给本会话独立 Agent Window：Agent Window 里只有空白页，"
-                "绑定的页面被开进了**你自己的窗口**（2026-11-04 实测）。"
-                "星舵拒绝往你的窗口打字——这个拒绝是对的",
-                "在 Edge 的 BrowserSkill 扩展弹窗里把 Automation/标签页设置改成"
-                "「允许独立 Agent Window（不共享当前标签页）」，再跑 "
-                "python scripts/wa.py bind \"%s\"" % (st.get("url") or ""),
-                forbid="不要改守卫、不要加环境变量绕过，更不要直接对用户窗口 send")
+            add("Agent Window 里只有空白页：绑定页面**没被导航进本会话的窗口**。"
+                "（2026-11-04 实测更正：这不是扩展共享标签页设置——"
+                "borrow_confirmation=always、request_help=enabled 都已确认生效，"
+                "症状照旧。别再让人去改扩展开关）",
+                "python scripts/wa.py window status   # 看归属证据与自愈结果\n"
+                "python scripts/wa.py bind --new --platform %s   # 重开一次并立刻 "
+                "window status，确认导航是否落进 agent_window_id=%s；"
+                "注意绑首页时不能用 --reuse-existing（首页没有会话 id，会被 bad_url 拒）"
+                % (st.get("platform") or "chatgpt",
+                   wr.get("agent_window_id") or "?"),
+                forbid="不要改守卫或加环境变量绕过；不要直接对用户窗口 send；"
+                       "也不要反复重试同一个 send（页面不会自己飞进正确窗口）")
         else:
             add("绑定页面不在本会话的 Agent Window 里（归属未确认，写操作一律被门拦住）",
                 "python scripts/wa.py window status",

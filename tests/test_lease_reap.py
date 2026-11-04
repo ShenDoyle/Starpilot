@@ -146,11 +146,24 @@ class TestReap(unittest.TestCase):
 
 class TestWindowPlacement(unittest.TestCase):
     def _tab_list(self, agent, user):
+        """按 --scope 分发标签列表；不带 --scope 的整表查询也要接住。
+
+        2026-11-04 适配：window_report 改用窗口身份后，除了 `tab list --scope X`
+        （tab_scope_report 用）还会发一次**不带 --scope** 的整表查询（tab_rows 用）。
+        以前这里对后者执行 args.index("--scope") 直接 ValueError，四条老测试因此报错。
+        本类的断言（bound_in_agent / bound_in_user / ok）一个字不改 ——
+        改的是替身要接住的新调用，不是被判据推翻的期望。
+        """
         def fake(args, timeout=0):
             if args[:2] == ["tab", "list"]:
-                scope = args[args.index("--scope") + 1]
-                urls = {"agent": agent, "user": user}[scope]
-                return 0, json.dumps([{"url": u} for u in urls]), ""
+                if "--scope" in args:
+                    scope = args[args.index("--scope") + 1]
+                    urls = {"agent": agent, "user": user}[scope]
+                    return 0, json.dumps([{"url": u} for u in urls]), ""
+                # 整表查询：不给 window_id ⇒ window_report 退回 URL 集合规则
+                rows = [{"url": u, "scope": "agent"} for u in agent] + \
+                       [{"url": u, "scope": "user"} for u in user]
+                return 0, json.dumps({"tabs": rows}), ""
             return 0, "", ""
         return fake
 
@@ -185,9 +198,19 @@ class TestWindowPlacement(unittest.TestCase):
         def fake(args, timeout=0):
             calls.append(args[:2])
             if args[:2] == ["tab", "list"]:
-                scope = args[args.index("--scope") + 1]
-                return 0, json.dumps([{"url": u} for u in next(seq[scope])]), ""
+                if "--scope" in args:
+                    scope = args[args.index("--scope") + 1]
+                    urls = list(next(seq[scope]))
+                    last[scope] = urls          # 记一份，供整表查询复用
+                    return 0, json.dumps([{"url": u} for u in urls]), ""
+                # 不带 --scope 的整表查询（window_report 的窗口身份那一跳）：
+                # 复用最近一次分 scope 的结果，**不消耗序列**，
+                # 否则「初检 → 自愈后」两拍取数节奏就错位了。
+                rows = [{"url": u, "scope": "agent"} for u in last.get("agent", [])] + \
+                       [{"url": u, "scope": "user"} for u in last.get("user", [])]
+                return 0, json.dumps({"tabs": rows}), ""
             return 0, "", ""
+        last = {}
         with mock.patch.object(wa, "bsk", side_effect=fake), \
                 mock.patch.object(wa, "navigate_soft", return_value=(0, "", "")):
             rep = wa.heal_window_placement(st, "unused", "s1")
