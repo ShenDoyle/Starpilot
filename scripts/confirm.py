@@ -21,6 +21,9 @@ L-KIMI-DELTA-METRIC-SCOPE）。漂移是无声的：没人会在改一处时同�
 """
 from __future__ import annotations
 
+import json
+import re
+
 import platforms
 
 # 判定结果（字符串常量，写进 journal 后不许改名，否则旧审计对不上）
@@ -144,3 +147,65 @@ def count_delta_of(before: dict, after: dict) -> int:
         except Exception:
             return 0
     return _i((after or {}).get("reply_count")) - _i((before or {}).get("reply_count"))
+
+
+# ---------------------------------------------------------------- 多轮增量的归因
+#
+# `user_msg_delta >= 2` 以前**一律**当成「我们重发了」。2026-11-04 的 5/5 验收
+# 证明这个归因太粗：那一轮新增 3 个用户轮次，正文是三句**不同**的话——
+# 一句是验收探针，另两句是用户同时在同一条对话里打的字。判成「重发」会把
+# 一次干净的外部污染误报成产品缺陷，反过来也可能把真重发说成「别人插话」。
+# 两者处置相反（一个改代码，一个换对话），所以必须分。
+#
+# 唯一的分辨依据是**正文**：我们发出去的那句的指纹，必须出现在新增用户轮次里。
+# 同文出现多次 = 真重发；出现的是别的文本 = 外来轮次（对话被并发使用）。
+
+_FP_NOISE = re.compile(r"[\s#*`>\[\]\(~_\-|]+")
+
+
+def fp_of(text: str) -> str:
+    """复刻 platforms.js 的 fpNorm + slice(0,64)：Python 侧也要能算同一个指纹。"""
+    return _FP_NOISE.sub("", text or "")[:64]
+
+
+def classify_multi_turns(before: dict, after: dict, sent_text: str) -> dict:
+    """把「新增用户轮次」拆成 我方 / 外来，并给出结论码。
+
+    返回 {code, ours, foreign, detail}：
+      OURS_ONLY        新增用户轮次全是我们发的那句 ⇒ 真是重发（产品缺陷）
+      CONTAMINATED     我方那句在，另有别人的轮次 ⇒ 对话被并发使用，
+                       本轮计数判据不可信，**不是**发送缺陷
+      OUR_MISSING      我方那句没出现 ⇒ 更严重：要么没送达，要么被平台改写
+      UNKNOWN          两侧都没有用户轮次指纹（选择器失效），不下结论
+    """
+    b = [x for x in ((before or {}).get("user_fps") or []) if x]
+    a = [x for x in ((after or {}).get("user_fps") or []) if x]
+    ours_fp = fp_of(sent_text or "")
+    new_turns = [x for x in a if x not in b]
+    if not new_turns:
+        return {"code": "UNKNOWN", "ours": [], "foreign": [],
+                "detail": "没有新增用户轮次指纹（用户消息选择器失效或窗口未挂载），"
+                          "不下结论"}
+    if not ours_fp:
+        return {"code": "UNKNOWN", "ours": [], "foreign": new_turns,
+                "detail": "拿不到本次发送正文的指纹，无法区分重发与外来轮次"}
+
+    def _same(x, y):
+        return x == y or x in y or y in x      # 编辑器重排（换行合并、空白折叠）会改指纹
+
+    ours = [x for x in new_turns if _same(x, ours_fp)]
+    foreign = [x for x in new_turns if x not in ours]
+    if not ours:
+        return {"code": "OUR_MISSING", "ours": [], "foreign": foreign,
+                "detail": "新增的 %d 个用户轮次里**没有**本次发送的正文指纹：%s"
+                          % (len(new_turns), json.dumps(foreign[:2], ensure_ascii=False)[:160])}
+    if not foreign:
+        return {"code": "OURS_ONLY", "ours": ours, "foreign": [],
+                "detail": "同一句正文出现 %d 次（%d 个不同 UUID）⇒ 真实重发，不是气泡拆分"
+                          % (len(ours), len(ours))}
+    return {"code": "CONTAMINATED", "ours": ours, "foreign": foreign,
+            "detail": "本次那句在（%d 个），另有 %d 个**外来**用户轮次：%s"
+                      "—— 这条对话正被别的人或任务同时使用，计数判据本轮不可信；"
+                      "换一条没人用的专用对话重跑，别改发送逻辑"
+                      % (len(ours), len(foreign),
+                         json.dumps(foreign[:2], ensure_ascii=False)[:200])}

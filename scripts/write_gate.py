@@ -842,10 +842,41 @@ def cmd_verify(a) -> int:
         verdict = "MISMATCH -> PAUSED_HUMAN"
     else:
         if user_delta and user_delta >= 2:
-            checks = [{"name": "reply_count_delta", "expect": "==1",
-                       "actual": delta, "ok": False,
-                       "note": "用户消息 +%s：这是重发（不是气泡拆分），判失败" % user_delta}]
-            verdict = "MISMATCH -> PAUSED_HUMAN"
+            # 先看**新增的是谁的轮次**：正文指纹能分清「我们重发」与「别人也在用
+            # 这条对话」。混成一类会误报缺陷（2026-11-04 验收实测：三句不同正文，
+            # 一句是探针、两句是用户同期打的字），也会反过来把真重发说成外部污染。
+            sent_text = ""
+            try:
+                pf = dry.get("prompt_file") or ""
+                if pf and os.path.exists(pf):
+                    with open(pf, encoding="utf-8") as f:
+                        sent_text = f.read()
+            except Exception:
+                sent_text = ""
+            cls_multi = confirm.classify_multi_turns(res.get("before") or {},
+                                                     res.get("after") or {},
+                                                     sent_text)
+            if cls_multi["code"] == "CONTAMINATED":
+                checks = [{"name": "reply_count_delta", "expect": "==1",
+                           "actual": delta, "ok": False,
+                           "note": "对话被并发使用：%s" % cls_multi["detail"]},
+                          {"name": "turn_attribution", "expect": "新增用户轮次只属于本次发送",
+                           "actual": cls_multi["code"], "ok": False,
+                           "note": "本次那句确实在（%d 个），另有 %d 个外来轮次"
+                                   % (len(cls_multi["ours"]),
+                                      len(cls_multi["foreign"]))}]
+                verdict = ("CONTAMINATED -> 换无人使用的专用对话重跑；"
+                           "这不是发送缺陷，别改发送逻辑")
+            elif cls_multi["code"] == "OUR_MISSING":
+                checks = [{"name": "reply_count_delta", "expect": "==1",
+                           "actual": delta, "ok": False,
+                           "note": cls_multi["detail"]}]
+                verdict = "INCONCLUSIVE -> 需人工复核（本次正文没在新增轮次里找到）"
+            else:
+                checks = [{"name": "reply_count_delta", "expect": "==1",
+                           "actual": delta, "ok": False,
+                           "note": "用户消息 +%s：%s" % (user_delta, cls_multi["detail"])}]
+                verdict = "MISMATCH -> PAUSED_HUMAN（真实重发）"
         elif user_delta == 1:
             # 关键：一条回复被拆成 N 个气泡时**不许直接 MISMATCH**——
             # 记下气泡数与逻辑回复数，判 INCONCLUSIVE 交人工复核。

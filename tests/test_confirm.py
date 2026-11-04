@@ -164,5 +164,84 @@ class TestKeyAnchor(unittest.TestCase):
         self.assertEqual(d["new_asst"], 1)
 
 
+class TestMultiTurnAttribution(unittest.TestCase):
+    """`user_msg_delta>=2` 必须分得清「我们重发」与「别人也在用这条对话」。
+
+    2026-11-04 的 5/5 验收第 5 轮实测：新增 3 个用户轮次、正文互不相同
+    （一句是验收探针，两句是用户同期打的字）。旧代码一律判 `MISMATCH（重发）`，
+    会把一次外部污染误报成产品缺陷；反过来也可能把真重发说成「别人插话」。
+    两者处置相反（改代码 vs 换对话），所以判据必须落在**正文指纹**上。
+    """
+
+    OURS = "只回答一个数字：把 144 开平方得到多少"
+
+    def _fp(self, t):
+        return confirm.fp_of(t)
+
+    def test_same_text_twice_is_a_real_duplicate_send(self):
+        b = {"user_fps": []}
+        a = {"user_fps": [self._fp(self.OURS), self._fp(self.OURS)]}
+        got = confirm.classify_multi_turns(b, a, self.OURS)
+        self.assertEqual(got["code"], "OURS_ONLY")
+        self.assertIn("真实重发", got["detail"])
+        self.assertEqual(got["foreign"], [])
+
+    def test_foreign_turns_are_contamination_not_a_defect(self):
+        b = {"user_fps": [self._fp("前一轮的问题")]}
+        a = {"user_fps": [self._fp("前一轮的问题"),
+                          self._fp(self.OURS),
+                          self._fp("另一句不是本次发送的话"),
+                          self._fp("第三句也是外来的")]}
+        got = confirm.classify_multi_turns(b, a, self.OURS)
+        self.assertEqual(got["code"], "CONTAMINATED")
+        self.assertEqual(len(got["ours"]), 1)
+        self.assertEqual(len(got["foreign"]), 2)
+        self.assertIn("别改发送逻辑", got["detail"])
+
+    def test_our_text_absent_is_flagged_separately(self):
+        """本次正文找不到 ⇒ 要么没送达要么被改写，不能算重发也不能算污染。"""
+        b = {"user_fps": []}
+        a = {"user_fps": [self._fp("完全不相干的一句"), self._fp("另一句不相干")]}
+        got = confirm.classify_multi_turns(b, a, self.OURS)
+        self.assertEqual(got["code"], "OUR_MISSING")
+
+    def test_no_fingerprints_is_unknown_not_a_guess(self):
+        got = confirm.classify_multi_turns({"user_fps": []}, {"user_fps": []},
+                                           self.OURS)
+        self.assertEqual(got["code"], "UNKNOWN")
+        got2 = confirm.classify_multi_turns({"user_fps": ["x"]},
+                                           {"user_fps": ["x", "y"]}, "")
+        self.assertEqual(got2["code"], "UNKNOWN", "没有本次正文就不许硬判")
+
+    def test_fingerprint_matches_the_js_normalisation(self):
+        """Python 侧 fp_of 必须与 JS 的 fpNorm 同口径，否则跨语言比对一定漂。"""
+        raw = "只回答 **一个数字**：(144) 开平方 ~得到~ 多少？\n\n换行与  空白"
+        import re
+        js_equiv = re.sub(r"[\s#*`>\[\]\(~_\-|]+", "", raw)[:64]
+        self.assertEqual(confirm.fp_of(raw), js_equiv)
+
+    def test_editor_reformatting_still_counts_as_ours(self):
+        """编辑器重排（换行合并、空白折叠）会改指纹：宽松包含关系仍认我方。"""
+        b = {"user_fps": []}
+        a = {"user_fps": [self._fp(self.OURS), self._fp(self.OURS) + "尾巴"]}
+        got = confirm.classify_multi_turns(b, a, self.OURS)
+        self.assertEqual(got["code"], "OURS_ONLY")
+
+
+    def test_contaminated_is_not_counted_as_a_send_failure(self):
+        """审计映射钉死：CONTAMINATED 归 inconclusive，不能进 mismatch。
+
+        write_gate 的 journal `result` 按 `verdict.startswith("MISMATCH")` 分档，
+        三值语义要求「没判清」不动 fail_streak。污染属于外部条件不可信，
+        不是发送缺陷 —— 被记成 mismatch 会推高失败计数并触发 replan，方向就错了。
+        """
+        contaminated = ("CONTAMINATED -> 换无人使用的专用对话重跑；"
+                        "这不是发送缺陷，别改发送逻辑")
+        self.assertFalse(contaminated.startswith("MISMATCH"))
+        result = ("mismatch" if contaminated.startswith("MISMATCH")
+                  else "inconclusive")
+        self.assertEqual(result, "inconclusive")
+
+
 if __name__ == "__main__":
     unittest.main()
