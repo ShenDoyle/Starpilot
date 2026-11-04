@@ -802,6 +802,23 @@ def window_report(st: dict, sid: str) -> dict:
         out["ok"] = None  # 探不到 = 未知，不误报
     else:
         out["ok"] = bool(out["bound_in_agent"]) and not bool(out["bound_in_user"])
+    # ---- misplaced 要说得出**为什么**（2026-11-04 实测现场）----
+    # 同一句 "misplaced" 底下是两种完全不同的病，处置也相反：
+    #   · Agent Window 里只有 about:blank、绑定页面却在用户窗口
+    #     ⇒ 扩展没给本会话独立窗口（Automation/共享标签页设置），要**人改扩展**；
+    #   · Agent Window 里有别的页面
+    #     ⇒ 导航落点错了或会话被复用，走 window status / rebind 自查。
+    # 不分开报，agent 只会反复重试同一个动作，人看不出是配置问题。
+    agent_tabs = [u for u in (rep.get("agent") or []) if u is not None]
+    if out["ok"] is False and agent_tabs and all(
+            (u or "").strip() in BLANK_URLS for u in agent_tabs):
+        out["agent_blank_only"] = True
+        out["misplaced_reason"] = ("agent_window_blank_page_in_user_window"
+                                   if out["bound_in_user"] else
+                                   "agent_window_blank_not_bound")
+    else:
+        out["agent_blank_only"] = False
+        out["misplaced_reason"] = "" if out["ok"] is not False else "page_not_in_agent_window"
     return out
 
 
@@ -3037,6 +3054,24 @@ def cmd_read(a) -> int:
     return 0
 
 
+def extension_interaction(sessions: list, sid: str) -> dict:
+    """本会话在扩展侧的交互开关（bsk 自报，不是推断）。
+
+    为什么必须报出来：实测扩展把 `request_help` 关着
+    （`interaction.request_help="disabled"`）。这种状态下 `wa.py ask-human`
+    （0.4.1 request-help 官方人工介入通道）**必然失败**。
+    不提前说，agent 只会以为是自己命令写错了，人也会以为这功能是坏的。
+    """
+    for s in sessions or []:
+        if (s.get("id") or "") == sid:
+            itg = s.get("interaction") or {}
+            if isinstance(itg, dict):
+                return {"request_help": itg.get("request_help") or "",
+                        "borrow_confirmation": itg.get("borrow_confirmation") or "",
+                        "source": "bsk session list（扩展自报）"}
+    return {}
+
+
 def _explain(out: dict, st: dict, rep: dict, wr: dict, sid: str,
              left, p: dict) -> list:
     """把体检事实翻成**有序的下一步命令**。
@@ -3086,17 +3121,41 @@ def _explain(out: dict, st: dict, rep: dict, wr: dict, sid: str,
     if sid:
         state = session_state(sid)
         if state == "dead":
-            add("会话已被回收（窗口没了不等于对话没了：回复在平台侧）",
-                "python scripts/wa.py bind \"%s\"   # 同一个地址接上，别加 --new"
-                % (st.get("url") or ""),
-                forbid="不要 --new：上下文和回复都在原对话里")
+            if st.get("conv_id"):
+                add("会话已被回收（窗口没了不等于对话没了：回复在平台侧）",
+                    "python scripts/wa.py bind \"%s\"   # 同一个地址接上，别加 --new"
+                    % (st.get("url") or ""),
+                    forbid="不要 --new：上下文和回复都在原对话里")
+            else:
+                # 从没发出过第一条 ⇒ 这条对话根本不存在，"同一个地址接上"是空话
+                add("会话已被回收，而且这条对话还没成立（conv_id 为空，从未发出消息）",
+                    "python scripts/wa.py bind --new --platform %s"
+                    % (st.get("platform") or "chatgpt"),
+                    forbid="不要拿首页地址当「已有对话」去续期")
         elif state == "unknown":
             add("会话状态查不清（bsk 输出不可信）：这不是「没了」，不能据此开窗",
                 "bsk status --json")
     if wr and wr.get("ok") is False:
-        add("绑定页面不在本会话的 Agent Window 里（归属未确认，写操作一律被门拦住）",
-            "python scripts/wa.py window status",
-            forbid="不要 release 除非人工确认；打错窗口等于往用户正在用的窗口打字")
+        reason = wr.get("misplaced_reason") or ""
+        if reason.startswith("agent_window_blank"):
+            add("扩展没给本会话独立 Agent Window：Agent Window 里只有空白页，"
+                "绑定的页面被开进了**你自己的窗口**（2026-11-04 实测）。"
+                "星舵拒绝往你的窗口打字——这个拒绝是对的",
+                "在 Edge 的 BrowserSkill 扩展弹窗里把 Automation/标签页设置改成"
+                "「允许独立 Agent Window（不共享当前标签页）」，再跑 "
+                "python scripts/wa.py bind \"%s\"" % (st.get("url") or ""),
+                forbid="不要改守卫、不要加环境变量绕过，更不要直接对用户窗口 send")
+        else:
+            add("绑定页面不在本会话的 Agent Window 里（归属未确认，写操作一律被门拦住）",
+                "python scripts/wa.py window status",
+                forbid="不要 release 除非人工确认；打错窗口等于往用户正在用的窗口打字")
+    itg = out.get("extension") or {}
+    if itg.get("request_help") == "disabled":
+        add("扩展的人工介入通道关着（interaction.request_help=disabled）："
+            "`wa.py ask-human`（0.4.1 request-help 官方通道）在这种状态下必然失败，"
+            "不是命令写错了",
+            "先在扩展弹窗启用 request help / 人工介入，再跑 "
+            "python scripts/wa.py ask-human --prompt \"...\" --go")
     if left is not None and left <= 0 and sid:
         add("租约已过期但窗口还挂着", "python scripts/wa.py reap --once")
     led = pending_gate_path_for_working_set()
@@ -3158,6 +3217,8 @@ def cmd_doctor(a) -> int:
         # 两者都给出去，人才分得清「卡在探测」和「卡在没回复」。
         "progress": read_progress(path),
     }
+    # 扩展自报的交互开关（request_help 等）：不报出来，ask-human 失败会被误读成命令写错
+    out["extension"] = extension_interaction(sessions, sid)
     if wr and wr.get("ok") is False:
         out["hint"] = ("绑定页面开在**用户的窗口**而不是本会话的 Agent Window："
                        "多半是扩展 Automation 设置为「共享标签页」或扩展版本 <0.4.0。"

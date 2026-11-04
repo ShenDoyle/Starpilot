@@ -23,6 +23,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 import wa  # noqa: E402
+import platforms  # noqa: E402
 import tabclaims  # noqa: E402
 import winlease  # noqa: E402
 
@@ -308,6 +309,46 @@ class TestClearAlsoGated(unittest.TestCase):
             rc = wa.cmd_clear(ns)
         self.assertEqual(rc, 6)
         self.assertIn("WINDOW_UNVERIFIED", err.getvalue())
+
+
+    def test_dead_session_without_conv_id_is_told_to_open_new(self):
+        """没 conv_id = 这条对话从未成立，不能建议「拿首页地址去续期」。
+
+        真机输出里犯过一次：state 的 url 是首页、conv_id 空（bind --new 后还没发过），
+        doctor 却说「同一个地址接上，别加 --new」——照着做等于把一个不存在的对话
+        当已有对话绑，后面每一轮都建在错前提上。
+        """
+        import unittest.mock as mock
+        orig = wa.session_state
+        wa.session_state = lambda sid: "dead"
+        self.addCleanup(setattr, wa, "session_state", orig)
+        with mock.patch.object(wa, "pending_gate_path_for_working_set",
+                               return_value=""):
+            acts = wa._explain({}, {"url": "https://chatgpt.com/",
+                                    "platform": "chatgpt", "conv_id": ""},
+                               {"healthy": True, "duplicates": [],
+                                "instances": []}, {"ok": True}, "s1", 100,
+                               platforms.get("chatgpt"))
+        joined = json.dumps(acts, ensure_ascii=False)
+        self.assertIn("bind --new", joined)
+        self.assertIn("还没成立", joined)
+
+    def test_dead_session_with_conv_id_still_says_do_not_open_new(self):
+        import unittest.mock as mock
+        orig = wa.session_state
+        wa.session_state = lambda sid: "dead"
+        self.addCleanup(setattr, wa, "session_state", orig)
+        conv = "https://chatgpt.com/c/6ae80db0-2820-83ea-adf6-482630f06332"
+        with mock.patch.object(wa, "pending_gate_path_for_working_set",
+                               return_value=""):
+            acts = wa._explain({}, {"url": conv, "platform": "chatgpt",
+                                    "conv_id": "/c/6ae80db0-2820-83ea-adf6-482630f06332"},
+                               {"healthy": True, "duplicates": [],
+                                "instances": []}, {"ok": True}, "s1", 100,
+                               platforms.get("chatgpt"))
+        joined = json.dumps(acts, ensure_ascii=False)
+        self.assertIn("不要 --new", joined, "已有对话被回收时依旧禁止另起炉灶")
+        self.assertIn(conv, joined)
 
 
 if __name__ == "__main__":
@@ -746,3 +787,79 @@ class TestHomeFormNotPrefixMatched(unittest.TestCase):
 
     def test_different_host_never_matches(self):
         self.assertFalse(wa._same_place("https://chatgpt.com/", "https://deepseek.com/"))
+
+
+class TestMisplacedReasonAndExtensionFlags(unittest.TestCase):
+    """misplaced 必须说得出**为什么**；扩展开关状态必须被报出来（2026-11-04 实测）。
+
+    现场：Agent Window 里只有 `about:blank`，绑定页面却在用户窗口。
+    这与「Agent Window 里有别的页面」处置完全相反（前者要人改扩展设置，
+    后者要自查导航），都印成一句 misplaced 就等于让 agent 反复重试同一个动作。
+    另一条：扩展 `interaction.request_help=disabled` 时，`wa.py ask-human`
+    必然失败——不提前说，会被误读成「这功能/命令是坏的」。
+    """
+
+    def _stub_alive(self):
+        """把 session_state 固定成 alive，并在本条测试结束后自动还原。"""
+        orig = wa.session_state
+        wa.session_state = lambda sid: "alive"
+        self.addCleanup(setattr, wa, "session_state", orig)
+
+    def _report(self, agent, user, bound="https://chatgpt.com/"):
+        import unittest.mock as mock
+        rep = {"agent": agent, "user": user}
+        with mock.patch.object(wa, "tab_scope_report", return_value=rep):
+            return wa.window_report({"url": bound}, "s")
+
+    def test_blank_agent_window_gets_its_own_reason(self):
+        out = self._report(["about:blank"], ["https://chatgpt.com/"])
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["agent_blank_only"])
+        self.assertEqual(out["misplaced_reason"],
+                         "agent_window_blank_page_in_user_window")
+
+    def test_wrong_page_in_agent_window_is_a_different_reason(self):
+        out = self._report(["https://example.com/other"], ["https://chatgpt.com/"])
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["agent_blank_only"])
+        self.assertEqual(out["misplaced_reason"], "page_not_in_agent_window")
+
+    def test_explain_turns_blank_agent_into_an_extension_fix(self):
+        import unittest.mock as mock
+        self._stub_alive()
+        wr = self._report(["about:blank"], ["https://chatgpt.com/"])
+        with mock.patch.object(wa, "pending_gate_path_for_working_set",
+                               return_value=""):
+            acts = wa._explain({}, {"url": "https://chatgpt.com/",
+                                    "platform": "chatgpt"},
+                               {"healthy": True, "duplicates": [],
+                                "instances": []}, wr, "s1", 100,
+                               platforms.get("chatgpt"))
+        joined = json.dumps(acts, ensure_ascii=False)
+        self.assertIn("独立 Agent Window", joined, "要指到人能改的那一项设置上")
+        self.assertIn("不要改守卫", joined, "必须禁止用放松守卫来「解决」它")
+
+    def test_explain_warns_when_request_help_is_disabled(self):
+        import unittest.mock as mock
+        self._stub_alive()
+        out = {"extension": {"request_help": "disabled"}}
+        with mock.patch.object(wa, "pending_gate_path_for_working_set",
+                               return_value=""):
+            acts = wa._explain(out, {"url": "https://chatgpt.com/",
+                                     "platform": "chatgpt"},
+                               {"healthy": True, "duplicates": [],
+                                "instances": []}, {"ok": True}, "s1", 100,
+                               platforms.get("chatgpt"))
+        joined = json.dumps(acts, ensure_ascii=False)
+        self.assertIn("ask-human", joined)
+        self.assertIn("必然失败", joined, "要说清后果，不是只列一个字段值")
+
+    def test_extension_interaction_read_from_session_list(self):
+        sessions = [{"id": "s1", "interaction": {"request_help": "disabled",
+                                                 "borrow_confirmation": "never"}},
+                    {"id": "s2", "interaction": {"request_help": "enabled"}}]
+        got = wa.extension_interaction(sessions, "s1")
+        self.assertEqual(got["request_help"], "disabled")
+        self.assertIn("扩展自报", got["source"])
+        self.assertEqual(wa.extension_interaction(sessions, "nope"), {},
+                         "查不到就返回空，不许编一个默认值")
