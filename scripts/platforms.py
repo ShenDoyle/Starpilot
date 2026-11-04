@@ -150,9 +150,12 @@ PLATFORMS = {
                  "重标定为 data-chatgpt-selection-message-id / "
                  "data-chatgpt-search-message-ids（旧 data-message-author-role 命中 0）；"
                  "发送键已于 2026-11-04 真机定标为 form button[type=submit]（aria=发送，"
-                 "唯一命中，条件渲染：空态 0 个）。**仍待**：专用测试对话 5/5 独立问答"
-                 "验收（未实发）—— 这条没跑完 verified 就保持 false，"
-                 "不拿「选择器已定标」冒充「整链路已实测」。",
+                 "唯一命中，条件渲染：空态 0 个）；同日走写闸门实跑 5/5 验收，"
+                 "**第 1 轮五条判据全过**（SENT / effective_delta=1 / 新增助手 UUID 恰 1 / "
+                 "归属相邻 / 单轮单发 / 无历史误认），锚点重标定在真机上成立。"
+                 "第 2 轮起被平台侧草稿恢复拦停（ChatGPT 会把 composer 草稿恢复进新开对话，"
+                 "且 clear_editor 清不掉 —— 见 lessons L-39），"
+                 "5/5 未跑完 ⇒ verified 保持 false，不拿「1 轮通过」冒充「整链路已验收」。",
         "url_pattern": r"/c/[0-9a-fA-F-]{8,}",
         "url_hint": "对话地址形如 https://chatgpt.com/c/<uuid>；出现 / 或 /new 即为新对话，拒绝绑定。",
         "write_method": "exec",
