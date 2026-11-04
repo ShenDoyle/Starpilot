@@ -2091,8 +2091,18 @@ def clear_editor(p: dict, sid: str, tries: int = 2) -> dict:
     残留和新内容拼在一起发出去），但没有清空工具时，一旦停在「已写入未发送」，
     唯一的出路就是人工去点浏览器——纪律就破了。
 
-    做法：在编辑器内全选 → 删除，**用真实键盘**（受控编辑器只认这个）。
-    清完必须复核 `editor_blank`；清不干净就如实报失败，不假装干净。
+    做法：先在编辑器内全选 → 删除，**用真实键盘**（受控编辑器只认这个）。
+    键盘这条路清不干净时，回落到**写入原语本身**：`platforms.js_fill(p, "")`
+    ——它对 exec/paste 平台就是「圈选内容 + insertText」，插入空串即替换掉全部内容。
+
+    回落不是偷懒，是实测逼出来的（2026-11-04，lessons L-39）：ChatGPT 会把上一次的
+    composer 草稿**恢复进新开对话**，键盘全选删除连试两轮都清不掉（实测
+    「仍有 25 字」），而**同一个编辑器**用 exec 写 19 个字符是成功的。
+    「写得进、删不净」说明键盘事件没落到编辑器的输入管线里，而 exec 那条路走的是。
+
+    清完必须复核 `editor_blank`；清不干净就如实报失败，绝不假装干净
+    —— 这个函数的产物是「输入框是否真的空」的**结论**，判错就等于把上一轮的
+    残留和这一轮的内容拼成一条发出去。
     """
     eds = (p.get("sel") or {}).get("editor") or []
     last = {"ok": False, "detail": "没有可用选择器"}
@@ -2110,8 +2120,31 @@ def clear_editor(p: dict, sid: str, tries: int = 2) -> dict:
             last = {"ok": False, "detail": "清理后探测失败：%s" % cur}
             continue
         if cur.get("editor_blank") or int(cur.get("editor_len") or 0) == 0:
-            return {"ok": True, "editor_len": 0, "editor_blank": True}
+            return {"ok": True, "editor_len": 0, "editor_blank": True,
+                    "via": "keyboard"}
         last = {"ok": False, "detail": "清理后编辑器仍有 %s 字" % cur.get("editor_len")}
+
+    # ---- 回落：用写入原语覆盖内容（exec / paste 才支持空串替换）----
+    ok, cur = read_state(p, sid)
+    if not ok or (cur.get("editor_blank") or int(cur.get("editor_len") or 0) == 0):
+        return {"ok": True, "editor_len": 0,
+                "editor_blank": bool(ok), "via": "keyboard"} if ok else last
+    method = p.get("write_method") or ""
+    if method not in ("exec", "paste"):
+        last["fallback_skipped"] = ("写入方式是 %r，不是 exec/paste，"
+                                    "空串替换不适用（native 平台只能走键盘）" % method)
+        return last
+    ok2, res2 = evaluate(js_fill(p, ""), sid, timeout=60)
+    time.sleep(1)
+    ok3, cur2 = read_state(p, sid)
+    if ok3 and (cur2.get("editor_blank")
+                or int(cur2.get("editor_len") or 0) == 0):
+        return {"ok": True, "editor_len": 0, "editor_blank": True,
+                "via": "write-primitive", "keyboard_detail": last.get("detail"),
+                "exec_ok": bool(ok2)}
+    last["detail"] = "%s；exec 回落也没清掉（仍有 %s 字，exec_ok=%s）" % (
+        last.get("detail"), (cur2 or {}).get("editor_len") if ok3 else "探测失败", ok2)
+    last["exec_result"] = res2 if isinstance(res2, dict) else str(res2)[:160]
     return last
 
 

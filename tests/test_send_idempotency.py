@@ -278,5 +278,82 @@ class TestNewChatAdoptionIsShared(unittest.TestCase):
                          "闸门里不该出现自己的采纳实现（那正是这次的成因）")
 
 
+class TestClearEditorFallsBackToWritePrimitive(unittest.TestCase):
+    """键盘清不掉时，clear_editor 必须回落到写入原语（L-39 的修法）。
+
+    实测依据：ChatGPT 把草稿恢复进新开对话，聚焦+Ctrl+A+Delete 连试两轮
+    「仍有 25 字」；而同一个编辑器 exec 写 19 字是成功的 —— 说明键盘事件没落到
+    编辑器的输入管线，exec 那条路落到了。
+    """
+
+    def setUp(self):
+        self._orig = {n: getattr(wa, n) for n in ("bsk", "read_state", "evaluate")}
+        self.calls = []
+
+    def tearDown(self):
+        for n, f in self._orig.items():
+            setattr(wa, n, f)
+
+    def _fake_read(self, seq):
+        it = iter(seq)
+
+        def f(p, sid):
+            return True, next(it)
+        wa.read_state = f
+
+    def test_keyboard_success_does_not_use_fallback(self):
+        wa.bsk = lambda args, timeout=120: (0, "", "")
+        self._fake_read([{"editor_len": 25, "editor_blank": False},
+                         {"editor_len": 0, "editor_blank": True}])
+        wa.evaluate = lambda js, sid, timeout=60: self.fail("不该走 exec 回落")
+        res = wa.clear_editor(platforms.get("chatgpt"), "s")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "keyboard")
+
+    def test_fallback_to_exec_when_keyboard_leaves_text(self):
+        p = platforms.get("chatgpt")          # write_method = exec
+        self.assertEqual(p.get("write_method"), "exec")
+        wa.bsk = lambda args, timeout=120: (0, "", "")
+        # 键盘两轮都没清掉 → exec 回落之后清了
+        self._fake_read([{"editor_len": 25, "editor_blank": False},
+                         {"editor_len": 25, "editor_blank": False},
+                         {"editor_len": 25, "editor_blank": False},
+                         {"editor_len": 0, "editor_blank": True}])
+
+        def fake_eval(js, sid, timeout=60):
+            self.calls.append(js)
+            return True, {"ok": True}
+        wa.evaluate = fake_eval
+        res = wa.clear_editor(p, "s")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["via"], "write-primitive")
+        self.assertEqual(len(self.calls), 1, "回落只该调一次 exec 写入")
+        self.assertIn("insertText", self.calls[0], "回落必须走写入原语而不是另编一套")
+
+    def test_native_platforms_skip_fallback_with_a_reason(self):
+        """native（Gemini 的 Quill）不适用空串替换：如实说明，不假装清了。"""
+        p = platforms.get("gemini")
+        self.assertEqual(p.get("write_method"), "native")
+        wa.bsk = lambda args, timeout=120: (0, "", "")
+        self._fake_read([{"editor_len": 20, "editor_blank": False},
+                         {"editor_len": 20, "editor_blank": False},
+                         {"editor_len": 20, "editor_blank": False}])
+        wa.evaluate = lambda js, sid, timeout=60: self.fail("native 不该走 exec 回落")
+        res = wa.clear_editor(p, "s")
+        self.assertFalse(res["ok"])
+        self.assertIn("exec/paste", res.get("fallback_skipped", ""),
+                      "必须写清为什么没回落，而不是只报失败")
+
+    def test_still_reports_failure_when_both_paths_fail(self):
+        p = platforms.get("chatgpt")
+        wa.bsk = lambda args, timeout=120: (0, "", "")
+        dirty = {"editor_len": 25, "editor_blank": False}
+        self._fake_read([dirty, dict(dirty), dict(dirty), dict(dirty)])
+        wa.evaluate = lambda js, sid, timeout=60: (True, {"ok": True})
+        res = wa.clear_editor(p, "s")
+        self.assertFalse(res["ok"], "两条路都没清掉就必须报失败，不许假装干净")
+        self.assertIn("exec 回落也没清掉", res["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()
