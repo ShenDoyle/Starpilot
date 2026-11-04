@@ -771,6 +771,20 @@ def cmd_send(a) -> int:
         return 4
     result_path = os.path.join(run_dir, "writes", "%s.result.json" % a.approval)
     atomic_write_json(result_path, res)
+    # 新对话首条发出后要把 state 的地址采纳成真实会话地址（与 CLI 同一个函数）。
+    # 不采纳的话，`bind --new` 起跑的循环在**第 2 轮**就被 guard_ok 判地址漂移拦死
+    # （2026-11-04 5/5 验收实测：第 1 轮 SENT、第 2 轮 plan 直接 WRITE_BLOCKED_GUARD）。
+    adopted = wa.adopt_new_chat(st, ((res.get("after") or {}).get("url")) or "", p)
+    if adopted.get("adopted") or adopted.get("to"):
+        wa.save_state(wa_state_path(root, a.state), st)
+        res["new_chat_adopted"] = adopted
+        if adopted.get("adopted"):
+            # 计划里记的是首页 hash；采纳后真实目标才是会话地址，同步进 dry 计划，
+            # 否则下一轮 plan 又要拿首页去比 —— 修一个坑不能留下另一个坑
+            dry["target_url"] = st.get("url")
+            dry["target_url_sha256"] = sha16(st.get("url") or "")
+            atomic_write_json(dry_path, dry)
+            res["dry_target_updated"] = True
     if grant_path:
         consume_grant(grant_path)   # 只有真发成功才核销额度
     res["result_file"] = os.path.relpath(result_path, run_dir)

@@ -2201,6 +2201,34 @@ def _do_send_now(p: dict, sid: str) -> tuple:
     return True, "click"
 
 
+def adopt_new_chat(st: dict, page_url: str, p: dict) -> dict:
+    """新对话首轮发出后，把 state 从「首页」升级成平台跳出来的真实会话地址。
+
+    为什么必须抽成函数（2026-11-04，5/5 验收第 2 轮抓到）：
+    `bind --new` 绑的是站点首页，发出第一条后平台会把地址换成 `/c/<uuid>`。
+    这段采纳逻辑原来**只写在 `cmd_send` 里**，而写闸门走的是
+    `write_gate.execute_send`（它不碰 state）——于是从新对话起跑的多轮循环，
+    第 2 轮 `plan` 时 `guard_ok` 看到「绑定首页 vs 当前会话页」地址漂移，
+    直接 `WRITE_BLOCKED_GUARD` 拦死。同一条正路，第一轮通、第二轮必挂。
+    现在 CLI 与闸门**都调这一个函数**，口径不再有两份。
+
+    返回采纳结果（供 journal / 排障看），不改 state 以外的东西。
+    """
+    if not st.get("new_chat"):
+        return {"adopted": False, "reason": "not_new_chat"}
+    real = page_url or ""
+    before = st.get("url") or ""
+    if real and real != before:
+        st["url"] = real
+    cid = platforms.conv_id_of(p, real)
+    if cid:   # 首轮发出后才有会话身份；记下来，后面改绑别的对话会被门禁拦住
+        st["conv_id"] = cid
+        st["conv_origin"] = "new_chat"   # 最干净的来源：本项目从新对话入口开出来的
+    st["new_chat"] = False
+    return {"adopted": bool(cid), "from": before, "to": st.get("url"),
+            "conv_id": cid or ""}
+
+
 def js_read_last(p: dict) -> str:
     return platforms.js_read_last(p)
 
@@ -2608,15 +2636,7 @@ def cmd_send(a) -> int:
         return 12 if unconfirmed else 8
 
     # ---- 新对话首轮：平台已跳到真实会话地址，把 state 换成它，后续轮次据此校验 ----
-    if st.get("new_chat"):
-        real = cur.get("url") or ""
-        if real and real != st.get("url"):
-            st["url"] = real
-        cid = platforms.conv_id_of(p, real)
-        if cid:  # 首轮发出后才有会话身份；记下来，后面改绑别的对话会被门禁拦住
-            st["conv_id"] = cid
-            st["conv_origin"] = "new_chat"  # 最干净的来源：本项目从新对话入口开出来的
-        st["new_chat"] = False
+    adopt_new_chat(st, cur.get("url") or "", p)
 
     st["turn"] = int(st.get("turn") or 0) + 1
     st["last_send_hash"] = text_sha

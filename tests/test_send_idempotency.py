@@ -221,5 +221,62 @@ class TestWritePathWhitelistIsSharedSource(_Harness):
         self.assertEqual(rc, 0, err + out)
 
 
+class TestNewChatAdoptionIsShared(unittest.TestCase):
+    """新对话首轮发出后的地址采纳，CLI 与闸门必须共用一个实现。
+
+    真机实测的坑（2026-11-04 5/5 验收第 2 轮）：`bind --new` 绑的是首页，
+    发出第一条后 ChatGPT 把地址换成 `/c/<uuid>`。采纳逻辑以前只写在
+    `wa.cmd_send` 里，而闸门走 `write_gate.execute_send`（不碰 state），
+    于是第 2 轮 `plan` 被自己的 `guard_ok` 判「地址漂移」拦死：
+    **同一条正路，第一轮通、第二轮必挂。**
+    """
+
+    HOME = "https://chatgpt.com/"
+    CONV = "https://chatgpt.com/c/6aea973d-7680-83ec-b5f3-fe2d76ad949b"
+
+    def test_adopt_swaps_home_to_conversation(self):
+        p = platforms.get("chatgpt")
+        st = {"url": self.HOME, "new_chat": True, "platform": "chatgpt"}
+        res = wa.adopt_new_chat(st, self.CONV, p)
+        self.assertTrue(res["adopted"])
+        self.assertEqual(st["url"], self.CONV)
+        self.assertEqual(st["conv_id"], "/c/6aea973d-7680-83ec-b5f3-fe2d76ad949b")
+        self.assertEqual(st["conv_origin"], "new_chat")
+        self.assertFalse(st["new_chat"], "不翻掉就每轮都当首轮，采纳会重复发生")
+
+    def test_not_new_chat_is_left_alone(self):
+        p = platforms.get("chatgpt")
+        st = {"url": self.CONV, "conv_id": "/c/6aea973d-7680-83ec-b5f3-fe2d76ad949b"}
+        res = wa.adopt_new_chat(st, "https://chatgpt.com/c/other1234", p)
+        self.assertEqual(res, {"adopted": False, "reason": "not_new_chat"})
+        self.assertEqual(st["url"], self.CONV, "已有对话的地址不许被顺手改掉")
+
+    def test_second_round_would_pass_guard_after_adoption(self):
+        """采纳之后，guard_ok 不能再判漂移（这就是第 2 轮被拦的那道门）。"""
+        import write_gate
+        p = platforms.get("chatgpt")
+        st = {"url": self.HOME, "new_chat": True}
+        write_gate  # 仅表明依赖关系：闸门 cmd_send 成功后必须调 wa.adopt_new_chat
+        wa.adopt_new_chat(st, self.CONV, p)
+        snap = {"url": self.CONV, "raw": {"editor": True}, "editor_len": 0,
+                "modal": False, "error": ""}
+        ok, why = write_gate.guard_ok(snap, st["url"])
+        self.assertTrue(ok, "采纳后第 2 轮必须放行，实际：%s" % why)
+        # 反向对照：不采纳就会复现第 2 轮的真机故障（绑定首页 vs 当前会话页）
+        st2 = {"url": self.HOME, "new_chat": True}
+        ok2, why2 = write_gate.guard_ok(snap, st2["url"])
+        self.assertFalse(ok2, "没采纳却放行，说明守卫判不住地址漂移——那才是真危险")
+        self.assertIn("地址漂移", why2)
+
+    def test_gate_calls_the_shared_adopter(self):
+        """结构约束：闸门不许再自己写一套采纳（两处各写必然漂移）。"""
+        src = io.open(os.path.join(os.path.dirname(wa.__file__), "write_gate.py"),
+                      encoding="utf-8").read()
+        self.assertIn("wa.adopt_new_chat", src,
+                      "闸门必须复用 wa.adopt_new_chat，别再留第二份实现")
+        self.assertNotIn('st["new_chat"] = False', src,
+                         "闸门里不该出现自己的采纳实现（那正是这次的成因）")
+
+
 if __name__ == "__main__":
     unittest.main()
