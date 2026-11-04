@@ -85,22 +85,34 @@
   + pending-gate 台账/CLI 7 条。基线 3 条红测转绿。
 
 ### 已知未做（如实）
-- **5/5 独立问答验收：只过了 1/5，`verified` 保持 false。** 2026-11-04 走写闸门正路
-  实跑：第 1 轮五条判据全过（`verdict=SENT / effective_delta=1`，新增 assistant UUID
-  恰好 1 个、与本轮新增 user 轮次相邻、单轮单发、无历史误认）——**锚点重标定在真机上
-  成立**。第 2 轮起被下述两个问题接连拦死，按裁定「不确定即停、不重跑凑数」终止。
-- **跑验收抓出来的两个真缺陷**：
-  ① 已修（`07c7ddb`）：新对话首条发出后的地址采纳只写在 CLI，闸门路径没做 ⇒
+- **5/5 独立问答验收：4/5 通过，第 5 轮判为「对话被并发使用」，`verified` 保持 false。**
+  第 1–4 轮五条判据逐项全过（`SENT` / `effective_delta=1` / 新增助手 UUID 恰 1 /
+  与本轮新增 user 轮次相邻 / 单轮单发 / 无历史误认）——锚点重标定在真机上成立。
+  第 5 轮 `SENT_MULTI`（新增 3 个用户轮次）：读正文确认三句**互不相同**，其中两句是
+  用户同期在同一对话里打的字，journal 里 r5 只有一条 `write_send` ⇒
+  **不是重复发送、不是锚点算错、不是虚拟列表假象**。要算验收完成，需重跑一次
+  「期间无人使用」的干净 5 轮。
+- **本轮由验收抓出并已修的两个真缺陷**：
+  ① `07c7ddb`：新对话首条发出后的地址采纳只写在 CLI，闸门路径没做 ⇒
      `bind --new` 起跑的循环第 2 轮必被 `guard_ok` 判地址漂移。
-  ② **未修**：ChatGPT 会把 composer 草稿**恢复进新开对话**，且 `clear_editor`
-     （聚焦→Ctrl+A→Delete×2）**清不掉**（实测 `仍有 25 字`）；而 `do_fill` 的 exec
-     写入同一编辑器是成功的 ⇒ 清空应回落写入原语。这正是昨天台账里
-     「文本滞留输入框未发出」的机制本尊。详见 lessons L-39。
+  ② `d8ad273`（lessons L-41）：归属判据拿 **URL 当窗口身份**——用户窗口只要开着
+     一份同 URL，绑首页形态就必然判 `misplaced`，成败取决于用户当时开着什么网页。
+     改用 bsk 自报的 `agent_window_id` + `tab list` 的 `window_id/scope`；
+     拿不到身份时退回旧规则并如实标 `basis`。真机复验 `basis=window_id / ok=true`
+     与 `bound_in_user=true` 同时成立。
+  ③ `4ecbd73`（lessons L-42）：`user_msg_delta>=2` 以前一律判「重发」。现按正文指纹
+     分四类：`OURS_ONLY` 真重发 / `CONTAMINATED` 外来轮次（记 inconclusive，不进
+     mismatch、不推 fail_streak、不触发 replan）/ `OUR_MISSING` 没送达或被改写 /
+     `UNKNOWN` 无指纹不下结论。`fp_of()` 与 JS `fpNorm` 同口径并有测试钉住。
+- **仍未修**：ChatGPT 会把 composer 草稿**恢复进新开对话**，`clear_editor` 的键盘路径
+  清不掉（已由 exec 回落兜住 `2932092`，但根因在平台侧，见 L-39）。
 - 4 条 P0-ESC 的页面级重复核对维持 UNKNOWN（虚拟窗口外，滚动通道被页面活性竞态阻断）。
 - 运行约束（不是 bug）：bsk 默认 **5 分钟空闲即回收 Agent Window**
   （`reason: session_idle_timeout`），所以定标/验收必须**单程跑完**，不能分多轮工具调用。
 - 扩展协议混版风险：本机两侧均 0.4.1 / protocol 1.8 实测 `version_skew=false`，但
   0.4.1 起「混版不支持」是硬约束，已进 `doctor --explain` 告警表。
+- 扩展人工介入开关已实测生效（`request_help=enabled`、`borrow_confirmation=always`），
+  `wa.py ask-human` 的前置条件满足；`doctor --explain` 会读扩展自报值并在关闭时告警。
 
 ## 0.1.6（2026-11-02，窗口/tab 资源治理闭环 + 介入语义修正）
 
