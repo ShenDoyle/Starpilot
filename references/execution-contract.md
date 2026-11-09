@@ -243,5 +243,7 @@ python scripts/wa.py clear
 | 13 | wa triage | 选择器失效（DOM 改版） | agent：`runbooks/dom-drift.md` |
 | 14 | wa triage | 发送没生效（字还在框里） | agent：查遮罩/弹窗后重发一次 |
 | 15 | wa triage | 平台静默拒绝（限流） | agent：换平台或冷却 |
+| 16 | wa triage | 上下文满（**token 口径，不是轮数**——GPT 按 token 总数限制） | agent：`wa.py modal-click --match 'new ?chat|新聊天'` 带记忆开新对话 → rebind → 贴任务摘要继续；不重发原问题 |
+| 17 | wa triage | 平台限流/额度弹窗（弹窗≠限制类，分类看文案，依据在 `evidence.modal`） | agent：冷却等待后重试一次；连续重发是强化限流信号；「升级会员」入口报给用户 |
 
 > 这张表是**唯一权威**。改 rc 语义 = 契约级变更：同步 `scripts/wa.py` 的 `STALL_RC`、本表、SKILL §6，并跑 `scripts/contract_lint.py`。

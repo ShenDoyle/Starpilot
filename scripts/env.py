@@ -279,8 +279,20 @@ def install(timeout=300, runner=None, rep=None) -> dict:
     r = _run(cmd, timeout, runner)
     after = rep or check(with_doctor=False, runner=runner, timeout=25)
     ok = bool(after["bsk"]["ok"])
+    ver = after["bsk"]["version"] or ""
+    warn = ""
+    # 版本钉（2026-11-09）：bsk 0.4.2 有已知劣化——浏览器执行任务时被频繁打断。
+    # 官方安装脚本拉的是 main 最新版，没有版本参数，所以装完必须验版本：
+    # ≥0.4.2 就如实警告，让用户决定是否降回 0.4.1，绝不静默装上已知劣化版。
+    try:
+        vt = tuple(int(x) for x in ver.split(".") if x != "")
+    except ValueError:
+        vt = ()
+    if vt and vt >= (0, 4, 2):
+        warn = ("⚠ 装到的是 bsk %s：0.4.2 起有已知劣化（执行任务时被频繁打断），"
+                "当前策略固定 0.4.1——建议降级或回滚到 0.4.1。" % ver)
     return {"ok": ok, "rc": r["rc"], "path": after["bsk"]["path"],
-            "version": after["bsk"]["version"],
+            "version": ver, "warn": warn,
             "tail": (r["out"] or r["err"] or "").strip().splitlines()[-6:],
             "doctor": (after["bsk"].get("doctor") or {}).get("connected")}
 
@@ -371,6 +383,8 @@ def main(argv=None) -> int:
         print(human(rep))
         if inst is not None:
             print("\n安装结果：%s  rc=%s" % ("成功" if inst["ok"] else "失败", inst["rc"]))
+            if inst.get("warn"):
+                print(inst["warn"])  # 版本钉：装上 0.4.2+ 要当场喊出来，不许静默
             for line in inst.get("tail") or []:
                 print("  " + line)
 

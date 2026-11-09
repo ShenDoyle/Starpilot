@@ -137,7 +137,9 @@ class CheckFlowTest(unittest.TestCase):
              mock.patch.object(uc, "local_bsk", return_value=(0, 4, 1)):
             rep = uc.check(self.tmp, ttl_hours=24)
         self.assertTrue(rep["starpilot"]["newer"])
-        self.assertTrue(rep["bsk"]["newer"])
+        # bsk 远端 (0,4,2) 落在版本钉上：不算「有新版」，算「钉住勿升」
+        self.assertTrue(rep["bsk"]["pinned"])
+        self.assertFalse(rep["bsk"]["newer"])
         self.assertFalse(rep["cached"])
         self.assertEqual(rep["starpilot"]["local"], "0.1.7.1")
         # 再查应命中缓存，不再发起网络请求
@@ -180,6 +182,52 @@ class CheckFlowTest(unittest.TestCase):
              mock.patch.object(uc, "local_bsk", side_effect=AssertionError("skip 后不应探测 bsk")):
             rep = uc.check(self.tmp, skip_self=True, skip_bsk=True)
         self.assertEqual(rep["starpilot"]["err"], "跳过")
+
+
+class BskPinTest(unittest.TestCase):
+    """bsk 版本钉：0.4.2 起已知劣化，固定 0.4.1——远端再新也不许提示升级。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="uc-pin-")
+
+    def _check(self, bsk_ver, local_ver):
+        # fetch_remote 被调两次（先 self 后 bsk），按次序给不同返回
+        with mock.patch.object(uc, "fetch_remote", side_effect=[
+                {"version": (0, 1, 7, 1), "source": "tags", "err": ""},   # self：与本地平齐
+                {"version": bsk_ver, "source": "releases", "err": ""}]), \
+             mock.patch.object(uc, "local_self", return_value=(0, 1, 7, 1)), \
+             mock.patch.object(uc, "local_bsk", return_value=local_ver):
+            return uc.check(self.tmp, ttl_hours=24, force=True)
+
+    def test_remote_042_is_pinned_not_newer(self):
+        rep = self._check((0, 4, 2), (0, 4, 1))
+        self.assertTrue(rep["bsk"]["pinned"])
+        self.assertFalse(rep["bsk"]["newer"])      # 0.4.2 ≠ 有新版
+        self.assertIn("0.4.1", rep["bsk"]["note"])
+
+    def test_remote_043_still_pinned(self):
+        rep = self._check((0, 4, 3), (0, 4, 1))
+        self.assertTrue(rep["bsk"]["pinned"])
+        self.assertFalse(rep["bsk"]["newer"])
+
+    def test_remote_041_with_local_040_is_newer(self):
+        # 钉住上限是 0.4.1：0.4.0 → 0.4.1 的正常升级路径不受影响
+        rep = self._check((0, 4, 1), (0, 4, 0))
+        self.assertFalse(rep["bsk"].get("pinned"))
+        self.assertTrue(rep["bsk"]["newer"])
+
+    def test_local_042_flags_local_bad(self):
+        rep = self._check((0, 4, 2), (0, 4, 2))
+        self.assertTrue(rep["bsk"]["local_bad"])
+        self.assertFalse(rep["bsk"]["newer"])
+
+    def test_human_shows_pin_verdict(self):
+        rep = self._check((0, 4, 2), (0, 4, 1))
+        text = uc.human(rep)
+        self.assertIn("钉", text)
+        self.assertIn("0.4.2", text)
+        # 钉住时绝不能出现「有新版」的 ⬆ 提示
+        self.assertNotIn("⬆", text.splitlines()[0])
 
 
 if __name__ == "__main__":

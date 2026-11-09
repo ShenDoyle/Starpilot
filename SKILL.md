@@ -21,7 +21,7 @@ python scripts/env.py                                  # ① 环境（Python / b
 python scripts/wa.py bind "<对话地址>" --platform <key>  # ② 绑定一条对话（全程只这一条）
 python scripts/wa.py read --out runtime/wa/turn-1.md    # ③ 读网页 AI 的原文
 python scripts/orchestrator.py loop --once --file <反馈.md>  # ④ 走闸门：演练→批准→真发→核验
-python scripts/wa.py wait --timeout 900                 # ⑤ 等回复（45s 没首字自动转分诊）
+python scripts/wa.py wait                              # ⑤ 等回复（30s 没首字自动转分诊；正常回复 ≤2 分钟）
 ```
 
 **卡住时只敲这一条**（它会把该做的下一步按顺序念给你）：
@@ -33,6 +33,11 @@ python scripts/wa.py doctor --explain
 **用时更新检查**（缓存 24h，不卡流程）：`python scripts/update_check.py`。
 有 ⬆ 就**口头提示用户**，用户拍板后才升级——Starpilot 走 `python scripts/upgrade.py --to-latest`；
 bsk 走 `python scripts/env.py --install`（活跃 bsk session 存在时禁升级）。只提示不擅自动。
+
+**bsk 版本钉**：固定 **0.4.1**（0.4.2 起有已知劣化：浏览器执行任务被频繁打断）。
+`update_check.py` 对远端 ≥0.4.2 显示 ⛔（钉住勿升），本地 ≥0.4.2 显示 ⚠（建议降回）；
+`env.py --install` 装完验版本，装上劣化版当场警告。daemon 自动升级已由用户级
+`BSK_AUTO_UPDATE=off` 关闭——升级只能人工触发，且活跃 session 存在时禁升级。
 
 **失败出路表——退出码决定你下一步做什么，不许自己发明第三步动作**
 
@@ -46,7 +51,9 @@ bsk 走 `python scripts/env.py --install`（活跃 bsk session 存在时禁升�
 | `verdict=SENT_NO_REPLY`（rc=0） | 已送达，回复还没被认出 | `wa.py wait`（输出里的 `next` 就是这条） | 重发 |
 | rc=7 `ORCHESTRATOR_REQUIRED` | 有编排 run，必须走闸门 | `orchestrator.py loop --once` | 用逃生门（它绕开的正是幂等与写后核验） |
 | rc=6 `WINDOW_UNVERIFIED` | 归属没确认，打错窗口=往用户窗口打字 | `wa.py window status` | 任何绕过 |
-| rc=9 `WINDOW_BUSY` | 实例被别的任务占着（跨任务不抢占） | 等对方收口，或另开一个浏览器实例 | 停对方的会话 |
+| rc=9 `WINDOW_BUSY` | 实例被别的任务占着（跨任务不抢占） | 等对方收口自动接手（错峰串行是设计内行为：各任务绑各自的对话，不同时和网页 AI 沟通即可），或换实例 `--browser/WA_BROWSER` | 停对方的会话；抢租约 |
+| rc=16 `context_full` | **上下文满（token 口径，不是轮数**——GPT 按 token 总数限制，禁用轮数近似） | `wa.py modal-click --match 'new ?chat|新聊天'` 带记忆开新对话 → rebind → 贴任务现状摘要继续 | 重发原问题；用对话轮数推断上下文容量 |
+| rc=17 `rate_limited` | 平台限流/额度弹窗（弹窗≠限制类，分类看文案，依据在 `evidence.modal`） | 冷却等待后重试一次；「升级会员」入口报给用户，那是用户决策 | 连续重发（强化限流信号）；自己点升级 |
 | 闸门 rc=2 `error_code=WRITE_BLOCKED_*` | 闸门按口径拦（授权/模式/目标不符） | 看 JSON 里的 `error_code` 与 `next_step` | 猜是哪一个 |
 | 「读不到回复」四连 | 实例重了 / 掉线 / 会话没了 / state 指错 | `wa.py doctor --explain` | 再开一个窗口去赌 |
 

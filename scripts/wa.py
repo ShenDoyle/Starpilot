@@ -1403,7 +1403,23 @@ def acquire_window(st: dict, path: str, sid: str = "", rep: dict | None = None) 
         else:
             rec = winlease.acquire(inst, own, serial=serial, wait=budget)
     except winlease.WindowBusy as e:
-        print(json.dumps(e.holder, ensure_ascii=False, indent=2), file=sys.stderr)
+        # 错峰交接（2026-11-09 口径落文）：多任务共用浏览器是**设计内**的串行行为——
+        # 各任务绑各自的对话、不同时和网页 AI 沟通，租约到期自动接手。
+        # 这里把「谁占着、等多久、下一步」说清楚，而不是甩一段裸 JSON。
+        holder = e.holder or {}
+        who = (holder.get("owner") or {}).get("workspace") or "未知工作区"
+        print(json.dumps({
+            "code": "WINDOW_BUSY",
+            "instance": inst,
+            "holder_workspace": who,
+            "waited_s": round(getattr(e, "waited", 0) or 0, 1),
+            "message": ("错峰等待超预算：另一任务（%s）仍占着浏览器实例。这是多任务"
+                        "串行交接的正常形态——处置：①稍后重跑本命令（对方收口即自动"
+                        "接手）；②换实例（--browser / WA_BROWSER）。**不要**停对方"
+                        "会话或抢租约；确认对方死锁才走人工授权 takeover。"
+                        % who),
+            "holder": holder,
+        }, ensure_ascii=False, indent=2), file=sys.stderr)
         raise SystemExit(9)
     if sid:
         winlease.claim_session(inst, sid, own)
@@ -2995,6 +3011,8 @@ STALL_RC = {
     platforms.STALL_STALE: 13,    # 选择器失效：复探/回填
     platforms.STALL_NOT_SENT: 14,  # 发送没生效
     platforms.STALL_SILENT: 15,   # 平台侧静默拒绝
+    platforms.STALL_CONTEXT_FULL: 16,   # 上下文满（token 口径）：modal-click 新聊天
+    platforms.STALL_RATE_LIMITED: 17,   # 限流/额度弹窗：冷却等待，别连续重发
 }
 
 
@@ -3168,9 +3186,11 @@ def cmd_wait(a) -> int:
                     return bail(tri)
 
         if started and not cur.get("generating") and cur.get("last_len", 0) > 0:
-            if cur.get("regen"):
-                # 硬信号：末条回复的操作按钮已出现 = 本轮生成结束；
-                # 再要求文本长度连续两次一致，防虚拟化渲染抖动
+            # 硬信号二选一：regen（重新生成按钮）或 reply_done（回复下方操作图标，
+            # 2026-11-09 起：复制/朗读/评价…，平台在 sel.reply_done 显式声明）。
+            # 两者都是「本轮生成已结束」的平台事实；再要求文本长度稳定，防虚拟化抖动。
+            if cur.get("regen") or cur.get("reply_done"):
+                done_signal = "regen" if cur.get("regen") else "reply_done"
                 if cur["last_len"] == prev_len:
                     stable += 1
                     if stable >= 1:
@@ -3181,7 +3201,7 @@ def cmd_wait(a) -> int:
                         write_progress(path, "done", cur, progressed=True)
                         return finish({"ok": True, "chars": cur["last_len"],
                                        "msg_count": cur.get("msg_count"),
-                                       "signal": "regen",
+                                       "signal": done_signal,
                                        "recovered": recovered, "notes": notes,
                                        "tail": cur.get("last_tail", "")}, 0)
                 else:
@@ -3223,6 +3243,54 @@ def cmd_wait(a) -> int:
     if tri:
         payload["triage"] = {k: tri.get(k) for k in ("stage", "hint", "evidence")}
     return finish(payload, 5)
+
+
+def cmd_modal_click(a) -> int:
+    """点击可见弹窗里的按钮（主场景：GPT 上下文满弹窗的「新聊天 / New chat」）。
+
+    这是平台限制类弹窗的**官方恢复通道**：点「新聊天」= 带对话记忆开新对话，
+    比丢上下文重来好一个量级。点击成功后页面会跳到新对话——必须 rebind
+    （bind 新 url），并把任务现状摘要贴过去继续；不要重发原问题。
+
+    只在可见弹窗内部找按钮（platforms.js_modal_click），不会误点侧边栏的常驻入口。
+    """
+    path = state_path(a.state)
+    st = load_state(path)
+    touch_lease(st, path)  # 续租：agent 活着，窗口不收
+    p = platforms.get(a.platform or st.get("platform"))
+    sid = ensure_session(st, path)
+    match = (a.match or "").strip() or "new ?chat|新聊天"
+    ok, res = evaluate(platforms.js_modal_click(match), sid, timeout=45)
+    if not ok:
+        print(json.dumps({"ok": False, "stage": "evaluate_failed",
+                          "detail": str(res)[:300],
+                          "hint": "页面探不通：先 wa.py doctor 看会话与实例。"},
+                         ensure_ascii=False, indent=2))
+        return 4
+    if not res.get("ok"):
+        why = res.get("why")
+        payload = {"ok": False, "stage": "modal_click_failed", "why": why,
+                   "match": match,
+                   "hint": ("页面上没有可见弹窗：先 wa.py triage 确认弹窗还在（平台可能已自行关闭）。"
+                            if why == "no-modal" else
+                            "弹窗里没有匹配按钮：按输出里的 buttons 清单收窄 --match 正则，"
+                            "别全局乱点。") if why == "no-matching-button" else
+                           ("点击被拒绝：%s" % why)}
+        payload.update({k: res[k] for k in ("buttons",) if res.get(k)})
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 5
+    # 成功：清掉旧对话的等待态。页面即将跳到新对话，旧的 conv_id 留着只会触发
+    # 漂移判定；rebind 时 bind 新 url 会重写绑定。
+    st["awaiting_reply"] = False
+    st["context_full_recovery_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    st["context_full_recovery_clicked"] = res.get("clicked") or ""
+    save_state(path, st)
+    print(json.dumps({"ok": True, "clicked": res.get("clicked"),
+                      "modal_text": res.get("modal_text"), "match": match,
+                      "next": "页面跳到新对话后：wa.py bind <新对话地址> 接上，"
+                              "把任务现状摘要贴过去继续；不要重发原问题。"},
+                     ensure_ascii=False, indent=2))
+    return 0
 
 
 def cmd_read(a) -> int:
@@ -3822,21 +3890,31 @@ def main(argv: list | None = None) -> int:
     p.set_defaults(func=cmd_send)
 
     p = add_pl(sub.add_parser("wait", help="等待回复完成"))
-    p.add_argument("--timeout", type=int, default=900)
+    # 2026-11-09 用户口径：正常回复很快，不会超过 2 分钟——总时钟 900→150。
+    # 特殊长任务（深调研/长文生成）显式给 --timeout，不要把默认值当喘息空间。
+    p.add_argument("--timeout", type=int, default=150)
     p.add_argument("--interval", type=float, default=3.0)
     p.add_argument("--max-recover", type=int, default=1, dest="max_recover",
                    help="会话被回收后自动续窗的次数（默认 1；续窗＝在原对话地址重开窗口）")
     p.add_argument("--first-token", type=float, default=0, dest="first_token",
                    help="首字时钟（秒）：多久内必须看到生成中或首字，过了就走分诊。"
-                        "0 = 用平台的 ttft_s（默认 45）")
+                        "0 = 用平台的 ttft_s（默认 30）")
     p.add_argument("--stall", type=float, default=0,
                    help="停滞时钟（秒）：已在生成但页面连续多久不变算卡住。"
-                        "0 = 用平台的 stall_s（默认 60）")
+                        "0 = 用平台的 stall_s（默认 45）")
     p.set_defaults(func=cmd_wait)
 
     p = add_pl(sub.add_parser("read", help="读取末条回复"))
     p.add_argument("--out")
     p.set_defaults(func=cmd_read)
+
+    p = add_pl(sub.add_parser(
+        "modal-click",
+        help="点击可见弹窗里的按钮（主场景：上下文满弹窗的「新聊天」，带记忆开新对话）"))
+    p.add_argument("--match", default="new ?chat|新聊天",
+                   help="按钮文案/aria-label 的匹配正则（默认 new ?chat|新聊天）；"
+                        "只在可见弹窗内部找，绝不全局搜")
+    p.set_defaults(func=cmd_modal_click)
 
     p = add_pl(sub.add_parser("triage", help="卡住判定：只读页面，说清卡在哪、下一步做什么"))
     p.add_argument("--relocate", action="store_true",

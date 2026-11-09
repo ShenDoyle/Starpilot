@@ -2,6 +2,44 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 0.1.7.2 候选（2026-11-09，webai 交互识别八条优化：等待时钟收紧、弹窗分类、New chat 恢复、回复图标信号、bsk 钉 0.4.1、多任务错峰）
+
+不升版号（`SKILL.md` 仍 0.1.7.1）：发版与推送由用户决定。八条需求逐条落点：
+
+### 用户口径 → 实现
+1. **正常回复 ≤2 分钟**：`ttft_s` 45→30、`stall_s` 60→45、`wait --timeout` 默认 900→150。
+   超窗不再干等——首字/停滞时钟到点就分诊。特殊长任务显式给 `--timeout`。
+2. **弹窗 ≠ 限制类**：`platforms.classify_modal()` 只认文案关键词（中英覆盖），
+   命中才归类（context_full / rate_limit / quota），没命中落 `other` 只留证，
+   **不改变既有判定路径**。判定依据记在 `evidence.modal.basis`，事后能查。
+3. **上下文满 → New chat**：新增 `wa.py modal-click --match 'new ?chat|新聊天'`——
+   只在可见弹窗**内部**找按钮（绝不全局搜，防误点侧边栏常驻「新聊天」丢对话）。
+   点成功 = 平台官方的带记忆开新对话；随后 rebind + 贴任务摘要继续，不重发原问题。
+4. **限流 vs 其它分开**：新判定档 `STALL_CONTEXT_FULL`（rc=16）/ `STALL_RATE_LIMITED`
+   （rc=17），优先级在风控之后、生成判定之前——对着限流弹窗干等是最差的处置。
+   处置相反且都写死在 hint：限流=冷却重试一次；上下文满=New chat 恢复。
+5. **bsk 钉 0.4.1**：0.4.2 起已知劣化（浏览器任务被频繁打断）。`update_check.py`
+   远端 ≥0.4.2 显示 ⛔（钉住勿升）而非 ⬆；本地 ≥0.4.2 显示 ⚠ 建议降回；
+   `env.py --install` 装完验版本，装上劣化版当场警告（官方脚本无版本参数，只能装后验）。
+6. **回复完成 = 图标 + 发送键状态**：chatgpt 声明 `sel.reply_done`（回复下方
+   复制/朗读/评价图标，11-03 真机 dump 验证，中英覆盖）。wait 的完成判据从
+   「regen 或 文本稳定两次」扩成「regen / reply_done / 文本稳定」三选一；
+   orchestrator `wait_for_reply` 新增第 4 条见证 `reply_done`（图标轮稳定 1 次即可——
+   平台事实比文本长度可信）。
+7. **上下文按 token 不按轮数**：分类关键词表禁入轮数词（测试盯着）；rc=16 的
+   契约行、SKILL 出路表、hint 三处都写死「token 口径」；全仓库无任何按消息轮数
+   推断容量的逻辑（msg_count 只用于归属判定/审计/变化检测）。
+8. **多任务错峰**：机制本就有（实例级租约 + 各任务各绑各的对话 + 非抢占等待），
+   补齐的是「说清楚」：rc=9 输出从裸 JSON 改成结构化错峰交接说明（谁占着、
+   等多久、下一步重跑或换实例）；orchestrator FIX_HINTS 补 window_busy/
+   context_full/rate_limited 三条处置。
+
+### 契约
+- `references/execution-contract.md` §8 rc 表补 16/17 两行（contract_lint 盯着）。
+- `tests/test_webai_signals.py` 新增 21 个口径测试；`tests/test_update_check.py`
+  补 BskPinTest 5 个；`tests/test_mode_switch.py` 补机器配置隔离（用户的
+  unattended 开关不该劫持「缺省 step」口径测试）。全量 782 OK。
+
 ## 0.1.7.1（2026-11-04，用时更新检查：Starpilot 自身 + bsk 插件，有新版提示用户）
 
 版本记 `0.1.7.1` 而不是 `0.1.71`：四段式在元组比较下才是对的——`(0,1,7,1) > (0,1,7)`

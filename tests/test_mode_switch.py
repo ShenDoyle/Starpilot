@@ -49,6 +49,21 @@ def _capture(fn, *a):
 
 
 class TestResolveExecMode(unittest.TestCase):
+    def setUp(self):
+        # 隔离机器配置：~/.starpilot/config.json 若开着 unattended（用户自己的选择），
+        # 这组「缺省口径」测试会被环境劫持。STARPILOT_CONFIG 指向不存在的临时路径。
+        self._cfg_backup = os.environ.get("STARPILOT_CONFIG")
+        os.environ["STARPILOT_CONFIG"] = os.path.join(
+            tempfile.mkdtemp(prefix="ms-test-"), "absent.json")
+        os.environ.pop("STARPILOT_UNATTENDED", None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        if self._cfg_backup is None:
+            os.environ.pop("STARPILOT_CONFIG", None)
+        else:
+            os.environ["STARPILOT_CONFIG"] = self._cfg_backup
+
     def test_default_is_step(self):
         self.assertEqual(orch._resolve_exec_mode("", None), "step")
 

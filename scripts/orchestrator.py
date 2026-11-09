@@ -102,6 +102,11 @@ FIX_HINTS = {
     "click_send_failed": "确认发送按钮不是 disabled 变体；用通用 isDisabled 判定",
     "probe_failed": "先 wa.py probe 看页面是否改版/跳转；probe 报 editor:false 是 DOM 变了，不是平台坏了",
     "reply_timeout": "轮次超时：不重发，先 probe 看 generating / last_len，再决定是否转人工",
+    "window_busy": "错峰等待：另一任务占着浏览器实例，等对方收口自动交接（rc=9 后重跑即可），"
+                   "不要停对方会话；各任务绑各自的对话，不同时和网页 AI 沟通即可安全共用",
+    "context_full": "上下文满是 token 口径（不是轮数）：wa.py modal-click --match 'new ?chat|新聊天' "
+                    "带记忆开新对话 → rebind → 贴任务摘要继续，不重发原问题",
+    "rate_limited": "限流弹窗：冷却等待后重试一次；连续重发是强化限流信号",
     "guard_failed": "把守卫原因写进 journal，人工判断是页面状态问题还是 DOM 改版",
     "unknown": "按证据判断，不猜",
 }
@@ -382,6 +387,48 @@ def apply_verdict_effect(st: dict, verdict: str) -> dict:
             "known": (verdict or "") in VERDICT_EFFECT}
 
 
+def retire_active_prompt(st: dict, reason: str, extra: dict = None) -> dict:
+    """把**活动 prompt** 归档成**历史 prompt**，只失效指针，不删证据。
+
+    为什么必须有这一步（G1-0 的 P0-N1）：`pending.prompt_file` 以前从不清除，
+    于是 `replan → READY → loop --once`（不带 `--file`）会拿**上一轮已发送的正文**
+    再走一遍闸门 → `WRITE_BLOCKED_DUPLICATE` → 计入失败 → 再 replan。
+    旧指令不仅被当成新任务重发，每圈还实打实消耗 `rounds_used`
+    （budget_gate 的口径是「失败的发送也消耗预算」）。
+
+    边界（刻意不做的事）：
+      · **不删文件**：原始正文留在原地，历史条目里带绝对路径；
+      · **不丢哈希**：`prompt_sha256` 进历史条目，journal 里本来也有一份；
+      · **不碰 write_gate 的幂等**：那是 L1 重复防护，该继续兜底；
+      · **只在有结论时调用**：SENT 与 replan 才归档；
+        MAYBE_SENT / INCONCLUSIVE / 明确失败 / 幂等拒绝**一律不清**，
+        否则会把「没发出去」的任务信息抹掉，或把「不确定」当「成功」。
+    """
+    pend = st.get("pending") or {}
+    pf = pend.get("prompt_file") or ""
+    sha = pend.get("prompt_sha256") or ""
+    if not pf and not sha:
+        return {"retired": False, "reason": "no_active_prompt"}
+    hist = st.setdefault("prompt_history", [])
+    entry = {"prompt_file": pf, "prompt_sha256": sha,
+             "approval_id": pend.get("approval_id", ""),
+             "send_id": pend.get("send_id", ""),
+             "round": int(st.get("round") or 0),
+             "retired_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "retired_reason": reason}
+    if extra:
+        entry.update(extra)
+    hist.append(entry)
+    # 只清活动指针；历史与 journal/writes 证据一律不动
+    pend["prompt_file"] = ""
+    pend["prompt_sha256"] = ""
+    pend["approval_id"] = ""
+    pend["send_id"] = ""
+    st["pending"] = pend
+    return {"retired": True, "reason": reason, "entry": entry,
+            "history_len": len(hist)}
+
+
 def repair_precondition(st: dict, to: str) -> tuple:
     """修补型迁移的前置断言：光有 actor 不够，还得有**证据**。
 
@@ -436,6 +483,11 @@ def wait_for_reply(p: dict, sid: str, before_count: int, timeout: int,
     也会让长度变长——所以它必须同时满足「不在生成 + 连续两次长度不变」，
     并且把 `witness` 如实记下来，事后能分辨这一轮是凭什么判到的。
 
+    第 4 条（2026-11-09）：`reply_done` 图标（平台 sel.reply_done 显式声明，
+    回复结束后消息下方的复制/朗读/评价按钮）出现即完成硬信号——锚点/计数被
+    虚拟列表抖动遮蔽时仍能判到；记在 `witness="reply_done"`，图标轮稳定 1 次
+    即可（平台事实比文本长度可信，不需要等两次）。
+
     为什么不能只数节点：虚拟列表会卸载旧气泡，`reply_count` 可能
     「发送前 2 → 回复后还是 2」，按计数判会白等到超时
     （2026-10-29 端到端实测：回复 2597 字已在页面上，却因为计数没涨被判 reply_timeout）。
@@ -463,13 +515,20 @@ def wait_for_reply(p: dict, sid: str, before_count: int, timeout: int,
         # 第 3 条见证：同容器流式补全（生成中不算，否则会把半截话当成品）
         got_growth = bool(grew["grew"]) and not cur.get("generating") and not got_new
         got_reply = got_new or got_growth
-        if got_reply and not cur.get("generating") and (cur.get("last_len") or 0) > 0:
+        # 第 4 条硬信号（2026-11-09）：回复下方操作图标出现（sel.reply_done 平台
+        # 显式声明，与 regen 同源的「生成已结束」平台事实）。它独立成立——
+        # 图标出现时无论锚点/计数是否可见（虚拟列表抖动），本轮都算完成。
+        got_done_icon = bool(cur.get("reply_done")) and not cur.get("generating")
+        if (got_reply or got_done_icon) and not cur.get("generating") \
+                and (cur.get("last_len") or 0) > 0:
             if cur.get("last_len") == prev_len:
                 stable += 1
-                if stable >= 2:
+                if stable >= 2 or (got_done_icon and stable >= 1):
                     return {"ok": True,
-                            "signal": "text_stable" if got_new else "text_growth",
-                            "witness": witness if got_new else "growth",
+                            "signal": ("reply_done" if got_done_icon and not got_new
+                                       else "text_stable" if got_new else "text_growth"),
+                            "witness": ("reply_done" if got_done_icon and not got_new
+                                        else witness if got_new else "growth"),
                             "chars": cur.get("last_len"),
                             "new_asst": anch.get("new_asst"),
                             "growth": grew,
@@ -1270,6 +1329,13 @@ def one_step(root: str, st: dict, p: dict, a) -> dict:
         }
         apply_verdict_effect(st, res.get("verdict") or "SENT")  # 送达=有结论的成功
         st["last_error_class"] = ""
+        # 只有走到这里（闸门回 ok + 有主信号）才算「这条指令已经发出去」，
+        # 活动指针必须失效，否则下一轮 loop --once 会把同一正文再发一次（P0-N1）。
+        ret = retire_active_prompt(st, "sent", {"verdict": res.get("verdict") or "SENT",
+                                                  "rounds_used": st.get("rounds_used")})
+        journal(root, st, {"action": "prompt_retired", "result": "ok",
+                           "reason": "sent", "prompt_sha256": ret["entry"]["prompt_sha256"],
+                           "round": ret["entry"]["round"]})
         save_run_state(root, st)
         transition(root, st, "AWAITING_REPLY",
                    "已确认送达（reply_count_delta=%s）" % res.get("reply_count_delta"),
@@ -2266,6 +2332,16 @@ def cmd_replan(a) -> int:
     before = int(st.get("fail_streak") or 0)
     apply_verdict_effect(st, "REPLAN")     # 唯一写入口：清零也走这里
     st["needs_replan"] = True
+    # replan 的语义是「这条指令所属的方案要换」——旧 prompt 因此不再作为新一轮默认待发送项。
+    # 这里**不**把归档记成「已发送」：reason=replan、条目里不带 verdict，
+    # 与 SENT 路径的归档在审计上可区分。
+    ret = retire_active_prompt(st, "replan",
+                               {"error_class": st.get("last_error_class") or ""})
+    if ret["retired"]:
+        journal(root, st, {"action": "prompt_retired", "result": "ok",
+                           "reason": "replan",
+                           "prompt_sha256": ret["entry"]["prompt_sha256"],
+                           "round": ret["entry"]["round"]})
     st["replan"] = {"reason": getattr(a, "reason", "") or "same_target_failed_twice",
                     "fail_streak_before": before,
                     "error_class": st.get("last_error_class") or "",

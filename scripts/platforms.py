@@ -28,6 +28,15 @@ def _css(cands):
     return json.dumps(cands, ensure_ascii=False)
 
 
+def _reply_done_css(p: dict) -> list:
+    """「回复完成图标」候选：sel.reply_done 列表优先，退化到平台级 reply_done_selector。"""
+    s = (p or {}).get("sel") or {}
+    cands = s.get("reply_done") or []
+    if not cands and (p or {}).get("reply_done_selector"):
+        cands = [p["reply_done_selector"]]
+    return cands
+
+
 # ---------------------------------------------------------------- 通用片段
 
 # 在候选里找第一个存在的元素
@@ -232,6 +241,17 @@ PLATFORMS = {
             "speech": ["[data-testid=\"composer-speech-button\"]",
                        "button[aria-label*=\"语音\"]",
                        "button[aria-label*=\"Voice\"]"],
+            # 回复完成图标（2026-11-09 从 11-03 真机 dump 验证）：
+            # 每条回复结束后下方出现「复制/复制消息/朗读/评价回复」操作图标，
+            # 生成中不存在——与 regen 并列的完成硬信号。中英文界面都要覆盖。
+            # ⚠️ 选择器语法约束：属性值内不允许空格（domsel 的 compound 解析按
+            # 空白切 token），所以英文「Read aloud」用 *="aloud" 子串匹配。
+            "reply_done": ["button[aria-label=\"复制\"]",
+                           "button[aria-label=\"复制消息\"]",
+                           "button[aria-label=\"朗读\"]",
+                           "button[aria-label=\"评价回复\"]",
+                           "button[aria-label=\"Copy\"]",
+                           "button[aria-label*=\"aloud\"]"],
             "scroll": [".thread-scroll-container"],
         },
     },
@@ -523,10 +543,15 @@ _DEFAULTS = {
     # ---- 时间预算（秒）：三类时钟，取代「一个 900 秒总超时」----
     # 首字：从「发送已确认」起算，多久内必须看到生成中或首字。过了就走分诊。
     # 实测（2026-10-30，DeepSeek）：首字 2–5 秒；开联网搜索会拖到 20 秒以上。
-    # 45 秒是「正常路径的 3–10 倍」，宁可宽一点也不要误杀正在搜索/思考的轮次。
-    "ttft_s": 45,
+    # 2026-11-09 用户口径：正常回复很快，**不会超过 2 分钟**——首字阈值 30 秒
+    # （正常路径的 5–10 倍），超过就分诊，不再按「宁可宽等」的老口径空转。
+    "ttft_s": 30,
     # 停滞：已在生成但文本连续多久不变，算流死了（先看是不是假生成）。
-    "stall_s": 60,
+    "stall_s": 45,
+    # 「回复已完成」的平台声明选择器（逗号分隔 CSS，可空）：
+    # 回复结束后消息下方会出现操作图标（复制/朗读/评价…），生成中不存在。
+    # 这是「生成是否结束」的第二硬信号（与 regen 并列），2026-11-09 起 wait 采用。
+    "reply_done_selector": "",
 }
 
 
@@ -865,6 +890,67 @@ STALL_SILENT = "no_start"
 # 而它和 STALL_SILENT 的处置相反：前者**只读等待/重试读**，后者才要查发送。
 # 混在一起就会让 agent 去重发消息——重发既是错的，又正好是风控最爱的特征。
 STALL_LOAD_FAILED = "page_load_failed"
+# 2026-11-09 新增两档：平台限制类弹窗，从「没发出去/静默拒绝」里分出来。
+# 用户口径：页面有限制（kimi 限流、gpt 上下文满）时通常有弹窗，但**弹窗 ≠ 一定是
+# 限制类**——所以分类只认弹窗文案关键词（basis 留痕），没匹配就维持既有判定路径。
+# 两档的处置完全相反，混在一起就会做错动作：
+#   · 限流 = 冷却等待，重发是强化信号；
+#   · 上下文满 = token 口径（**不是轮数**，GPT 按 token 总数限制），点弹窗里的
+#     「新聊天 / New chat」可直接带记忆开新对话，然后 rebind 带摘要继续。
+STALL_CONTEXT_FULL = "context_full"
+STALL_RATE_LIMITED = "rate_limited"
+
+# ---- 弹窗分类（只认文案，不猜）----
+MODAL_CONTEXT_FULL = "context_full"
+MODAL_RATE_LIMIT = "rate_limit"
+MODAL_QUOTA = "quota"
+MODAL_OTHER = "other"
+MODAL_NONE = ""
+
+# 关键词表：中英界面都要覆盖。顺序即优先级：上下文满 → 限流 → 额度。
+# 上下文满的口径是 token/长度（用户明确：GPT 按 token 总数限制，**不许用轮数近似**）。
+_MODAL_PATTERNS = (
+    (MODAL_CONTEXT_FULL, (
+        "上下文", "对话太长", "内容太长", "过长", "太长了",
+        "maximum length", "context window", "context limit", "context full",
+        "conversation is too long", "too long", "exceed", "token limit",
+    )),
+    (MODAL_RATE_LIMIT, (
+        "人太多", "太忙", "繁忙", "排队", "队列", "高峰", "稍后再试", "稍后重试",
+        "请求过多", "限流", "rate limit", "too many", "busy", "queue",
+        "try again later", "high demand", "servers are busy",
+    )),
+    (MODAL_QUOTA, (
+        "额度", "次数已用", "配额", "用量上限", "升级会员", "订阅",
+        "quota", "usage limit", "upgrade", "subscription", "out of credits",
+    )),
+)
+
+# 分类后的处置提示（triage/doctor 直接引用，agent 照做，不许自己发明第三步）
+HINT_CONTEXT_FULL = (
+    "上下文满了（token 口径，不是轮数）。GPT 弹窗里的「新聊天 / New chat」按钮"
+    "可以直接带对话记忆开新对话：跑 python scripts/wa.py modal-click --match 'new ?chat|新聊天'，"
+    "等页面跳到新对话后 rebind，把任务现状摘要贴过去继续；**不要重发原问题**。")
+HINT_RATE_LIMITED = (
+    "平台限流/额度类弹窗（判定依据见 evidence.modal）。处置 = 冷却等待后重试一次；"
+    "连续重发只会强化限流信号。若是「升级会员」入口，那是用户决策，报给用户，不要自己点。")
+
+
+def classify_modal(text: str) -> dict:
+    """把弹窗文案归成限制类：context_full / rate_limit / quota / other / 空。
+
+    只做关键词匹配（中英都覆盖），命中什么记什么（basis 留痕）；没命中不算
+    限制类——弹窗可能是确认框、公告等任何东西，**不许把弹窗一律当限制**。
+    """
+    t = (text or "").strip().replace("\n", " ")
+    if not t:
+        return {"kind": MODAL_NONE, "basis": "", "text": ""}
+    for kind, words in _MODAL_PATTERNS:
+        for w in words:
+            if w.lower() in t.lower():
+                return {"kind": kind, "basis": w, "text": t[:120]}
+    return {"kind": MODAL_OTHER, "basis": "", "text": t[:120]}
+
 
 # HTTP 层证据的分类（配合 `bsk debug requests`，见 wa.net_evidence）：
 # 状态码是**平台自己给的**事实，比"看起来像风控"可靠一个量级。
@@ -945,6 +1031,20 @@ def judge_stall(p, cur, base, *, unchanged_s=0.0, fake_gen_s=FAKE_GEN_DEFAULT_S)
         stage = STALL_LOGIN if kind == "login" else STALL_RISK
         return {"verdict": stage, "risk": kind, "evidence": ev,
                 "hint": RISK_HINTS[kind] % (risk_detail(d) or "无细节")}
+
+    # 1b) 模态弹窗分类（2026-11-09）：限制类弹窗必须先于一切「等回复」逻辑处理，
+    #     否则 agent 会对着弹窗干等超时。但弹窗 ≠ 一定是限制类——分类只认文案，
+    #     没匹配（other）就只留证，不改变既有判定路径。
+    if d.get("modal"):
+        mk = classify_modal(d.get("modal_text") or "")
+        if mk["kind"] == MODAL_CONTEXT_FULL:
+            return {"verdict": STALL_CONTEXT_FULL, "evidence": ev, "modal": mk,
+                    "hint": HINT_CONTEXT_FULL}
+        if mk["kind"] in (MODAL_RATE_LIMIT, MODAL_QUOTA):
+            return {"verdict": STALL_RATE_LIMITED, "evidence": ev, "modal": mk,
+                    "hint": HINT_RATE_LIMITED}
+        if mk["kind"] != MODAL_NONE:
+            ev["modal_text"] = mk["text"]  # 其它弹窗：留证，继续往下判
 
     # 2) 还是不是同一块对话。地址漂移的处置是 rebind，和「没回复」不是一回事。
     bound = b.get("conv_id") or ""
@@ -1262,6 +1362,12 @@ def js_probe(p):
       return [...document.querySelectorAll('main button, button')]
         .some(b => /重新生成|Regenerate/i.test((b.getAttribute('aria-label') || '')));
     })(),
+    // 回复完成图标：回复结束后消息下方出现操作图标（复制/朗读/评价…），生成中不存在。
+    // 与 regen 并列的完成硬信号；平台没声明就恒 false（不许拿通用猜测当判据）。
+    reply_done: (() => {
+      const S = __REPLY_DONE_SEL__;
+      return (S && S.length) ? !!pick(S) : false;
+    })(),
     can_send: !!send && !isDisabled(send),
     speech: !!speech,
     editor: !!editor,
@@ -1320,6 +1426,7 @@ def js_probe(p):
     # 避免「看见长得像 id 的属性就当消息身份」。
     return (js.replace("__ANCHOR_BOX__", json.dumps(p.get("anchor_box") or ""))
               .replace("__REGEN_SEL__", json.dumps(p.get("regen_selector") or ""))
+              .replace("__REPLY_DONE_SEL__", json.dumps(_reply_done_css(p)))
               .replace("__KEY_ATTRS__", json.dumps(p.get("key_attrs") or [],
                                                    ensure_ascii=False))
               .replace("__KEY_UP__", str(int(p.get("key_up") or 4)))
@@ -1478,6 +1585,42 @@ def js_click_send(p):
   return JSON.stringify({ ok: true });
 })()
 """ % (_JS_PICK, _css(s["send"]))
+
+
+def js_modal_click(match: str):
+    """点击当前可见弹窗里文案/aria-label 匹配正则的按钮。
+
+    主场景：GPT 上下文满弹窗的「新聊天 / New chat」——平台官方给的恢复通道，
+    点它可直接**带对话记忆**开新对话，比丢上下文重来好一个量级。
+
+    安全边界：只在可见弹窗（modal-mask / role=dialog / aria-modal，几何过滤同
+    js_probe 的 visibleModal）**内部**找按钮，绝不全局搜——「新聊天」在侧边栏
+    也常驻，全局搜点错就把当前对话直接丢了。返回命中的按钮文案与弹窗摘要。
+    """
+    return """
+(() => {
+  const M = %s;
+  const visibleModal = [...document.querySelectorAll('div.modal-mask, [role="dialog"], [aria-modal="true"]')]
+    .map(m => ({ m, r: m.getBoundingClientRect(), cs: getComputedStyle(m) }))
+    .filter(x => x.r.width >= 24 && x.r.height >= 24
+                 && x.cs.visibility !== 'hidden'
+                 && parseFloat(x.cs.opacity || '1') >= 0.1)
+    .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height))[0];
+  if (!visibleModal) return JSON.stringify({ ok: false, why: 'no-modal' });
+  const re = new RegExp(M, 'i');
+  const btns = [...visibleModal.m.querySelectorAll('button, [role="button"], a')]
+    .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+  const hit = btns.find(b => re.test((b.getAttribute('aria-label') || ''))
+                           || re.test((b.innerText || b.textContent || '').trim()));
+  if (!hit) return JSON.stringify({ ok: false, why: 'no-matching-button',
+    buttons: btns.slice(0, 8).map(b =>
+      (b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 40)) });
+  const label = (hit.innerText || hit.getAttribute('aria-label') || '').trim().slice(0, 60);
+  hit.click();
+  return JSON.stringify({ ok: true, clicked: label,
+    modal_text: (visibleModal.m.innerText || '').trim().slice(0, 120) });
+})()
+""" % json.dumps(match, ensure_ascii=False)
 
 
 def js_read_last(p):

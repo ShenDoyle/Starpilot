@@ -45,6 +45,14 @@ SELF_TAG_PREFIX = "v"
 UA = {"User-Agent": "starpilot-update-check/1.0 ( +%s )" % SELF_REPO}
 DEFAULT_TTL_HOURS = 24.0
 
+# ---- bsk 版本钉（2026-11-09 用户口径）----
+# bsk 0.4.2 有已知劣化：浏览器执行任务时被频繁打断。策略固定 0.4.1。
+# 因此远端 ≥0.4.2 **不算「有新版」**——提示方向相反：钉住勿升。
+BSK_PINNED_MAX = (0, 4, 1)
+BSK_KNOWN_BAD_FROM = (0, 4, 2)
+BSK_PIN_NOTE = ("bsk 0.4.2 起有已知劣化（执行任务时被频繁打断），当前策略固定 0.4.1："
+                "不要升级；已装 ≥0.4.2 的机器建议降回 0.4.1。")
+
 
 # ---------------------------------------------------------------- 版本工具
 
@@ -202,12 +210,22 @@ def check(root: str, timeout: float = 8.0, ttl_hours: float = DEFAULT_TTL_HOURS,
         r_self.update(f)
     if not skip_bsk:
         f = fetch_remote(BSK_REPO, BSK_CLI_PREFIX, timeout)
+        # 版本钉：远端 ≥0.4.2 不算「有新版」——0.4.2 已知劣化，策略固定 0.4.1。
+        # pinned=true 让上层一眼看出这不是「没查到」，而是「查到了但故意不推荐」。
+        rv = f.get("version") or ()
+        if rv and rv >= BSK_KNOWN_BAD_FROM:
+            f["pinned"] = True
+            f["note"] = BSK_PIN_NOTE
         r_bsk.update(f)
 
     for key, r, lv in (("starpilot", r_self, lv_self), ("bsk", r_bsk, lv_bsk)):
         r["local"] = upg.fmt(lv)
         r["remote"] = upg.fmt(r.get("version") or ())
-        r["newer"] = newer(r.get("version") or (), lv)
+        r["newer"] = (not r.get("pinned")) and newer(r.get("version") or (), lv)
+        # 本地已经装到已知劣化版：跟远端无关，也要当场喊
+        if key == "bsk" and lv and lv >= BSK_KNOWN_BAD_FROM:
+            r["local_bad"] = True
+            r["note"] = BSK_PIN_NOTE
     out.update({"starpilot": r_self, "bsk": r_bsk, "cached": False,
                 "fetched_at": time.time()})
     if not (skip_self and skip_bsk):
@@ -226,10 +244,17 @@ def human(rep: dict) -> str:
             ("bsk 插件", "bsk",
              "python scripts/env.py --install（先确认无活跃 bsk session）")):
         r = rep.get(key) or {}
+        if r.get("pinned"):
+            lines.append("⛔ bsk 远端已有 v%s，但 0.4.2 起已知劣化（执行任务被频繁打断）"
+                         "——当前策略钉 0.4.1，勿升级。" % r.get("remote"))
+            continue
+        if r.get("local_bad"):
+            lines.append("⚠ 本地 bsk 已是 v%s（≥0.4.2 已知劣化）：%s" %
+                         (r.get("local"), r.get("note") or ""))
         if r.get("newer"):
             lines.append("⬆ %s 有新版：本地 v%s → 远端 v%s（%s）\n  升级命令：%s"
                          % (label, r.get("local"), r.get("remote"), r.get("source"), hint))
-        elif r.get("remote") not in (None, "", "(未知)"):
+        elif r.get("remote") not in (None, "", "(未知)") and not r.get("local_bad"):
             lines.append("✓ %s 已是最新（v%s）" % (label, r.get("local")))
         elif r.get("err") in ("跳过",):
             lines.append("- %s 本次未检查" % label)
