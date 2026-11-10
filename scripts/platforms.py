@@ -202,7 +202,7 @@ PLATFORMS = {
                       "data-chatgpt-search-message-ids"],
         "key_up": 8,
         # 已实测的写入路径：只有 exec（execCommand）这一条被允许真实写
-        "write_allowed": ["exec"],
+        "write_allowed": ["exec", "paste"],
         "sel": {
             # 2026-11-02 实测（第二变种，晚间）：页面上现在有 **8 个** div.ProseMirror
             # （消息气泡里的渲染块 + 写作块全是同名节点）。选择器一旦匹配多个，

@@ -2823,6 +2823,17 @@ def cmd_send(a) -> int:
 
     # ---- 写入（唯一实现在 do_fill；写没写进去由 platforms.fill_check 判）----
     fill = do_fill(p, text, sid)
+    # 2026-11-11 新增：exec 写入被编辑器框架拒收时（fill_no_send，ProseMirror
+    # 状态未更新，主案例 AIX 扩展遮罩环境），若平台允许 paste 则用
+    # ClipboardEvent 路径降级重写一次（ProseMirror 原生监听 paste）。
+    if (not fill.get("ok") and fill.get("code") == platforms.FILL_NO_SEND
+            and "paste" in (p.get("write_allowed") or [])):
+        print("exec 写入未被框架接受（fill_no_send），降级尝试 paste 路径……",
+              file=sys.stderr)
+        saved = p.get("write_method")
+        p["write_method"] = "paste"
+        fill = do_fill(p, text, sid)
+        p["write_method"] = saved
     if not fill.get("ok"):
         print("写入未被编辑器接受（%s）：%s\n%s"
               % (fill.get("code"), fill.get("detail") or "",
@@ -3175,9 +3186,22 @@ def cmd_wait(a) -> int:
             if age >= ttft_s:
                 ttft_done = True
                 tri = triage(p, st, cur, base, unchanged_s=time.time() - last_change)
-                # 「还在生成/回复已到」= 我们的时钟算早了，继续按原逻辑走，不动页面。
-                if tri["verdict"] in (platforms.STALL_ALIVE, platforms.STALL_READY):
+                # 「还在生成」= 我们的时钟算早了，继续按原逻辑走，不动页面。
+                if tri["verdict"] == platforms.STALL_ALIVE:
                     notes.append("首字时钟到点但判定为 %s，继续等" % tri["verdict"])
+                elif tri["verdict"] == platforms.STALL_READY:
+                    # 2026-11-09 修正（用户裁定）：ChatGPT 计数选择器失效导致 started
+                    # 永远探不到；回复 ≤2 分钟即完成。triage 判 reply_ready 时直接收口，
+                    # 不再空等到总超时（此前实测空等 300–900s 且永不收口）。
+                    st["awaiting_reply"] = False
+                    st["fail_streak"] = 0
+                    st["last_progress_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    save_state(path, st)
+                    write_progress(path, "done", cur, progressed=True)
+                    return finish({"ok": True, "chars": cur.get("last_len", 0),
+                                   "msg_count": cur.get("msg_count"),
+                                   "signal": "reply_ready_early",
+                                   "recovered": recovered, "notes": notes}, 0)
                 else:
                     return bail(tri)
 

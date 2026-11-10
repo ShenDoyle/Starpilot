@@ -662,3 +662,13 @@
 - **适用范围**：任何「计数异常就归因于自己」的判定。计数只说明**数量**，
   数量不说明**来源**；来源要靠内容身份。验收类流程还必须显式要求
   「被测对话期间无人使用」，否则测的是环境不是代码。
+
+## L-WAIT-REPLY-READY-BLOCK（2026-11-08，coach_enh 项目实测）
+- 现象：上轮 wait 被外部取消（或未收口）后回复已在页面上，再跑 `wa.py wait` 会卡「首字时钟」直到总超时（rc=5，stage=timeout，triage=reply_ready），永远进不了收口分支清 `awaiting_reply`；send 因此 rc=3。
+- 判据：triage 报 `reply_ready` + `generating=false` + `editor_len=0` + 页面 unchanged_s 持续增长。
+- 处置：正文哈希不同于上一条时，`send --force` 一次是安全的（幂等检查针对的是同一条正文重复发送）；同一条正文重发仍严禁。根因修复方向：wait 启动时若探测即 reply_ready 应直接走收口分支。
+
+## L-CHATGPT-FILL-NO-SEND-PERSISTENT（2026-11-11，coach_enh 实测）
+- 现象：ChatGPT 对话页面 reload 后（或长时间会话后），fill 成功写入编辑器但发送键持续不出现（fill_no_send），clear 也无法清空（editor_len 不变），跨新对话复现。
+- 处置：连续 2 次 fill_no_send 后停止重试；下轮优先 bind --new 全新对话；仍失败 → 按 runbooks/dom-drift.md 重新标定 send 按钮选择器（ChatGPT 已弃用 send-button testid，改 form button[type=submit]，若再改版需重标定）。
+- 教训：页面 reload/长会话是 fill_no_send 的先兆；发送前 triage 编辑器状态可提前发现。
