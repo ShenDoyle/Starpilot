@@ -33,6 +33,7 @@ import time
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bsk_vendor  # noqa: E402
 import confirm  # noqa: E402
 import platforms  # noqa: E402
 import safeprint  # noqa: E402
@@ -50,6 +51,13 @@ safeprint.harden_streams()
 
 _CANDIDATES = [
     os.environ.get("BSK_BIN") or "",
+    # vendor 钉住版（2026-11-11）：随仓库分发的 bsk 0.4.1，sha256 校验过才用。
+    # 本脚本自己已有租约+全局计数，直连真身不必过 shim；机器级 bsk 被
+    # BSK_AUTO_UPDATE 换成劣化版（0.4.2+）也影响不到这里。
+    # vendor 钉住版（2026-11-11）：随仓库分发的 bsk 0.4.1，sha256 校验过才用。
+    # 本脚本自己已有租约+全局计数，直连真身不必过 shim；机器级 bsk 被
+    # BSK_AUTO_UPDATE 换成劣化版（0.4.2+）也影响不到这里。
+    bsk_vendor.vendor_bsk(),
     # L2 shim（2026-11-02）：装了 shim 时真身改名为 bsk.bin.exe，本脚本直连真身
     # （自己已有租约+全局计数，不必过 shim；也避免所有调用多一层 cmd.exe 开销）。
     os.path.expanduser("~/.local/bin/bsk.bin.exe"),

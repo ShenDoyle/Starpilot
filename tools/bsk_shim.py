@@ -28,11 +28,37 @@ import sys
 REAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bsk.bin.exe")
 TICKET_ENV = "STARPILOT_WINDOW_TICKET"
 
-# winlease（全局计数账本 + 票据校验）从星舵安装位找；两处都试
+# winlease（全局计数账本 + 票据校验）从星舵安装位找；多安装位都试
 _SKILL_SCRIPT_DIRS = [
     os.path.expanduser(r"~\.workbuddy\skills\starpilot\scripts"),
     os.path.expanduser(r"~\.trae-cn\skills\starpilot\scripts"),
+    os.path.expanduser("~/.agents/skills/starpilot/scripts"),
 ]
+
+
+def _real_bsk() -> str:
+    """真身解析：shim 同目录 bsk.bin.exe → vendor 钉住版（2026-11-11）。
+
+    vendor 优先级低于本地真身，是为了不改变既有 Windows 安装的语义；
+    但机器级 bsk 被 BSK_AUTO_UPDATE 换成劣化版时，shim 真身同样会被换——
+    这时落到 vendor 0.4.1，闸门放行后执行的仍是钉住版。
+    """
+    if os.path.exists(REAL):
+        return REAL
+    for d in _SKILL_SCRIPT_DIRS:
+        if not os.path.isdir(d):
+            continue
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        try:
+            import bsk_vendor
+            p = bsk_vendor.vendor_bsk(
+                skill_root=os.path.dirname(os.path.abspath(d)))
+            if p:
+                return p
+        except Exception:
+            continue
+    return REAL  # 都没有：维持旧行为，由调用处的缺失检查报错
 
 
 def _instance(args: list) -> str:
@@ -64,7 +90,7 @@ def _deny(code: str, message: str) -> int:
 
 
 def _run(args: list) -> int:
-    p = subprocess.run([REAL] + args, capture_output=True, text=True,
+    p = subprocess.run([_real_bsk()] + args, capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     sys.stdout.write(p.stdout or "")
     sys.stderr.write(p.stderr or "")
@@ -73,9 +99,9 @@ def _run(args: list) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
-    if not os.path.exists(REAL):
-        print("BSK-SHIM ERROR: 找不到真身 %s（shim 安装不完整，"
-              "重跑 tools/install_l2_shim.py）" % REAL, file=sys.stderr)
+    if not os.path.exists(_real_bsk()):
+        print("BSK-SHIM ERROR: 找不到真身 %s，且 vendor 钉住版不可用"
+              "（重跑 tools/install_l2_shim.py）" % REAL, file=sys.stderr)
         return 1
     try:
         wl = _winlease()

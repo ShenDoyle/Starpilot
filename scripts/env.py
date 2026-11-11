@@ -60,11 +60,15 @@ def _plat() -> str:
 
 
 def find_bsk(env=None, which=None) -> str:
-    """定位顺序与 wa.py 完全一致：BSK_BIN → shim 真身 bsk.bin.exe → PATH → ~/.local/bin。"""
+    """定位顺序与 wa.py 完全一致：BSK_BIN → vendor 钉住版 → shim 真身 bsk.bin.exe
+    → PATH → ~/.local/bin。vendor（bsk_vendor.vendor_bsk）sha256 校验不过就跳过，
+    落到机器级候选——机器级 bsk 被 BSK_AUTO_UPDATE 换成劣化版也不影响星舵。"""
     env = os.environ if env is None else env
     which = shutil.which if which is None else which
+    import bsk_vendor  # noqa: F401  同目录模块，延迟导入便于测试打桩
     for c in [
         env.get("BSK_BIN") or "",
+        bsk_vendor.vendor_bsk(),
         os.path.expanduser("~/.local/bin/bsk.bin.exe"),
         which("bsk") or "",
         os.path.expanduser("~/.local/bin/bsk.exe"),
@@ -291,8 +295,11 @@ def install(timeout=300, runner=None, rep=None) -> dict:
     if vt and vt >= (0, 4, 2):
         warn = ("⚠ 装到的是 bsk %s：0.4.2 起有已知劣化（执行任务时被频繁打断），"
                 "当前策略固定 0.4.1——建议降级或回滚到 0.4.1。" % ver)
+    # vendor 钉住版（2026-11-11）：星舵调用走仓库自带的 0.4.1，机器级安装只是
+    # PATH 兜底与扩展通信宿主——装了劣化版也不改变星舵自己的行为。
+    note = "星舵调用走 vendor 钉住版（bsk_vendor.vendor_bsk），机器级安装仅作 PATH 兜底。"
     return {"ok": ok, "rc": r["rc"], "path": after["bsk"]["path"],
-            "version": ver, "warn": warn,
+            "version": ver, "warn": warn, "note": note,
             "tail": (r["out"] or r["err"] or "").strip().splitlines()[-6:],
             "doctor": (after["bsk"].get("doctor") or {}).get("connected")}
 
@@ -383,6 +390,10 @@ def main(argv=None) -> int:
         print(human(rep))
         if inst is not None:
             print("\n安装结果：%s  rc=%s" % ("成功" if inst["ok"] else "失败", inst["rc"]))
+            if inst.get("note"):
+                print("  " + inst["note"])
+            if inst.get("warn"):
+                print("  " + inst["warn"])
             if inst.get("warn"):
                 print(inst["warn"])  # 版本钉：装上 0.4.2+ 要当场喊出来，不许静默
             for line in inst.get("tail") or []:

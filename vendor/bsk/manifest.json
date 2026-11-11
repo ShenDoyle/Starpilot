@@ -1,0 +1,33 @@
+{
+  "version": "0.4.1",
+  "source": "https://github.com/Tencent/BrowserSkill/releases/tag/cli-v0.4.1",
+  "pinned_at": "2026-11-11",
+  "note": "0.4.2+ 已知劣化（任务频繁被打断），钉住勿升",
+  "assets": {
+    "x86_64-pc-windows-msvc": {
+      "file": "bsk.exe",
+      "sha256": "f2cfe74c86d86b12a75d157391982b63d16533dd3277db505c3118e1dc5e22a0",
+      "bytes": 18441776
+    },
+    "x86_64-unknown-linux-musl": {
+      "file": "bsk",
+      "sha256": "a272393e17de0f492406829b43b52fea90d0430f6cbf9d5d6a8197d3451f16ce",
+      "bytes": 16018672
+    },
+    "aarch64-unknown-linux-musl": {
+      "file": "bsk",
+      "sha256": "11dbe2800bc1ba9b17a668ea8adecf57a6d243271efba7c25b337cd6d87f9f96",
+      "bytes": 12724928
+    },
+    "x86_64-apple-darwin": {
+      "file": "bsk",
+      "sha256": "f82148ed62a1b43b9877d636349624b1ae1fb934761c8f572984c91f3059ebbc",
+      "bytes": 15404656
+    },
+    "aarch64-apple-darwin": {
+      "file": "bsk",
+      "sha256": "a520391a5a8d3ce08dfee85920443363e086391f3b697722ff9f6ae84cc10393",
+      "bytes": 12781216
+    }
+  }
+}

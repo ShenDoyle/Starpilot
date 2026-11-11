@@ -15,6 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 import env as ev  # noqa: E402
+import bsk_vendor  # noqa: E402
 
 
 def _touch(path):
@@ -22,6 +23,12 @@ def _touch(path):
     with io.open(path, "w", encoding="utf-8") as f:
         f.write("x")
     return path
+
+
+def _no_vendor():
+    """隔离仓库自带的 vendor 钉住版（2026-11-11）：find_bsk 的定位语义测试
+    不应随「仓库里有没有 vendor 产物」变红——与 11-02 的本机安装隔离同一条纪律。"""
+    return mock.patch.object(bsk_vendor, "vendor_bsk", return_value=None)
 
 
 class _Proc(object):
@@ -44,16 +51,28 @@ class TestFindBsk(unittest.TestCase):
         # 本机装过 bsk 时它会先命中，测试就会随环境变红（2026-11-02 复审要求：
         # 测试不得依赖本机安装状态，也不许跳过失败项）。
         with mock.patch.object(ev.os.path, "expanduser",
-                               side_effect=lambda s: "/nonexistent" + s):
+                               side_effect=lambda s: "/nonexistent" + s), \
+             _no_vendor():
             self.assertEqual(ev.find_bsk(env={}, which=lambda n: p), p)
 
     def test_none_when_nothing(self):
-        with mock.patch.object(ev.os.path, "expanduser", side_effect=lambda s: "/nonexistent" + s):
+        with mock.patch.object(ev.os.path, "expanduser", side_effect=lambda s: "/nonexistent" + s), \
+             _no_vendor():
             self.assertIsNone(ev.find_bsk(env={}, which=lambda n: None))
 
     def test_bsk_bin_pointing_nowhere_is_ignored(self):
-        with mock.patch.object(ev.os.path, "expanduser", side_effect=lambda s: "/nonexistent" + s):
+        with mock.patch.object(ev.os.path, "expanduser", side_effect=lambda s: "/nonexistent" + s), \
+             _no_vendor():
             self.assertIsNone(ev.find_bsk(env={"BSK_BIN": "/nope/bsk"}, which=lambda n: None))
+
+    def test_vendor_pinned_copy_is_used(self):
+        """2026-11-11：vendor 钉住版存在时，优先于 PATH 与 ~/.local/bin。"""
+        p = bsk_vendor.vendor_bsk()
+        if not p:  # vendor 产物缺失时本用例退化为「不命中机器级候选」
+            self.skipTest("仓库 vendor 产物缺失")
+        with mock.patch.object(ev.os.path, "expanduser",
+                               side_effect=lambda s: "/nonexistent" + s):
+            self.assertEqual(ev.find_bsk(env={}, which=lambda n: None), p)
 
 
 class TestInstallCommand(unittest.TestCase):

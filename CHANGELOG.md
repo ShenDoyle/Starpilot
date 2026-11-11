@@ -2,6 +2,38 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 0.1.7.2 候选追加（2026-11-11，bsk vendor 钉住版随仓分发 + 跨平台适配盘点）
+
+### 背景（用户在 zcode 环境实测反馈）
+bsk 的 `BSK_AUTO_UPDATE` 绕过一切提示直接把机器级二进制换成 0.4.2（已知劣化：
+浏览器任务被频繁打断）。提示层钉不住，必须物理隔离。
+
+### 实现
+- **vendor 目录**：`vendor/bsk/0.4.1/<triple>/` 五平台官方产物（win x64、
+  linux x64/arm64 musl、mac x64/arm64）+ `manifest.json`（版本/来源/sha256）。
+- **解析顺序**（`scripts/bsk_vendor.py`，env.find_bsk 与 wa.py 共用）：
+  `BSK_BIN`（人工覆盖）→ vendor 钉住版（sha256 校验不过即跳过，fail-closed）
+  → shim 真身 → PATH → ~/.local/bin。机器级 bsk 升不升级都不再影响星舵。
+- **shim 真身回落**：`tools/bsk_shim.py` 真身缺失时落 vendor——机器级被
+  BSK_AUTO_UPDATE 换成劣化版，闸门放行后执行的仍是 0.4.1。
+- **安装器跨平台**：`tools/install_l2_shim.py` 增加 macOS/Linux 分支
+  （真身 `bsk→bsk.bin` + bash shim 脚本），Windows 行为不变。
+- **`env.py --install` / `update_check.py`**：机器级安装降级为 PATH 兜底并
+  明说；bsk 的升级提示改为 vendor 口径（换钉住版须改 vendor 重新发版）。
+
+### 跨平台兼容盘点（macOS / Linux 可用性）
+核心已跨平台：env.py 有 darwin/linux 安装分支；winlease 判活有 /proc 分支；
+写入原语走 bsk CLI（五平台产物齐）；主体纯 Python。已知残留：L2 shim 的
+PATH 拦截在 POSIX 上首次可用（本次补齐）；`find_bsk` 文件名候选仍含 .exe
+（vendor 与 PATH `bsk` 兜底可覆盖）；macOS 无 /proc，租约死锁恢复需人工
+（fail-closed，不阻塞）。前提：Python 3.9+、Chrome/Edge + 扩展、bsk CLI。
+
+### 测试
+新增 `tests/test_bsk_vendor.py` 24 例（triple 映射、manifest 解析、fail-closed
+哈希校验、find_bsk 优先级、shim 回落、安装器模板）；test_env 补 vendor 隔离
++ 新增优先级用例。全量 807 OK（`test_concurrent_redeem` 偶发时序抖动，
+复跑通过，非本次引入）；contract lint PASS。
+
 ## 0.1.7.2 候选（2026-11-09，webai 交互识别八条优化：等待时钟收紧、弹窗分类、New chat 恢复、回复图标信号、bsk 钉 0.4.1、多任务错峰）
 
 不升版号（`SKILL.md` 仍 0.1.7.1）：发版与推送由用户决定。八条需求逐条落点：

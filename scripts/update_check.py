@@ -242,7 +242,8 @@ def human(rep: dict) -> str:
             ("Starpilot", "starpilot",
              "python scripts/upgrade.py --to-latest"),
             ("bsk 插件", "bsk",
-             "python scripts/env.py --install（先确认无活跃 bsk session）")):
+             "bsk 已随仓库 vendor 钉住（vendor/bsk/manifest.json），"
+             "机器级安装不参与升级判断；换钉住版须改 vendor 后重新发版")):
         r = rep.get(key) or {}
         if r.get("pinned"):
             lines.append("⛔ bsk 远端已有 v%s，但 0.4.2 起已知劣化（执行任务被频繁打断）"

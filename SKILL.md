@@ -34,10 +34,14 @@ python scripts/wa.py doctor --explain
 有 ⬆ 就**口头提示用户**，用户拍板后才升级——Starpilot 走 `python scripts/upgrade.py --to-latest`；
 bsk 走 `python scripts/env.py --install`（活跃 bsk session 存在时禁升级）。只提示不擅自动。
 
-**bsk 版本钉**：固定 **0.4.1**（0.4.2 起有已知劣化：浏览器执行任务被频繁打断）。
-`update_check.py` 对远端 ≥0.4.2 显示 ⛔（钉住勿升），本地 ≥0.4.2 显示 ⚠（建议降回）；
-`env.py --install` 装完验版本，装上劣化版当场警告。daemon 自动升级已由用户级
-`BSK_AUTO_UPDATE=off` 关闭——升级只能人工触发，且活跃 session 存在时禁升级。
+**bsk 版本钉（vendor 随仓分发）**：固定 **0.4.1**（0.4.2 起有已知劣化：浏览器执行任务被频繁打断）。
+星舵调用走仓库自带的钉住版二进制 `vendor/bsk/0.4.1/<triple>/`（五平台产物，
+`scripts/bsk_vendor.py` 解析 + sha256 校验，解析顺序 vendor 优先），机器级 bsk
+装什么版本都影响不到星舵。PATH 上的 L2 shim 闸门照旧拦截裸调 `bsk session start`，
+真身缺失时落 vendor。`update_check.py` 对远端 ≥0.4.2 显示 ⛔（钉住勿升），
+本地 ≥0.4.2 显示 ⚠；`env.py --install` 装完验版本，装上劣化版当场警告（但仅作
+PATH 兜底）。daemon 自动升级已由用户级 `BSK_AUTO_UPDATE=off` 关闭——升级只能
+人工触发，且活跃 session 存在时禁升级。
 
 **失败出路表——退出码决定你下一步做什么，不许自己发明第三步动作**
 
