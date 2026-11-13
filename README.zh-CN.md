@@ -7,9 +7,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Tencent/BrowserSkill"><img alt="核心依赖 bsk" src="https://img.shields.io/badge/%E6%A0%B8%E5%BF%83%E4%BE%9D%E8%B5%96-bsk-2f75f0"></a>
+  <a href="references/egolite-mode.md"><img alt="默认传输 ego-browser" src="https://img.shields.io/badge/%E4%BC%A0%E8%BE%93-ego--browser-2f75f0"></a>
+  <a href="https://github.com/Tencent/BrowserSkill"><img alt="可选传输 bsk" src="https://img.shields.io/badge/%E5%85%9C%E5%BA%95-bsk-6b7280"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-0.1.6%20preview-6b7280">
+  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.8.1-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -45,6 +46,20 @@
 | **跑偏怎么发现** | 你自己看出来 | 常常发现不了 | 每步反馈必带偏差，失败不许美化 |
 | **交接靠什么** | 翻聊天记录 | 无记录 | journal + 阶段交接，随时能续 |
 
+## 执行安全：一个动作，只有一条账
+
+真正难处理的不是「发送失败」，而是**不知道到底发没发出去**。这一层把这件事变成可判定、可追溯的：
+
+| 机制 | 拦住什么 |
+| --- | --- |
+| **动作账本**（`actionledger.py`） | 一次动作一条 append-only 记录；换 task、换 run、换 seq 都绕不开同一条未决意图（动作身份 + 业务意图双幂等键） |
+| **执行闸门**（`execution_gate.py`） | 三把锁串行：本地单写者租约 → TaskSpace 所有权 → 页面身份；派发与落账分离，锁一直握到结果落盘 |
+| **fencing 世代** | 旧执行者拿着过期锁继续跑会被判出局，不会两个进程各发一次 |
+| **未知不许重发** | 结果没收到的动作进 `SEND_UNKNOWN` + 反重放锁，重发次数恒 0；解锁只能靠「带证据的裁决 + 消费」，代码自己说「应该成功了」不算数 |
+
+> 这一层目前是**独立模块，已独立测试，尚未接入默认循环**——`orchestrator.py` 的执行路径仍是原来的写闸门。
+> 它要等整体安全验收全部通过才接管；在那之前宁可不用，也不半开着用。设计细节见 `docs/` 与 `CHANGELOG.md` 1.8.1。
+
 ## 用你熟悉的 Agent
 
 <p align="center">
@@ -65,7 +80,7 @@
 
 ## 快速开始
 
-一个上面这样的 Agent，其余它自己装；唯一要亲手做的是在浏览器里启用扩展开关。
+一个上面这样的 Agent，其余它自己装；唯一要亲手做的是在 ego-browser 里把目标平台登录一次（选 bsk 传输才需要装扩展）。
 
 1. 把整个文件夹放进 AI 客户端的 skills 目录（例如 `~/.workbuddy/skills/starpilot`），或 `git clone` 到那里。
 2. 说一句话（见[试一个任务](#试一个任务)）。
@@ -79,7 +94,10 @@
 <details>
 <summary><b>🔧 手动安装</b></summary>
 
-**bsk**（核心依赖，[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 的浏览器 CLI，默认装到 `~/.local/bin`）：
+**ego-browser**（默认传输，2026-11-12 起）：装好 ego-browser CLI，在它里面登录目标平台一次即可，
+不需要浏览器扩展。后台 worker 的启动方式与协议见 [egolite 模式](references/egolite-mode.md)。
+
+**bsk**（可选传输，兜底用；[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 的浏览器 CLI，默认装到 `~/.local/bin`）：
 
 ```bash
 # macOS / Linux
@@ -145,8 +163,9 @@ Windows 在 PowerShell 里跑：`irm https://raw.githubusercontent.com/Tencent/B
 **环境**（Agent 开工前会自己跑）
 
 ```bash
-python scripts/env.py                 # Python 版本、bsk 路径、扩展状态
-python scripts/env.py --install       # 缺 bsk 时自动装
+python scripts/env.py                 # Python 版本、传输层与依赖状态（ego-browser / bsk）
+python scripts/env.py --install       # 缺依赖时引导安装
+python scripts/env.py --set-transport egolite   # 切传输：egolite（默认）/ iab / bsk
 ```
 
 **桥接网页 AI**（`wa.py`）
@@ -194,19 +213,22 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | `risk.py` | 越界请求分级：低放行留痕 / 中换方案 / 高停下问人 |
 | `requirement_gate.py` | 需求卡片否定式校验（只拒绝，不生成） |
 | `lessons_audit.py --strict` | 经验库体检：格式、重复、超期未闭合 |
-| `statelock.py` | 状态文件单写锁 |
+| `statelock.py` | 状态文件单写锁（跨进程租约 + fencing 世代） |
+| `execution_gate.py` / `actionledger.py` | 执行安全层：三把锁 + 动作账本（独立模块，未接入默认循环） |
+| `ego_backend.py` | ego 后端：TaskSpace 所有权探针与操作能力表 |
 | `upgrade.py` | 从 GitHub 拉最新版：自动选源、备份、装完自测 |
 
 ## 依赖、自测与升级
 
 | 项 | 说明 |
 | --- | --- |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | 核心依赖（MIT）：CLI + Chrome/Edge 扩展，用你已经登录的浏览器干活。`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
+| 🌐 [ego-browser](references/egolite-mode.md) | **默认传输**：自带登录态的 Chromium，页面动作走后台常驻 worker，不装扩展、不装 CLI 扩展协议 |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **可选传输（兜底）**：CLI + Chrome/Edge 扩展，用你已经登录的浏览器干活。`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
 | 🐍 Python 3.9+ | 仅标准库，无第三方依赖 |
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t .   # 668 条，纯标准库
+python -m unittest discover -s tests -p "test_*.py" -t .   # 1157 条，纯标准库
 python scripts/upgrade.py --check        # 有没有新版
 python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、装完自测
 ```
@@ -216,7 +238,7 @@ python scripts/upgrade.py --to-latest    # 直接升：自动选源、备份、�
 不想装 skill、只要命令行？用 `starpilot-cli` 包：`scripts/` + `references/` + `templates/` + 契约 + 测试，不含 `SKILL.md`，纯标准库，cron 或别的 agent 都能直接调。
 
 <details>
-<summary><b>bsk 连上了又断？（会回收子进程的宿主）</b></summary>
+<summary><b>bsk 连上了又断？（用 bsk 传输时会遇到）</b></summary>
 
 WorkBuddy / CodeBuddy 这类宿主会把命令子进程一并回收，`bsk doctor` 可能通过而中途断连。让 daemon 以独立后台任务常驻：`bsk daemon start --foreground`，再从另一条工具调用里验证连接。共享 `BSK_HOME`、`BSK_AUTO_START=0` 见[沙箱宿主指南](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)。
 
@@ -244,6 +266,8 @@ WorkBuddy / CodeBuddy 这类宿主会把命令子进程一并回收，`bsk docto
 | 改流程、改硬规则、改 Agent 行为 | `SKILL.md` |
 | 改状态机、改指标口径、改确认门与授权 | `docs/orchestrator-contract.md` |
 | 接新平台，或某平台开始出怪问题 | `references/web-ai-platforms.md` |
+| 换传输层，或 worker 起不来 / op 超时 | `references/egolite-mode.md` |
+| 翻执行安全层的验收证据（账本 / 闸门 / 裁决协议） | `project-04-p2-3-report/` |
 | 让 Agent 避开前人踩过的坑 | `references/lessons.md` |
 | 填需求卡片、确认单、反馈、阶段报告 | `templates/` |
 | 看这版发了什么、改了什么 | `CHANGELOG.md` |

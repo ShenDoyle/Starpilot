@@ -2,6 +2,65 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 1.8.1（2026-11-13，执行安全层落地：动作账本 + 执行闸门 + 裁决协议；README 对齐当前形态）
+
+本版把「一个动作到底发没发出去」从口头约定变成可判定、可追溯的机制，落成**纯标准库独立模块**；
+同时把 README 从 0.1.6 时期的描述更新到当前形态（egolite 传输、账本/闸门、测试规模）。
+
+### 新增：动作账本 `actionledger.py`
+- **双幂等键严格分离**：`action_id` = `a-` + sha16(task|intent|seq)，同一动作跨 run 同一身份；
+  `intent_key` = `ik-` + sha16(规范化业务意图)，与 task / run / 进程无关。换 task_id、换 run、
+  换 seq 都绕不开同一条未决意图。
+- **状态机**：`CREATED → RESERVED → DISPATCHED → COMPLETED`；`SEND_UNKNOWN →
+  ANTI_REPLAY_LOCKED`（`resend_count` 恒 0）；`NOT_SENT` 仅「派发前确证未发出」可达。
+- **崩溃恢复只产未知**：`recover_unknown()` 扫「已派发但无结果」→ SEND_UNKNOWN + 反重放锁。
+  「没查到 POST」不构成 NOT_SENT——四条禁止推断由接口形状强制，不靠调用方自觉。
+- SQLite 单文件 + WAL + busy_timeout；跨进程并发靠唯一索引与事务原子性，不依赖进程内锁。
+
+### 新增：执行闸门 `execution_gate.py`
+- 三把锁串行：本地单写者租约（`statelock.py`）→ TaskSpace 所有权 → 页面身份（`pageidentity.py`）。
+- **dispatch 与 commit 分离**，锁覆盖到结果落盘之后（INV-2）；派发前做最后一轮 fencing 复核，
+  把 TOCTOU 窗口压到最小。
+- **fencing 世代**：旧执行者拿着过期锁对象继续跑 → `SP-GATE-007 FENCED_OUT`，不会两个进程各发一次。
+- 操作分类表（有副作用 / 只读）由闸门内定，**不由调用方 declare**；未识别操作按「需业务对象」
+  拒绝（fail-closed）。
+
+### 新增：裁决协议（UNKNOWN 的唯一解锁通道）
+- **两阶段**：`decide_adjudication()` 只记录 + 封存，**不改动作状态**；`consume_adjudication()`
+  消费，才真正解锁。`commit_outcome()` 对 UNKNOWN 保持无条件拒绝——代码自己说「应该成功了」不算数。
+- 结构由 DB 强制（2 表 + 7 索引 + 8 触发器）：证据只追加；封存不可逆且要求 ≥1 条证据；
+  封存后证据不可增删改；业务字段不可变；生命周期单向一次；封存不得与消费/撤销同一条 UPDATE。
+- 证据摘要 `adj-v1`：seq 升序 + NFC 规范化 + 固定分隔符 → SHA-256；提交时由**落库后的实际证据集**
+  复算比对。
+- 结论边界写在门里：裁决只能认定执行结果并解除本地锁，**不能证明外部副作用只发生一次**；
+  `DECIDED_NOT_SENT` 必须有支持该结论的外部证据，不得以「没找到成功记录」反推。
+
+### 新增：支撑件
+`envelope.py` / `envelope_node.py`（Envelope 与 Node 验签）、`ego_backend.py`（ego 后端能力表与
+所有权探针）、`procidentity.py` / `dispatch_marker.py` / `gate_lint.py` / `sp_errors.py`
+（进程身份、派发标记、契约 lint、错误码表 `SP-ACT-001~016` / `SP-GATE-001~012`）。
+
+### 修复
+- **连接级持久故障用同一连接重试注定失败**：`_init_schema_with_retry` 对
+  `attempt to write a readonly database` / `disk I/O error` 只在原地 sleep 重试，六次必然全失败
+  （Windows + WAL + 多进程首次建库时最易触发，全量回归暴露过一次）。改为命中连接级故障 →
+  重建连接 → 再建 schema。
+- **PRAGMA 三处连接不同源**：`foreign_keys` / `recursive_triggers` 原先只在部分连接设置，事务内
+  设置还会静默失效（读回仍是旧值）。收敛为 `_apply_pragmas()` 单入口 + 读回断言，漏一处即启动
+  失败。原因：`recursive_triggers=OFF` 时 `INSERT OR REPLACE` **先删冲突行且不触发 DELETE 触发器**，
+  实测能把未封存证据替换成任意值——生产连接必须 ON，这是硬需求不是保守选择。
+- 另修两处实现缺陷：撤销裁决时把裁决 ID 当 `action_id` 写进事件流（造出不存在的 action，
+  按 action 追溯不可见）；supersedes 撞唯一槽位时只回原始 SQLite 文本（调用方无从判断原因）。
+
+### 状态（务必照读）
+- 这一层是**独立模块，尚未接入默认循环**：`orchestrator.py` / `wa.py` 的执行路径仍是原来的写闸门
+  （仅 `statelock` 已被 wa.py 使用）。安全层要等整体验收通过才接管执行路径；未通过前不半开使用。
+- 测试：全量 **1157 条** 通过（其中裁决协议专项 50 条）。
+
+### 文档
+- README / README.zh-CN：版本徽章、传输层（egolite 默认 / bsk 兜底）、测试条数、执行安全层说明、
+  辅助命令表全部对齐当前代码。
+
 ## 1.8.0（2026-11-13，egolite 传输：用 ego-browser 替代 bsk + 依赖生命周期）
 
 ### 新增

@@ -7,9 +7,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Tencent/BrowserSkill"><img alt="Core dependency: bsk" src="https://img.shields.io/badge/Core%20dependency-bsk-2f75f0"></a>
+  <a href="references/egolite-mode.md"><img alt="Default transport: ego-browser" src="https://img.shields.io/badge/transport-ego--browser-2f75f0"></a>
+  <a href="https://github.com/Tencent/BrowserSkill"><img alt="Fallback transport: bsk" src="https://img.shields.io/badge/fallback-bsk-6b7280"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.6%20preview-6b7280">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.8.1-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -45,6 +46,20 @@ Compared with the usual approaches, the difference is the division of labour:
 | **How drift surfaces** | You notice it | Often missed | Every round reports deviations; failures are never dressed up |
 | **How state survives** | Scroll back through chat | Nothing recorded | journal + stage handoff, resumable at any point |
 
+## Execution safety: one action, one ledger entry
+
+The hard case is not "the send failed" — it is **not knowing whether it went out**. This layer turns that into something decidable and auditable:
+
+| Mechanism | What it stops |
+| --- | --- |
+| **Action ledger** (`actionledger.py`) | One append-only record per action; a new task, a new run or a new seq still cannot slip past the same unresolved intent (two separate idempotency keys: action identity + business intent) |
+| **Execution gate** (`execution_gate.py`) | Three locks in series: local single-writer lease → TaskSpace ownership → page identity. Dispatch and commit are separate; the lock is held until the outcome is on disk |
+| **Fencing generation** | An executor still holding a stale lock is fenced out, so two processes cannot both send |
+| **Unknown is never re-sent** | An action with no outcome goes to `SEND_UNKNOWN` + anti-replay lock, resend count is always 0. Only an evidenced adjudication, once consumed, can unlock it — code saying "it probably worked" does not count |
+
+> This layer is currently a **standalone module: independently tested, not yet wired into the default loop** — `orchestrator.py` still goes through the original write gate.
+> It only takes over the execution path once the whole safety review passes; until then it stays off rather than half-on. Details in `CHANGELOG.md` 1.8.1.
+
 ## Use the agent you already have
 
 <p align="center">
@@ -65,7 +80,7 @@ These, and any other agent that can run shell commands, install it directly. The
 
 ## Quick start
 
-One agent from the list above; it installs the rest itself. The one manual step left is flipping the browser extension on.
+One agent from the list above; it installs the rest itself. The one manual step left is logging the target platform in once inside ego-browser (an extension is only needed if you pick the bsk transport).
 
 1. Put this whole folder into your AI client's skills directory (for example `~/.workbuddy/skills/starpilot`), or `git clone` it there.
 2. Say one sentence (see [Try one task](#try-one-task)).
@@ -80,7 +95,9 @@ then run python scripts/env.py to confirm the environment and tell me what is st
 <details>
 <summary><b>🔧 Manual install</b></summary>
 
-**bsk** (the core dependency — the browser CLI from [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill), installed to `~/.local/bin` by default):
+**ego-browser** (default transport since 2026-11-12): install the ego-browser CLI and log the target platform in once — no browser extension. Background worker setup and the op protocol: [egolite mode](references/egolite-mode.md).
+
+**bsk** (optional transport, used as a fallback; the browser CLI from [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill), installed to `~/.local/bin` by default):
 
 ```bash
 # macOS / Linux
@@ -146,8 +163,9 @@ Day to day the loop is driven by `scripts/orchestrator.py`: a 14-state machine w
 **Environment** (the agent runs this before starting)
 
 ```bash
-python scripts/env.py                 # Python version, bsk path, extension status
-python scripts/env.py --install       # install bsk when missing
+python scripts/env.py                 # Python version, transport and dependency status (ego-browser / bsk)
+python scripts/env.py --install       # guided install when something is missing
+python scripts/env.py --set-transport egolite   # switch transport: egolite (default) / iab / bsk
 ```
 
 **Bridging the web AI** (`wa.py`)
@@ -192,19 +210,22 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 | `risk.py` | Out-of-scope grading: low passes with a log, medium switches approach, high stops and asks |
 | `requirement_gate.py` | Negative-form requirement-card check (rejects only, never generates) |
 | `lessons_audit.py --strict` | Knowledge-base health check: format, duplicates, stale unresolved items |
-| `statelock.py` | Single-writer lock on the state file |
+| `statelock.py` | Single-writer lock on the state file (cross-process lease + fencing generation) |
+| `execution_gate.py` / `actionledger.py` | Execution safety layer: three locks + action ledger (standalone module, not yet wired into the default loop) |
+| `ego_backend.py` | ego backend: TaskSpace ownership probe and operation capability table |
 | `upgrade.py` | Pull the latest from GitHub: picks a source, backs up, self-tests |
 
 ## Dependencies, self-test, upgrade
 
 | Item | Notes |
 | --- | --- |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | Core dependency (MIT): CLI + Chrome/Edge extension, driving the browser you are already logged into. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
+| 🌐 [ego-browser](references/egolite-mode.md) | **Default transport**: a Chromium that keeps its own logins; page actions run through a background worker — no extension, no separate CLI protocol |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **Optional transport (fallback)**: CLI + Chrome/Edge extension, driving the browser you are already logged into. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
 | 🐍 Python 3.9+ | Standard library only, no third-party dependencies |
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -t .   # 668 tests, stdlib only
+python -m unittest discover -s tests -p "test_*.py" -t .   # 1157 tests, stdlib only
 python scripts/upgrade.py --check        # is there a newer version
 python scripts/upgrade.py --to-latest    # upgrade: pick a source, back up, run the tests
 ```
@@ -214,7 +235,7 @@ Or just say **"update Starpilot to the latest"**. Direct GitHub access often tim
 No skill, CLI only? Take the `starpilot-cli` package: `scripts/` + `references/` + `templates/` + contract + tests, no `SKILL.md` — stdlib only, ready for cron or another agent to drive.
 
 <details>
-<summary><b>bsk connects then drops? (hosts that reap child processes)</b></summary>
+<summary><b>bsk connects then drops? (if you use the bsk transport)</b></summary>
 
 Hosts such as WorkBuddy and CodeBuddy reap command subprocesses along with the command, so `bsk doctor` may pass and the connection still dies mid-run. Keep the daemon alive as an independent background task: `bsk daemon start --foreground`, then verify the connection from a separate tool call. For shared `BSK_HOME` and `BSK_AUTO_START=0`, see the [sandboxed-agent guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md).
 
@@ -242,6 +263,8 @@ When something goes wrong, look here first: `journal.jsonl` is the single source
 | Flow, hard rules, agent behaviour | `SKILL.md` |
 | State machine, metric definitions, confirmation gate and grants | `docs/orchestrator-contract.md` |
 | Onboard a new platform, or a platform starts misbehaving | `references/web-ai-platforms.md` |
+| Switch transports, or the worker won't start / ops time out | `references/egolite-mode.md` |
+| Check the evidence behind the execution safety layer (ledger / gate / adjudication) | `project-04-p2-3-report/` |
 | Keep the agent away from pitfalls others already hit | `references/lessons.md` |
 | Requirement card, confirmation sheet, feedback, stage report | `templates/` |
 | What shipped in this version | `CHANGELOG.md` |
