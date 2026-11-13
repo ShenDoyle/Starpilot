@@ -25,6 +25,7 @@ import functools
 import hashlib
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -81,6 +82,15 @@ def bsk_path() -> str:
     )
 
 
+def _is_opqueue() -> bool:
+    """当前传输是否走 op 队列（iab / egolite）。两者共享 wa.py 的全部门控旁路。"""
+    try:
+        import transport
+        return transport.is_opqueue()
+    except Exception:
+        return False
+
+
 def _transport_is_iab() -> bool:
     try:
         import transport
@@ -89,28 +99,59 @@ def _transport_is_iab() -> bool:
         return False
 
 
-# 传输层为 iab 时不要求 bsk（自带浏览器驱动）；bsk 传输才需要可执行文件
-BSK = "" if _transport_is_iab() else bsk_path()
+# op 队列传输（iab/egolite）不要求 bsk；bsk 传输才需要可执行文件
+BSK = "" if _is_opqueue() else bsk_path()
 
 # L2 shim 一次性票据的环境变量名（值由 winlease.gate_issue 生成，兑换即失效）。
 # 旧的 `STARPILOT_WINDOW_GATE=1` 已废弃——布尔量谁都能设，等于没有门（复审裁定）。
 GATE_TICKET_ENV = "STARPILOT_WINDOW_TICKET"
 
 
+def egolite_launch_path(root: str = "") -> str:
+    """egolite worker 的引导文件路径（ego-browser 脚本不继承 env，root 必须写死在文件里）。"""
+    return os.path.join(root or os.getcwd(), "runtime", "wa", "egolite-launch.mjs")
+
+
+def ensure_egolite_launch(root: str = "") -> str:
+    """生成 egolite worker 引导文件（幂等）。内容 = import worker 并传入工作区根目录。"""
+    root = root or os.getcwd()
+    lp = egolite_launch_path(root)
+    os.makedirs(os.path.dirname(lp), exist_ok=True)
+    # 始终重写：工作区可能移动，root 以当前调用为准
+    root_uri = pathlib.Path(os.path.abspath(root)).as_uri()
+    body = (
+        "// 由 wa.py 自动生成（幂等重写）——ego-browser nodejs 入口引导。\n"
+        "// 不要手改；工作区移动后会被重写。\n"
+        "const { run } = await import(%s);\n"
+        "const r = await run(%s, { maxMs: 600000, idleMs: 5000 });\n"
+        "console.log('[egolite-worker] done', JSON.stringify(r));\n"
+        % (json.dumps(os.path.join(os.path.dirname(os.path.abspath(__file__)), "egolite-worker.mjs").replace("\\", "/")),
+           json.dumps(os.path.abspath(root).replace("\\", "/")))
+    )
+    with open(lp, "w", encoding="utf-8") as f:
+        f.write(body)
+    return lp
+
+
 def bsk(args: list, timeout: int = 120, check: bool = False) -> tuple[int, str, str]:
     """底层 bsk 调用统一入口。
 
-    **传输层抽象（0.1.5）**：STARPILOT_TRANSPORT=iab 时页面动作改走 IAB op 队列
-    （scripts/transport.py + scripts/iab-worker.mjs，驱动 ZCode 自带浏览器，
-    不需要 bsk）；默认 bsk 传输行为与 0.1.4 完全一致（cooperate 上下文由
-    bskcompat 自动补齐）。
+    **传输层抽象（0.1.5 起）**：STARPILOT_TRANSPORT 为 op 队列模式（iab/egolite，
+    默认 egolite）时页面动作改走 op 队列（scripts/transport.py），不需要 bsk；
+    egolite 的 worker 由 `ego-browser nodejs` 驱动（scripts/egolite-worker.mjs）。
+    bsk 传输保持旧行为（cooperate 上下文由 bskcompat 自动补齐）。
     """
     import transport
-    if transport.current_transport() == "iab":
+    if transport.is_opqueue():
         action, params = transport.parse_bsk_args(args)
         if action is None:
-            return 0, "", ""   # iab 传输下无对应的本地命令（doctor/browsers 等）按健康空值处理
+            return 0, "", ""   # op 队列传输下无对应的本地命令（doctor/browsers 等）按健康空值处理
         if action == "noop":
+            if transport.current_transport() == "egolite":
+                try:
+                    ensure_egolite_launch()
+                except Exception:
+                    pass
             return 0, '{"id": "iab", "browser": "iab"}', ""
         return transport.call(action, params, timeout=timeout)
     import bskcompat
@@ -355,7 +396,7 @@ def list_sessions(strict: bool = False) -> list:
     `strict=True` 时解析失败/非零退出会抛 BskQueryError，由调用方如实分成
     alive / dead / unknown 三态（见 session_state）。
     """
-    if _transport_is_iab():
+    if _is_opqueue():
         return [{"id": "iab", "browser": "iab", "window": ""}]
     rc, out, _ = bsk(["session", "list", "--json"])
     if rc != 0:
@@ -441,7 +482,7 @@ def instance_report(browsers: list | None = None) -> dict:
     同 label 出现多次 = 同一浏览器装了多份。label 为空的多个实例只算「无法区分」，
     不当成重复 —— 那可能只是两个没起名字的 profile。
     """
-    if _transport_is_iab():
+    if _is_opqueue():
         # IAB 由宿主托管：无扩展/实例概念，直接健康
         return {"count": 1, "duplicates": [], "unresponsive": [], "unique": True,
                 "healthy": True,
@@ -594,7 +635,7 @@ def cmd_reap(a) -> int:
       wa.py reap --scan <工作区根>   # 扫目录下所有 *.wa-state.json（多任务）
       wa.py reap --dry-run           # 只报告不动手
     """
-    if _transport_is_iab():
+    if _is_opqueue():
         print("IAB 传输无窗口生命周期，无需收割。")
         return 0
     ttl = int(getattr(a, "ttl", 0) or 0) or idle_close_s()
@@ -1150,7 +1191,7 @@ WINDOW_CHECK_TTL_S = 300
 
 def window_verified(st: dict, path: str, sid: str, attempts: int = 3) -> str:
     """归属三态判定（探测重试 + 自愈一次）。结果写回 state 并带时间戳。"""
-    if _transport_is_iab():
+    if _is_opqueue():
         return "iab"  # IAB 传输无窗口概念，不受此门约束
     # 自愈会动标签（select / navigate / tab create），必须先有记账上下文，
     # 否则 navigate_gate 拿不到 owner 就只能放行或一律拒绝，两种都不对。
@@ -1177,7 +1218,7 @@ def require_window_verified(st: dict, path: str, sid: str):
     GPT 复审阶段一裁定：unknown/misplaced 一律拒绝，逃生阀已删除——没有
     会话 = 归属未知，同样拒绝；无任何环境变量 / 参数可越过本门。
     """
-    if _transport_is_iab():
+    if _is_opqueue():
         return True, ""
     if not sid:
         # 没有会话就没有归属可言：unknown 即拒绝（此前放行给 ensure_session
@@ -1779,9 +1820,33 @@ def navigate_reuse(sid: str, url: str, timeout: int = 180):
     return rc, out, err, True
 
 
+def _transport_is_egolite() -> bool:
+    try:
+        import transport
+        return transport.current_transport() == "egolite"
+    except Exception:
+        return False
+
+
+def _record_ego_version(st: dict, path: str):
+    """把 ego 实际版本记进 state（R1：只记录不拦）。版本异常不在这里处置——
+    env.py --json 与 update_check.py 的报告才是指引出口（用户裁定 2026-11-12）。"""
+    try:
+        import env as envmod
+        info = envmod.ego_info()
+        if st.get("ego_version") != info.get("version"):
+            st["ego_version"] = info.get("version") or ""
+            st["ego_status"] = info.get("status") or "unknown"
+            save_state(path, st)
+    except Exception:
+        pass  # 记录失败不影响会话建立
+
+
 def ensure_session(st: dict, path: str, *, renew: bool = False) -> str:
-    if _transport_is_iab():
-        # IAB 传输：无窗口生命周期，直接复用宿主浏览器；绑定了地址就导航过去
+    if _is_opqueue():
+        # op 队列传输：无窗口生命周期，直接复用宿主浏览器；绑定了地址就导航过去
+        if _transport_is_egolite():
+            _record_ego_version(st, path)   # R1：只记录不拦，锚点比对在 env/update_check
         bound = st.get("url") or ""
         if bound:
             navigate_soft("iab", bound)
@@ -3397,7 +3462,8 @@ def _explain(out: dict, st: dict, rep: dict, wr: dict, sid: str,
     def add(reason, cmd=None, forbid=""):
         acts.append({"reason": reason, "command": cmd or "", "forbid": forbid})
 
-    if not BSK or not os.path.exists(BSK):
+    if not _is_opqueue() and (not BSK or not os.path.exists(BSK)):
+        # op 队列传输（iab/egolite）不依赖 bsk，BSK 为空是常态不是缺依赖
         add("没装 bsk（星舵的核心依赖）",
             "python scripts/env.py --install")
         return acts
@@ -3514,7 +3580,7 @@ def cmd_doctor(a) -> int:
     path = state_path(getattr(a, "state", None))
     st = load_state(path)
     sid = st.get("session") or ""
-    wr = window_report(st, sid) if sid and not _transport_is_iab() else None
+    wr = window_report(st, sid) if sid and not _is_opqueue() else None
     left = lease_left(st) if st.get("lease_until") else None
     out = {
         "ok": rep["healthy"],
@@ -4020,7 +4086,7 @@ def main(argv: list | None = None) -> int:
     # 版本与 skill 记录不一致时，第一动作是读变更说明，而不是按旧假设调用。
     # 只提示不拦截：变更内容需要人/agent 判断，机器只能发现「变了」。
     if a.cmd in ("bind", "send", "wait", "read", "probe", "triage", "clear") \
-            and not _transport_is_iab():
+            and not _is_opqueue():
         try:
             _rc, _out, _err = _bsk_raw(["--version"], 15)
             _ver = (_out or _err).strip().split()[-1] if (_out or _err).strip() else ""

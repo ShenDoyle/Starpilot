@@ -158,6 +158,48 @@ class TestCheckBackend(unittest.TestCase):
         self.assertEqual(rep["backend"], "bsk")
         self.assertTrue(rep["ok"])
 
+    def test_egolite_transport_exempts_bsk_check(self):
+        """2026-11-12：egolite 传输下无 bsk 时，改查 ego-browser，backend=egolite。"""
+        with _Cfg():
+            with mock.patch.dict(os.environ, {"STARPILOT_TRANSPORT": "egolite"}), \
+                    mock.patch.object(ev, "find_bsk", return_value=None), \
+                    mock.patch.object(ev, "find_ego_browser",
+                                      return_value="/x/ego-browser"):
+                rep = ev.check(with_doctor=False)
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["backend"], "egolite")
+        self.assertEqual(rep["ego_browser"]["path"], "/x/ego-browser")
+        self.assertFalse(rep["needs_decision"])
+
+    def test_egolite_transport_without_ego_browser_reports_action(self):
+        with _Cfg():
+            with mock.patch.dict(os.environ, {"STARPILOT_TRANSPORT": "egolite"}), \
+                    mock.patch.object(ev, "find_bsk", return_value=None), \
+                    mock.patch.object(ev, "find_ego_browser", return_value=""):
+                rep = ev.check(with_doctor=False)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["ego_browser"]["ok"], False)
+        self.assertTrue(any("ego-browser" in a for a in rep["actions"]))
+
+    def test_egolite_transport_takes_precedence_over_bsk_presence(self):
+        """transport=egolite 时 bsk 即使在装也不参与（用户已显式选择 op 队列）。"""
+        with _Cfg():
+            with mock.patch.dict(os.environ, {"STARPILOT_TRANSPORT": "egolite"}), \
+                    mock.patch.object(ev, "find_bsk", return_value="/x/bsk"), \
+                    mock.patch.object(ev, "bsk_version", return_value="0.4.0"), \
+                    mock.patch.object(ev, "find_ego_browser",
+                                      return_value="/x/ego-browser"):
+                rep = ev.check(with_doctor=False)
+        self.assertEqual(rep["backend"], "egolite")
+        self.assertTrue(rep["ok"])
+
+    def test_default_transport_is_bsk_fallback(self):
+        import tempfile
+        with mock.patch.dict(os.environ, {
+                "STARPILOT_CONFIG": os.path.join(tempfile.mkdtemp(), "nope.json")}, clear=False):
+            os.environ.pop("STARPILOT_TRANSPORT", None)
+            self.assertEqual(ev.transport(), "bsk")
+
     def test_extension_action_suppressed_for_builtin_backend(self):
         with _Cfg():
             _write_cfg({"browser_backend": "builtin"})

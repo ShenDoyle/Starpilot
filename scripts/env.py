@@ -229,15 +229,108 @@ def doctor(path, runner=None, timeout=25) -> dict:
 
 
 def transport() -> str:
-    """传输层（0.1.5）：bsk（默认）| iab。与 browser_backend 正交。"""
-    return (os.environ.get("STARPILOT_TRANSPORT") or "bsk").strip().lower()
+    """传输层（0.1.5 起）：env STARPILOT_TRANSPORT > config "transport" > bsk 兜底。
+
+    与 browser_backend 正交。本机改用 egolite 走配置（2026-11-12 裁定）：
+    config.json 写 "transport": "egolite"。
+    """
+    try:
+        import transport as _t
+        return _t.current_transport()
+    except Exception:
+        return (os.environ.get("STARPILOT_TRANSPORT") or "bsk").strip().lower()
+
+
+def find_ego_browser(env=None) -> str:
+    """ego-browser CLI 位置：EGO_BROWSER_BIN > PATH。"""
+    env = env or os.environ
+    p = env.get("EGO_BROWSER_BIN")
+    if p and os.path.exists(p):
+        return p
+    return shutil.which("ego-browser") or ""
+
+
+# ego 版本锚点（2026-11-12 用户裁定：只记录不拦，靠特性清单对照分析告警）。
+# 每次实测新版本后由 agent 回填 cli 锚点并更新 references/egolite-mode.md 锚点表。
+# 痛点前科：bsk 0.4.1 一夜改坏星舵（36 条 ESC 违例）——锚点 + 清单就是为此。
+EGO_ANCHOR = (0, 6, 2, 10)          # 星舵全链实测通过的 ego CLI 版本
+EGO_ANCHOR_GUIDE = "v2.2.0"         # `ego-browser skill` 输出的 guide 版本
+EGO_ANCHOR_DATE = "2026-11-12"
+EGO_MIN = (0, 6, 2, 10)             # 低于此版本：缺 worker 依赖的 API 面，提示升级
+EGO_SITE = "https://lite.ego.app/"
+
+
+def ego_version(path=None, runner=None, timeout=20):
+    """解析 `ego-browser --version`。返回 (主版本元组, guide版本|None, 原始首行)。
+
+    输出形态（实测 0.6.2.10）：第一行 'ego-browser 0.6.2.10'；guide 版本取
+    `ego-browser skill` 首行 '[ego-browser:skill] ego-browser usage guide v2.2.0'
+    ——guide 另查（开销大），本函数不查，由调用方按需取。
+    解析不出如实返回 ((), None, 首行)，不猜。
+    """
+    if not path:
+        return (), None, ""
+    r = _run([path, "--version"], timeout, runner)
+    text = ((r["out"] or "") + "\n" + (r["err"] or "")).strip()
+    first = text.splitlines()[0].strip() if text else ""
+    m = re.search(r"(\d+(?:\.\d+)+)", first)
+    if not m:
+        return (), None, first
+    v = tuple(int(x) for x in m.group(1).split("."))
+    return v, None, first
+
+
+def ego_info(env=None, runner=None, timeout=20) -> dict:
+    """ego 依赖体检（R1/R3 共用）。status 四态：
+    ok（=锚点）/ older（<EGO_MIN，须升）/ newer（>锚点，走 §F 清单评估）/ unknown。
+    只记录不拦——拦不拦由 agent 按评估结论决定（§F），本函数只给事实与指引。
+    """
+    path = find_ego_browser(env)
+    v, _, first = ego_version(path, runner, timeout)
+    if not path:
+        return {"ok": False, "path": "", "version": "", "guide": "",
+                "anchor": upg_fmt(EGO_ANCHOR), "status": "unknown",
+                "hint": "未安装：按 ego-browser skill 的 install 文档装（%s）" % EGO_SITE}
+    if not v:
+        return {"ok": False, "path": path, "version": first, "guide": "",
+                "anchor": upg_fmt(EGO_ANCHOR), "status": "unknown",
+                "hint": "版本号解析不出（输出：%s）——如实上报，勿猜" % first[:80]}
+    anchor = upg_fmt(EGO_ANCHOR)
+    if v < EGO_MIN:
+        return {"ok": False, "path": path, "version": upg_fmt(v), "guide": "",
+                "anchor": anchor, "status": "older",
+                "hint": "低于最低可用版本：请用户执行 ego-browser upgrade"}
+    if v > EGO_ANCHOR:
+        return {"ok": True, "path": path, "version": upg_fmt(v), "guide": "",
+                "anchor": anchor, "status": "newer",
+                "hint": ("新于实测锚点 %s：按 references/egolite-mode.md §F 对照特性清单评估；"
+                         "特性有破坏性变化则提示「暂勿使用无人值守模式」，无变化则无感使用并回填锚点"
+                         % anchor)}
+    return {"ok": True, "path": path, "version": upg_fmt(v), "guide": "",
+            "anchor": anchor, "status": "ok",
+            "hint": ""}
+
+
+def upg_fmt(v) -> str:
+    return ".".join(str(x) for x in (v or ())) or "(未知)"
 
 
 def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> dict:
     py = python_info()
     bsk = find_bsk(env)
     backend = resolve_backend(backend, env, bsk_found=bsk)
-    if backend == "unconfigured" and transport() == "iab" and not bsk:
+    t = transport()
+    ego = ""
+    egoinfo = None
+    if t == "egolite":
+        # 2026-11-12：egolite 传输下页面动作走 op 队列，bsk 即使在装也不参与；
+        # env 自检改查 ego-browser，报 backend=egolite——脚本侧传输层，
+        # 不是 browser_backend 配置项。ego-browser 缺失时不走 §0.2 弹窗
+        # （needs_decision 保持 False），由下方 actions 给安装指引。
+        ego = find_ego_browser(env)
+        egoinfo = ego_info(env, runner, timeout) if ego else None
+        backend = "egolite"
+    if backend == "unconfigured" and t == "iab" and not bsk:
         # 0.1.5：IAB 传输下 bsk 是可选的，env 自检自动豁免（SKILL §5.1），
         # 报 backend=iab——脚本侧传输层，不是 browser_backend 配置项。
         backend = "iab"
@@ -246,12 +339,15 @@ def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> 
         "ok": False,
         "platform": _plat(),
         "backend": backend,
-        "transport": transport(),
+        "transport": t,
         "unattended": unattended(env),
         "needs_decision": needs_decision,
         "python": py,
         "bsk": {"ok": bool(bsk), "path": bsk, "version": bsk_version(bsk, runner, timeout),
                 "doctor": None},
+        "ego_browser": egoinfo or {"ok": False, "path": ego or "", "version": "",
+                                   "anchor": upg_fmt(EGO_ANCHOR), "status": "unknown",
+                                   "hint": ""},
         "install_command": install_command(),
         "actions": [],
     }
@@ -260,6 +356,18 @@ def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> 
     acts = report["actions"]
     if not py["ok"]:
         acts.append("Python %s+ 不满足，换成更高版本的解释器：%s" % (py["required"], PY_HINT[_plat()]))
+    if t == "egolite" and (not egoinfo or not egoinfo["path"]):
+        acts.append("ego-browser 未安装：让用户从 %s 下载安装并在应用内完成 onboarding"
+                    "（onboarding 时从日常登录目标平台的浏览器导入数据），装好后复检" % EGO_SITE)
+    elif t == "egolite" and egoinfo and egoinfo["status"] == "older":
+        acts.append("ego-browser %s 低于最低可用版本 %s：请用户执行 ego-browser upgrade，装完复检"
+                    % (egoinfo["version"], egoinfo["anchor"]))
+    elif t == "egolite" and egoinfo and egoinfo["status"] == "newer":
+        # newer 只记录不拦（用户裁定）：放 notes，不影响 ok；评估结论由 agent 走 §F
+        report.setdefault("notes", []).append(
+            "ego-browser %s 新于实测锚点 %s：按 references/egolite-mode.md §F 对照特性清单评估；"
+            "有破坏性变化→提示暂勿无人值守并记 lessons；无变化→无感使用并回填锚点"
+            % (egoinfo["version"], egoinfo["anchor"]))
     if needs_decision:
         acts.append("浏览器后端未定（SKILL §0.2）：用按钮弹窗问用户「安装 bsk（推荐）还是用 agent 内置浏览器」，"
                     "然后 python scripts/env.py --set-backend bsk|builtin 记录；选 bsk 再跑 --install。只问一次。")
@@ -271,12 +379,34 @@ def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> 
         acts.append("bsk 已装但扩展没连上：在浏览器启用 BrowserSkill 扩展"
                     "（Chrome %s / Edge %s），再跑 bsk doctor" % (EXT_CHROME, EXT_EDGE))
     report["ok"] = not acts and bool(py["ok"]) and (
-        bool(bsk) or backend in ("builtin", "iab"))
+        bool(bsk) or backend in ("builtin", "iab", "egolite"))
     return report
 
 
+def ego_install_steps() -> list:
+    """R2：egolite 传输下的安装引导（GUI 安装包，无脚本；必须人做的例外）。"""
+    return [
+        "① 下载：让用户打开 %s 下载 ego lite 安装包并运行（Windows 无脚本安装；"
+        "SmartScreen 拦截时选「更多信息→仍要运行」）。" % EGO_SITE,
+        "② 首次启动 onboarding（应用内 GUI，必须用户亲手做）：导入浏览器数据时"
+        "**选择日常登录目标平台（DeepSeek/ChatGPT/Kimi/Gemini/豆包）的那个浏览器**"
+        "作为导入源，确保登录态跟过来；onboarding 同时会把 ego-browser 命令注册进 PATH。",
+        "③ 复检（开新终端，PATH 才生效）：ego-browser --version 能出版本号、"
+        "ego-browser nodejs -e \"console.log('ego-browser ready')\" 打出 ready、"
+        "python scripts/env.py --json 的 ego_browser.ok=true，三者齐了才算通。",
+    ]
+
+
 def install(timeout=300, runner=None, rep=None) -> dict:
-    """用官方脚本装 bsk，装完立刻复检。不碰 Python——那是解释器，得用对的那个跑我。"""
+    """egolite 传输：输出 ego 安装引导（人装，agent 引导）；其余传输：官方脚本装 bsk。
+
+    不碰 Python——那是解释器，得用对的那个跑我。
+    """
+    if transport() == "egolite":
+        steps = ego_install_steps()
+        return {"ok": False, "mode": "ego-guide", "rc": None,
+                "detail": "egolite 传输安装 ego lite（无脚本，需用户亲手完成 onboarding）：",
+                "steps": steps}
     cmd = install_command()
     if not cmd:
         return {"ok": False, "rc": None, "detail": "不支持的平台：%s" % sys.platform}
@@ -347,6 +477,8 @@ def main(argv=None) -> int:
                     help="记录用户选择的浏览器后端到 ~/.starpilot/config.json（首次激活 §0.2，只问一次）")
     ap.add_argument("--set-unattended", choices=["on", "off"], dest="set_unattended",
                     help="无人值守硬开关：on=执行模式缺省 auto、不再每轮停（写闸门仍 fail-closed）")
+    ap.add_argument("--set-transport", choices=["bsk", "iab", "egolite"], dest="set_transport",
+                    help="记录传输层到 ~/.starpilot/config.json（env STARPILOT_TRANSPORT 优先）")
     ap.add_argument("--set-idle-close", type=int, default=0, dest="set_idle_close",
                     help="窗口闲置收割时限（秒，≥60）：agent 超时未续租，wa.py reap 关掉其窗口")
     ap.add_argument("--timeout", type=int, default=300, help="安装超时秒数")
@@ -366,6 +498,21 @@ def main(argv=None) -> int:
         print("收割器：python scripts/wa.py reap --watch（绑定后启动，后台常驻）")
         return 0
 
+    if a.set_transport:
+        p = config_path(os.environ)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        cfg = load_config(os.environ)
+        cfg["transport"] = a.set_transport
+        with io.open(p, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print("已记录传输层：%s → %s" % (a.set_transport, p))
+        if a.set_transport == "egolite":
+            print("效果：页面动作走 op 队列（不需要 bsk），worker 由 ego-browser 驱动，"
+                  "规程见 references/egolite-mode.md；首次使用需在 ego-browser 里登录目标平台。")
+        elif a.set_transport == "iab":
+            print("效果：页面动作走 op 队列（实验性），worker 由 ZCode IAB 驱动，见 SKILL §5.1。")
+        return 0
+
     if a.set_backend:
         p = set_backend(a.set_backend)
         print("已记录浏览器后端：%s → %s" % (a.set_backend, p))
@@ -377,9 +524,12 @@ def main(argv=None) -> int:
 
     rep = check(with_doctor=not a.no_doctor, backend=a.backend)
     inst = None
-    if a.install and not rep["bsk"]["ok"]:
+    need_install = (a.install and not rep["bsk"]["ok"]) or \
+        (a.install and rep["transport"] == "egolite" and not rep["ego_browser"]["ok"])
+    if need_install:
         inst = install(timeout=a.timeout, rep=None)
-        rep = check(with_doctor=not a.no_doctor)
+        if inst.get("mode") != "ego-guide":
+            rep = check(with_doctor=not a.no_doctor)
 
     if a.json:
         out = dict(rep)
@@ -389,19 +539,22 @@ def main(argv=None) -> int:
     else:
         print(human(rep))
         if inst is not None:
-            print("\n安装结果：%s  rc=%s" % ("成功" if inst["ok"] else "失败", inst["rc"]))
-            if inst.get("note"):
-                print("  " + inst["note"])
-            if inst.get("warn"):
-                print("  " + inst["warn"])
-            if inst.get("warn"):
-                print(inst["warn"])  # 版本钉：装上 0.4.2+ 要当场喊出来，不许静默
-            for line in inst.get("tail") or []:
-                print("  " + line)
+            if inst.get("mode") == "ego-guide":
+                print("\n" + inst["detail"])
+                for line in inst.get("steps") or []:
+                    print("  " + line)
+            else:
+                print("\n安装结果：%s  rc=%s" % ("成功" if inst["ok"] else "失败", inst["rc"]))
+                if inst.get("note"):
+                    print("  " + inst["note"])
+                if inst.get("warn"):
+                    print("  " + inst["warn"])  # 版本钉：装上 0.4.2+ 要当场喊出来，不许静默
+                for line in inst.get("tail") or []:
+                    print("  " + line)
 
     if rep["ok"]:
         return 0
-    if inst is not None and not rep["bsk"]["ok"]:
+    if inst is not None and inst.get("mode") != "ego-guide" and not rep["bsk"]["ok"]:
         return 5
     return 4
 

@@ -199,6 +199,7 @@ def check(root: str, timeout: float = 8.0, ttl_hours: float = DEFAULT_TTL_HOURS,
             out = {"starpilot": cached["starpilot"], "bsk": cached["bsk"],
                    "cached": True, "_age_hours": cached.get("_age_hours")}
             if not (skip_self or skip_bsk):
+                out["ego"] = envmod.ego_info()   # ego 是本地事实，不走缓存
                 return out
 
     lv_self = local_self(root)
@@ -226,6 +227,9 @@ def check(root: str, timeout: float = 8.0, ttl_hours: float = DEFAULT_TTL_HOURS,
         if key == "bsk" and lv and lv >= BSK_KNOWN_BAD_FROM:
             r["local_bad"] = True
             r["note"] = BSK_PIN_NOTE
+    # ego（R3，2026-11-12）：第三路依赖检查。ego 无远端 API 可查（GUI 自升级），
+    # 只比对本机版本与星舵实测锚点（env.EGO_ANCHOR），结论按 §F 由 agent 评估。
+    out["ego"] = envmod.ego_info()
     out.update({"starpilot": r_self, "bsk": r_bsk, "cached": False,
                 "fetched_at": time.time()})
     if not (skip_self and skip_bsk):
@@ -262,6 +266,21 @@ def human(rep: dict) -> str:
         else:
             lines.append("? %s 未知（本地 v%s；远端查不到：%s）——如实报，不猜"
                          % (label, r.get("local"), r.get("err") or "无匹配"))
+    ego = rep.get("ego") or {}
+    if ego:
+        st = ego.get("status")
+        if st == "older":
+            lines.append("⬆ ego-browser v%s 低于最低可用版本 v%s：请用户执行 ego-browser upgrade"
+                         % (ego.get("version"), ego.get("anchor")))
+        elif st == "newer":
+            lines.append("⚠ ego-browser v%s 新于星舵实测锚点 v%s：按 references/egolite-mode.md §F "
+                         "对照特性清单评估——有破坏性变化→提示「可能导致流程异常，请暂勿使用无人值守模式」"
+                         "并记 lessons；无变化→无感使用并回填锚点"
+                         % (ego.get("version"), ego.get("anchor")))
+        elif st == "unknown":
+            lines.append("? ego-browser 版本未知——如实报，不猜（%s）" % (ego.get("hint") or ""))
+        else:
+            lines.append("✓ ego-browser v%s 与实测锚点一致，无感使用" % ego.get("version"))
     return "\n".join(lines)
 
 

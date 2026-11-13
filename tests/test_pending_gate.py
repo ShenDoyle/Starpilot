@@ -5,6 +5,7 @@
 「没做的项在汇报里隐身」「绕过编排器直发」。本文件验证机器断言能拦住这两类违例。
 """
 
+import io
 import os
 import sys
 import tempfile
@@ -235,7 +236,7 @@ class TestTransport(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("STARPILOT_IAB_OPS", None)
-        os.environ.pop("STARPILOT_TRANSPORT", None)
+        os.environ["STARPILOT_TRANSPORT"] = "bsk"  # 还原基线（默认已是 egolite）
 
     def test_call_roundtrip_with_fake_worker(self):
         import threading
@@ -280,6 +281,7 @@ class TestTransport(unittest.TestCase):
         os.environ["STARPILOT_TRANSPORT"] = "iab"
         try:
             self.assertTrue(wa._transport_is_iab())
+            self.assertTrue(wa._is_opqueue())
             rc, out, _ = wa.bsk(["session", "list", "--json"])
             self.assertEqual(rc, 0)
             self.assertIn("iab", out)
@@ -287,7 +289,50 @@ class TestTransport(unittest.TestCase):
             self.assertTrue(rep["healthy"])
             self.assertEqual(wa.list_sessions()[0]["id"], "iab")
         finally:
-            os.environ.pop("STARPILOT_TRANSPORT", None)
+            os.environ["STARPILOT_TRANSPORT"] = "bsk"  # 还原基线（默认已是 egolite）
+
+    def test_default_transport_is_bsk_and_config_can_pick_egolite(self):
+        """传输优先级：env > config "transport" > bsk 兜底。
+
+        2026-11-12 用户裁定「不用 bsk，改用 egolite」由**配置**表达，
+        代码兜底保持 bsk——否则几百合未显式选传输的用例会掉进 op 队列轮询。
+        """
+        import transport
+        os.environ.pop("STARPILOT_TRANSPORT", None)
+        cfg = os.path.join(self.tmp, "config.json")
+        os.environ["STARPILOT_CONFIG"] = cfg
+        try:
+            self.assertEqual(transport.current_transport(), "bsk")  # 无 config 兜底
+            with io.open(cfg, "w", encoding="utf-8") as f:
+                f.write('{"transport": "egolite"}')
+            self.assertEqual(transport.current_transport(), "egolite")
+            self.assertTrue(transport.is_opqueue())
+            self.assertTrue(transport.is_opqueue("iab"))
+            self.assertFalse(transport.is_opqueue("bsk"))
+            # env 优先于 config
+            os.environ["STARPILOT_TRANSPORT"] = "bsk"
+            self.assertEqual(transport.current_transport(), "bsk")
+        finally:
+            os.environ.pop("STARPILOT_CONFIG", None)
+            os.environ["STARPILOT_TRANSPORT"] = "bsk"
+
+    def test_egolite_launch_file_generated(self):
+        """egolite：session 类命令触发引导文件生成（幂等，root 写死在文件里）。"""
+        import wa
+        os.environ["STARPILOT_TRANSPORT"] = "egolite"
+        try:
+            rc, out, _ = wa.bsk(["session", "start", "--no-focus"])
+            self.assertEqual(rc, 0)
+            lp = wa.ensure_egolite_launch(self.tmp)
+            self.assertTrue(os.path.exists(lp))
+            with io.open(lp, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("egolite-worker.mjs", body)
+            self.assertIn(os.path.abspath(self.tmp).replace("\\", "/"), body)
+            # 幂等：再生成一次仍存在且可读
+            self.assertEqual(wa.ensure_egolite_launch(self.tmp), lp)
+        finally:
+            os.environ["STARPILOT_TRANSPORT"] = "bsk"
 
 
 class TestEscapeLedgerDoesNotGrowPerSend(unittest.TestCase):

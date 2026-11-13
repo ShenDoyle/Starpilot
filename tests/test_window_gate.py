@@ -7,7 +7,7 @@ GPT 裁定：window.ok=null 不得放行受保护操作（send/clear 是写路�
 复审阶段一（2026-11-02）：逃生阀 WA_ALLOW_UNVERIFIED_WINDOW 已删除——env 置了
 也必须拒绝、不落 P0-ESC 台账；无会话 = unknown 同拒；clear 同受门约束；
 人工接管走 wa.py window status / release 显式流程。
-不联网：window_report / heal_window_placement / _transport_is_iab 全替身。
+不联网：window_report / heal_window_placement / _is_opqueue 全替身。
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class TestWindowVerifiedTriState(unittest.TestCase):
     def test_d08_unknown_blocks_send(self):
         """D08：归属未知（探测连续失败）→ send 门拒绝。"""
         with mock.patch.object(wa, "window_report", return_value={"ok": None}), \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False), \
+                mock.patch.object(wa, "_is_opqueue", return_value=False), \
                 mock.patch.object(wa.time, "sleep"):
             v = wa.window_verified(self.st, self.path, "sess1", attempts=2)
         self.assertEqual(v, "unknown")
@@ -55,14 +55,14 @@ class TestWindowVerifiedTriState(unittest.TestCase):
         with mock.patch.object(wa, "window_report", return_value={"ok": False}), \
                 mock.patch.object(wa, "heal_window_placement",
                                   return_value={"ok": False}), \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False), \
+                mock.patch.object(wa, "_is_opqueue", return_value=False), \
                 mock.patch.object(wa.time, "sleep"):
             v = wa.window_verified(self.st, self.path, "sess1")
         self.assertEqual(v, "misplaced")
 
     def test_verified_true_short_circuit(self):
         with mock.patch.object(wa, "window_report", return_value={"ok": True}), \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False):
+                mock.patch.object(wa, "_is_opqueue", return_value=False):
             v = wa.window_verified(self.st, self.path, "sess1")
         self.assertEqual(v, "verified")
         self.assertEqual(self.st["window_verified"], "verified")
@@ -78,7 +78,7 @@ class TestWindowVerifiedTriState(unittest.TestCase):
         with mock.patch.object(wa, "window_report", report), \
                 mock.patch.object(wa, "heal_window_placement",
                                   return_value={"ok": True}) as mh, \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False):
+                mock.patch.object(wa, "_is_opqueue", return_value=False):
             v = wa.window_verified(self.st, self.path, "sess1")
         self.assertEqual(v, "verified")
         mh.assert_called_once()
@@ -95,7 +95,7 @@ class TestRequireWindowVerified(unittest.TestCase):
         self.st["window_checked_at"] = time.time()
         with mock.patch.object(wa, "window_verified",
                                side_effect=AssertionError("不应再探测")), \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False):
+                mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, msg = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertTrue(ok)
 
@@ -105,7 +105,7 @@ class TestRequireWindowVerified(unittest.TestCase):
         self.st["window_checked_at"] = time.time() - wa.WINDOW_CHECK_TTL_S - 10
         with mock.patch.object(wa, "window_verified",
                                return_value="misplaced") as mv, \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False):
+                mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, msg = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertFalse(ok)
         mv.assert_called_once()
@@ -115,7 +115,7 @@ class TestRequireWindowVerified(unittest.TestCase):
         """unknown 拒绝，且拒绝理由里不再出现任何逃生阀（已删除）。"""
         self.st["window_verified"] = "unknown"
         self.st["window_checked_at"] = time.time()
-        with mock.patch.object(wa, "_transport_is_iab", return_value=False):
+        with mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, msg = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertFalse(ok)
         self.assertNotIn("WA_ALLOW_UNVERIFIED_WINDOW", msg)
@@ -123,7 +123,7 @@ class TestRequireWindowVerified(unittest.TestCase):
 
     def test_iab_transport_exempt(self):
         """IAB 传输无窗口概念，不受门约束（SKILL §5.1；传输形态而非参数绕过）。"""
-        with mock.patch.object(wa, "_transport_is_iab", return_value=True):
+        with mock.patch.object(wa, "_is_opqueue", return_value=True):
             ok, _ = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertTrue(ok)
 
@@ -146,7 +146,7 @@ class TestEscapeHatchRemoved(unittest.TestCase):
         self.st["window_checked_at"] = time.time()
         env = {"WA_ALLOW_UNVERIFIED_WINDOW": "用户明示允许（测试）"}
         with mock.patch.dict(os.environ, env), \
-                mock.patch.object(wa, "_transport_is_iab", return_value=False):
+                mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, _ = wa.require_window_verified(self.st, self.path, "sess1")
             self.assertFalse(ok)  # 环境变量不再是钥匙
             self.assertIn("WA_ALLOW_UNVERIFIED_WINDOW", os.environ)  # 也不被消费
@@ -160,7 +160,7 @@ class TestEscapeHatchRemoved(unittest.TestCase):
     def test_misplaced_refused_no_escape(self):
         self.st["window_verified"] = "misplaced"
         self.st["window_checked_at"] = time.time()
-        with mock.patch.object(wa, "_transport_is_iab", return_value=False):
+        with mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, msg = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertFalse(ok)
         self.assertNotIn("WA_ALLOW_UNVERIFIED_WINDOW", msg)
@@ -169,7 +169,7 @@ class TestEscapeHatchRemoved(unittest.TestCase):
         """D09（裁定侧）：归属已验证 = 已授权范围内的普通操作，不要求任何裁定记录。"""
         self.st["window_verified"] = "verified"
         self.st["window_checked_at"] = time.time()
-        with mock.patch.object(wa, "_transport_is_iab", return_value=False):
+        with mock.patch.object(wa, "_is_opqueue", return_value=False):
             ok, _ = wa.require_window_verified(self.st, self.path, "sess1")
         self.assertTrue(ok)  # 无 decisions 台账、无裁定记录 → 照常放行
 
@@ -303,7 +303,9 @@ class TestClearAlsoGated(unittest.TestCase):
         import contextlib
         buf, err = io.StringIO(), io.StringIO()
         ns = mock.Mock(state=self.path, platform="chatgpt")
-        with mock.patch.object(wa, "_transport_is_iab", return_value=False), \
+        with mock.patch.object(wa, "_is_opqueue", return_value=False), \
+                mock.patch.object(wa, "window_report", return_value={}), \
+                mock.patch.dict(os.environ, {"STARPILOT_LOCK_KEY": "sp-wg-test"}), \
                 contextlib.redirect_stdout(buf), \
                 contextlib.redirect_stderr(err):
             rc = wa.cmd_clear(ns)

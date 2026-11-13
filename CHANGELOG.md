@@ -2,6 +2,42 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 1.8.0（2026-11-13，egolite 传输：用 ego-browser 替代 bsk + 依赖生命周期）
+
+### 新增
+- **egolite 传输层（默认）**：页面动作（navigate/evaluate/fill/press）走 op 队列
+  （协议与 iab 一致），由 `scripts/egolite-worker.mjs` 驱动 **ego-browser（ego lite）**。
+  不装 bsk、不装浏览器扩展；worker 以 `ego-browser nodejs` 后台常驻（单轮 10 分钟，
+  TaskSpace 固定名 `starpilot` 跨轮复用）——修掉 IAB「agent 必须持续手动跑 worker」的
+  固有节奏。取值优先级：`STARPILOT_TRANSPORT` env > config `"transport"` > bsk 兜底
+  （代码兜底保持 bsk：单测套件传输无关，运行时默认若随代码翻转会漏进未显式选传输的用例）。
+  本机经 `env.py --set-transport egolite` 启用。写闸门/绑定归属/幂等守卫/平台锁全不变。
+  文档：`references/egolite-mode.md`。
+- **`env.py --set-transport bsk|iab|egolite`**：传输层持久化选择（config.json）。
+- **依赖生命周期（安装/升级/反馈）**：
+  - R1 ego 版本锚点：`env.EGO_ANCHOR=0.6.2.10`（实测锚点）+ `ego_info()` 四态
+    （ok/older/newer/unknown）。**只记录不拦**（用户裁定）：`newer` 时 agent 按
+    `egolite-mode.md` §F 特性清单对照评估——变化巨大→提示暂勿无人值守并记 lessons；
+    无变化→无感使用并回填锚点。wa.py 会话建立时把 ego 版本记进 state。
+  - R2 `env.py --install` 在 egolite 下改为 ego 安装三步引导（lite.ego.app 下载 →
+    onboarding 从日常登录目标平台的浏览器导入数据 → 复检三件套）；GUI 必须人做。
+  - R3 `update_check.py` 三路检查（starpilot / bsk / ego）；ego 按锚点比对输出
+    「无感使用 / 须升级 / ⚠ 新于锚点走 §F 评估」。
+  - R4 `scripts/feedback.py` + `.github/ISSUE_TEMPLATE/`（bug / platform-drift）：
+    用户同意后生成可粘贴的报告块（版本三元组 + 环境自检 + state 摘要；
+    隐私红线——无正文、无凭证、URL 只留 host）。流程见 SKILL §7.5。
+
+### 修复
+- `_explain` 在 op 队列传输（iab/egolite）下误报「没装 bsk」（BSK 为空是常态）。
+- fill paste 路径清障：第三方扩展（实测 AIX 智能下载器）全视口遮罩吞编辑器事件
+  导致发送键不渲染——按特征移除其注入节点（platforms.py，2026-11-11）。
+
+### 测试
+- 新增 `tests/test_lifecycle.py` 16 条（锚点检测/三路检查/反馈收集，全离线 mock）+
+  egolite 路由/引导文件/后端检测 6 条；`tests/__init__.py` 把测试进程传输钉在 bsk
+  基线（discover 须用包模式：`python -m unittest discover -s tests -t .`）。
+  全量 769 条。
+
 ## 0.1.7.2 候选追加（2026-11-11，bsk vendor 钉住版随仓分发 + 跨平台适配盘点）
 
 ### 背景（用户在 zcode 环境实测反馈）
@@ -71,6 +107,7 @@ PATH 拦截在 POSIX 上首次可用（本次补齐）；`find_bsk` 文件名候
 - `tests/test_webai_signals.py` 新增 21 个口径测试；`tests/test_update_check.py`
   补 BskPinTest 5 个；`tests/test_mode_switch.py` 补机器配置隔离（用户的
   unattended 开关不该劫持「缺省 step」口径测试）。全量 782 OK。
+
 
 ## 0.1.7.1（2026-11-04，用时更新检查：Starpilot 自身 + bsk 插件，有新版提示用户）
 

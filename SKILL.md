@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "0.1.7.1"
+version: "1.8.0"
 ---
 
 # 星舵 Starpilot
@@ -146,13 +146,14 @@ python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份
 
 | 后端 | 是什么 | 得到什么 | 失去什么 |
 |---|---|---|---|
-| `bsk`（默认推荐） | 装 bsk CLI + 浏览器扩展 | 全自动：orchestrator loop、写闸门、自动续窗、三时钟、平台占用锁 | 要装两个依赖 |
+| `egolite`（2026-11-12 起本机默认） | 装 ego-browser（ego lite）CLI | 全自动：orchestrator loop、写闸门、三时钟、平台占用锁（经 op 队列，worker 后台常驻） | 无 bsk 窗口生命周期（TaskSpace 托管） |
+| `bsk` | 装 bsk CLI + 浏览器扩展 | 全自动：orchestrator loop、写闸门、自动续窗、三时钟、平台占用锁 | 要装两个依赖 |
 | `builtin` | 用 agent **内置浏览器**，不装任何东西 | 手动规程（`references/builtin-mode.md`），判据照用 | 无状态机、无写闸门、无平台锁（边界见该文 §E） |
 
-> **与 IAB 传输层的关系（0.1.5/0.1.6）**：ZCode 宿主还有第三条路——
-> `STARPILOT_TRANSPORT=iab`（§5.1），那是**脚本侧**的 op 队列传输（仍是 wa.py 自动跑，
-> 实验性）；`builtin` 是 **agent 侧**手动规程。两者都不装 bsk。宿主支持 IAB 时优先试 IAB
-> （保留自动化），不支持或不稳（§5.1 列了已知失效）再回退 builtin。
+> **与传输层的关系（0.1.5 起 / 2026-11-12 更新）**：op 队列是**脚本侧**的传输层，
+> 有两个变体——`STARPILOT_TRANSPORT=egolite`（本机经 config 已启用，worker 驱动
+> ego-browser，可后台常驻）与 `STARPILOT_TRANSPORT=iab`（实验性，worker 驱动
+> ZCode IAB，agent 手动跑）；`builtin` 是 **agent 侧**手动规程。三者都不装 bsk。
 
 **流程（只在「bsk 没有 + 用户没选过」时走，config 记过就永远不再问）**：
 
@@ -835,11 +836,30 @@ python scripts/decisions.py check  --ledger state/decisions.json \
 
 ### 5.1 依赖：缺什么自己装，别让用户先装
 
-前置只有两个：**Python 3.9+** 和**一条浏览器通路**。通路三条（§0.2 弹窗定，只问一次）：
-**bsk**（默认推荐，全自动）、**agent 内置浏览器**（`references/builtin-mode.md`，不装依赖）、
+前置只有两个：**Python 3.9+** 和**一条浏览器通路**。通路四条（§0.2 弹窗定，只问一次）：
+**egolite**（2026-11-12 起默认，`STARPILOT_TRANSPORT=egolite`，用 ego-browser，见下）、
+**bsk**（全自动，`STARPILOT_TRANSPORT=bsk`）、**agent 内置浏览器**（`references/builtin-mode.md`，不装依赖）、
 **IAB 传输层**（`STARPILOT_TRANSPORT=iab`，见下方 0.1.5 小节，实验性）。
 后端选定后 bsk 相关步骤只在 `bsk` 模式适用；`builtin` 模式下 wa.py 的浏览器类命令会以
 rc=6 拒绝并提示规程位置——这是设计行为，不是故障。
+
+**egolite 传输（2026-11-12 起本机默认）**：取值优先级
+`STARPILOT_TRANSPORT` env > config 的 `"transport"` 键 > bsk 兜底。本机已用
+`python scripts/env.py --set-transport egolite` 写入 config（~/.starpilot/config.json）。
+页面动作（navigate/evaluate/fill/press）走 op 队列（`scripts/transport.py`），由
+`scripts/egolite-worker.mjs` 驱动 **ego-browser**（ego lite）消费。要点：
+
+- **不需要 bsk 与扩展**；需要 `ego-browser` CLI 在 PATH（env.py 自动探测，
+  报 `ego_browser: {ok, path}`；找不到时按 ego-browser skill 的 `references/install-windows.md` 装）。
+- **首次使用需在 ego-browser 里登录目标平台一次**（ego-browser 自持登录态）。
+- worker 是**后台常驻**进程，由 wa.py 自动生成引导文件 `runtime/wa/egolite-launch.mjs`
+  （幂等重写）。agent 只需后台跑一次：
+  `ego-browser nodejs -e "await import('file:///<工作区>/runtime/wa/egolite-launch.mjs')"`
+  ——单轮常驻 10 分钟自动退出，wait 长于 10 分钟就重新跑一次同一条命令（TaskSpace
+  按固定名 `starpilot` 复用，无状态丢失）。
+- 窗口纪律（单窗口/开窗限速）在 egolite 传输下由 TaskSpace 托管语义替代，不适用；
+  其余门控（写闸门、绑定归属、地址漂移、幂等拒重发）与 bsk 传输**完全一致**。
+- 详见 `references/egolite-mode.md`。
 
 **开工前自检一次（第 1 轮之前，别每轮都跑）**
 
@@ -1236,6 +1256,30 @@ python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 
 - [ ] 通用坑已回灌 `references/lessons.md`
 
 ---
+
+## 7.5 依赖生命周期：安装 / 升级 / 反馈（2026-11-13）
+
+**初始化（首次安装依赖）**：egolite 传输下 `python scripts/env.py --install` 输出三步引导
+（脚本只引导不代装）：① 用户从 https://lite.ego.app/ 下载安装（GUI，必须人做）；
+② **onboarding 时从日常登录目标平台的浏览器导入数据**（登录态跟过来，这步做错后面全卡）；
+③ 复检三件套（`--version` / `nodejs ready` / `env.py --json` 的 `ego_browser.ok=true`）。
+bsk 传输下行为不变（官方脚本自动装）。
+
+**升级检查（已装用户）**：`python scripts/update_check.py --json` 查三路——starpilot、
+bsk（仅 bsk 传输）、**ego**。ego 无远端 API，比对的是本机版本与实测锚点
+（`env.EGO_ANCHOR`）：`older` → 提示用户 `ego-browser upgrade`；`newer` → **只记录不拦**
+（用户裁定 2026-11-12），agent 按 `references/egolite-mode.md` §F 对照特性清单评估：
+变化巨大 → 提示「可能导致流程异常，请暂勿使用无人值守模式」并记 lessons；
+无实质变化 → 无感使用并回填锚点。starpilot 自身升级后必须重跑 `env.py --json` 复检依赖。
+
+**问题反馈（issues，先问再收）**：用户报告问题且 agent 判断值得留档时，**先问一句**
+「这个问题建议提交到 GitHub Issues，方便后续跟踪修复，好吗？」；用户同意后：
+
+1. `python scripts/feedback.py --kind bug`（或 `--kind platform-drift`，平台改版类）
+   生成可直接粘贴的报告块——含版本三元组、环境自检 JSON、state 摘要（**无正文、无凭证、
+   无完整 URL**，隐私红线写死在脚本头）；
+2. 引导用户访问 https://github.com/ShenDoyle/Starpilot/issues（选对应模板），把
+   整理好的信息直接粘贴；用户补充「现象/期望/复现步骤」三行即可提交。
 
 ## 8. 已知缺口（v0.1.6 现状，别假装有）
 

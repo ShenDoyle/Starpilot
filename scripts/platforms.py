@@ -1440,6 +1440,15 @@ def js_fill(p, text):
     if p.get("write_method") == "paste":
         # 剪贴板事件方式：对 ProseMirror / 富文本编辑器更可靠
         body = """
+  // 2026-11-11 清障：第三方扩展（实测 AIX智能下载器）注入全视口遮罩会
+  // 吞掉编辑器事件导致发送键不渲染——按特征移除其注入节点（仅限明确命中的）。
+  try {
+    document.querySelectorAll('body > div').forEach(d => {
+      const t = (d.innerText || '');
+      if (t.includes('AIX') && t.includes('拖拽到此处完成下载')) d.remove();
+    });
+    document.querySelectorAll('[class*="aix"], [id*="aix"], [class*="AIX"]').forEach(d => d.remove());
+  } catch (e) {}
   const el = pick(%s);
   if (!el) return JSON.stringify({ ok: false, why: 'no-editor' });
   el.focus();
@@ -1470,6 +1479,15 @@ def js_fill(p, text):
         # textarea 分支（DeepSeek 实测）：textarea 没有子节点，Range 圈内容会抛错，
         # 必须走 el.select() 再 insertText；否则会落到 selectAll 把整页选中。
         body = """
+  // 2026-11-11 清障：第三方扩展（实测 AIX智能下载器）注入全视口遮罩会
+  // 吞掉编辑器事件导致发送键不渲染——按特征移除其注入节点（仅限明确命中的）。
+  try {
+    document.querySelectorAll('body > div').forEach(d => {
+      const t = (d.innerText || '');
+      if (t.includes('AIX') && t.includes('拖拽到此处完成下载')) d.remove();
+    });
+    document.querySelectorAll('[class*="aix"], [id*="aix"], [class*="AIX"]').forEach(d => d.remove());
+  } catch (e) {}
   const el = pick(%s);
   if (!el) return JSON.stringify({ ok: false, why: 'no-editor' });
   el.focus();
