@@ -1,0 +1,25 @@
+# PROJECT-04 P2-2-1 密码学依赖锁定（GPT D1 裁定：成熟库+版本+哈希锁定，禁止运行期网络安装）
+# 安装（按平台）：python -m pip install --require-hashes -r requirements-lock.txt
+# 运行环境缺失时 envelope.py fail-closed（EnvelopeUnavailable → 拒签，绝不退化手写算法）。
+#
+# 平台覆盖（P2-2-4 闭环项：不得以 Windows wheel 哈希代表 WSL/Linux）：
+#   Windows  : CPython 3.13 win_amd64（本机 3.13.14）
+#   WSL/Linux: Ubuntu-24.04 / CPython 3.12 x86_64 manylinux（实测 3.12.3）
+#   pycparser 为纯 Python wheel（平台无关，单哈希）。
+# 每个平台的 wheel 哈希均为实测 `pip download` + `pip hash` 结果，非构造值。
+
+# ---- Windows / win_amd64 ----
+cryptography==45.0.7 ; sys_platform == "win32" \
+    --hash=sha256:3808e6b2e5f0b46d981c24d79648e5c25c35e59902ea4391a0dcb3e667bf7443
+cffi==2.1.1 ; sys_platform == "win32" \
+    --hash=sha256:1aa5645c30469b09530c4ebca77ebf8f17618293c58f8549cb1a543a50236e7d
+
+# ---- WSL / Linux x86_64 (manylinux) ----
+cryptography==45.0.7 ; sys_platform == "linux" \
+    --hash=sha256:b6a0e535baec27b528cb07a119f321ac024592388c5681a5ced167ae98e9fff3
+cffi==2.1.1 ; sys_platform == "linux" \
+    --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf
+
+# ---- 平台无关 ----
+pycparser==3.12 \
+    --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e

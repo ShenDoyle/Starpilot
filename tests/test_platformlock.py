@@ -43,12 +43,22 @@ class TestPlatformLock(unittest.TestCase):
     def _hold_as_other(self, platform: str, run_id: str = "proj-A") -> str:
         """伪造「另一任务持锁」：pid 必须是**别的活进程**，不能是本进程
         （本进程同 pid 且 allow_reentry=True 会判重入，那是另一条正常路径）。
-        用父进程 pid —— 它一定活着。"""
+        用父进程 pid —— 它一定活着。
+
+        PROJECT-03-R1 起锁载荷为 schema-2（含 process_start_token 等身份字段）；
+        遗留无 token 载荷 + 存活 pid 现在会 fail-closed（LOCK_STATE_UNKNOWN），
+        所以这里必须带父进程真实 token 才能正确模拟「活的另一任务」。"""
+        import procidentity
         p = wa.platform_lock_path(platform)
         os.makedirs(os.path.dirname(p), exist_ok=True)
+        ppid = os.getppid()
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"pid": os.getppid(), "owner": "wa", "run_id": run_id,
-                       "ts": __import__("time").time()}, f)
+            json.dump({"schema": 2, "pid": ppid, "owner": "wa", "run_id": run_id,
+                       "ts": __import__("time").time(),
+                       "process_start_token": procidentity._token_of(ppid),
+                       "executor_id": "ex-fake-%s" % run_id,
+                       "fencing_generation": 1, "lock_id": "lk-fake",
+                       "host": "test-host", "resource": p}, f)
         self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
         return p
 

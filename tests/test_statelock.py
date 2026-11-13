@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import statelock  # noqa: E402
+import procidentity  # noqa: E402
 import wa  # noqa: E402
 
 
@@ -58,13 +59,36 @@ class TestStateLock(unittest.TestCase):
         self.assertIn("took_over", h.get("stale", ""), "死进程的锁必须能被接管")
         statelock.release(self.sp, h)
 
-    def test_old_lock_is_taken_over_by_age(self):
+    def test_live_pid_lock_is_not_taken_over_by_age(self):
+        """C3-c 修复（PROJECT-03-R1 §3.1）：活进程持锁超过 stale_after 只告警，禁止接管。
+
+        历史：本用例原名 test_old_lock_is_taken_over_by_age，曾断言
+        `took_over:age` —— 它编码的正是 C3-c 缺陷行为（活进程仅因年龄被抢锁，
+        PROJECT-01-R1 实测 4/4 复现）。随 PROJECT-03-R1 修复修订断言：
+        活持有者（token 可核验）超龄后第二个进程必须仍拿不到锁。
+        """
         p = statelock.lock_path_for(self.sp)
         with open(p, "w", encoding="utf-8") as f:
             json.dump({"pid": os.getpid(), "run_id": "me", "ts": 1.0}, f)
-        h = statelock.acquire(self.sp, run_id="r2", timeout=0.5, stale_after=1)
-        self.assertIn("took_over:age", h.get("stale", ""))
-        statelock.release(self.sp, h)
+        # 遗留载荷 + 存活 pid → 身份不可核验 → fail-closed，绝不因年龄接管
+        with self.assertRaises((statelock.LockStateUnknown, statelock.LockBusy)):
+            statelock.acquire(self.sp, run_id="r2", timeout=0.5, stale_after=1)
+        self.assertTrue(os.path.exists(p), "活持有者的锁不许被年龄接管删除")
+        # schema-2 载荷 + 存活 pid → LOCK_OWNER_ALIVE，同样禁止接管
+        p2 = statelock.lock_path_for(self.sp + "2")
+        with open(p2, "w", encoding="utf-8") as f:
+            json.dump({"schema": 2, "pid": os.getpid(), "run_id": "me", "ts": 1.0,
+                       "process_start_token": procidentity.self_token(),
+                       "executor_id": "ex-self", "fencing_generation": 3,
+                       "lock_id": "lk-x", "host": "h", "resource": self.sp}, f)
+        try:
+            statelock.acquire_named(p2, run_id="r2", timeout=0.5, stale_after=1,
+                                    resource=self.sp + "2")
+            self.fail("活持有者超龄也应 LockBusy（年龄只告警）")
+        except statelock.LockBusy as e:
+            self.assertIn("stale_warning", json.dumps(e.holder, ensure_ascii=False),
+                          "超龄必须产生告警字段")
+        self.assertTrue(os.path.exists(p2), "活持有者的锁不许被删除")
 
     def test_release_does_not_remove_foreign_lock(self):
         p = statelock.lock_path_for(self.sp)

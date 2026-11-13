@@ -25,6 +25,9 @@ conv-check*.png
 # 过程垃圾
 dist/
 .workbuddy/tmp/
+# 阶段过程材料（探针脚本、回归日志、验收回执的发送副本）——交付件在 project-04-p2-3-report/
+project-04-p2-3-work/
+project-04-p2-3-report/sp31-*.md
 
 # 编辑器 / 系统
 .vscode/
