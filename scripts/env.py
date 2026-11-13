@@ -253,9 +253,9 @@ def find_ego_browser(env=None) -> str:
 # ego 版本锚点（2026-11-12 用户裁定：只记录不拦，靠特性清单对照分析告警）。
 # 每次实测新版本后由 agent 回填 cli 锚点并更新 references/egolite-mode.md 锚点表。
 # 痛点前科：bsk 0.4.1 一夜改坏星舵（36 条 ESC 违例）——锚点 + 清单就是为此。
-EGO_ANCHOR = (0, 6, 2, 10)          # 星舵全链实测通过的 ego CLI 版本
-EGO_ANCHOR_GUIDE = "v2.2.0"         # `ego-browser skill` 输出的 guide 版本
-EGO_ANCHOR_DATE = "2026-11-12"
+EGO_ANCHOR = (0, 6, 3, 14)          # 星舵全链实测通过的 ego CLI 版本
+EGO_ANCHOR_GUIDE = "v2.2.1"         # `ego-browser skill` 输出的 guide 版本
+EGO_ANCHOR_DATE = "2026-11-14"
 EGO_MIN = (0, 6, 2, 10)             # 低于此版本：缺 worker 依赖的 API 面，提示升级
 EGO_SITE = "https://lite.ego.app/"
 

@@ -74,6 +74,7 @@
 | 星舵版本 | 实测 ego CLI | 实测 guide | 日期 | 结论 |
 |---|---|---|---|---|
 | v0.1.7.1+（egolite 传输首发） | 0.6.2.10 | v2.2.0 | 2026-11-12 | 全链实测通过（op 往返/初始化） |
+| v1.8.0 | 0.6.3.14 | v2.2.1 | 2026-11-14 | §F 评估通过：API 清单全在（guide 仅文档小版本），op 队列冒烟 evaluate/navigate/fill/press 正常（fill 拒非可编辑元素为正确语义），无感使用回填 |
 
 锚点常量在 `scripts/env.py`（`EGO_ANCHOR` / `EGO_MIN` / `EGO_ANCHOR_GUIDE`），
 `env.py --json` 与 `update_check.py` 据此给 status（ok / older / newer / unknown）。
