@@ -25,12 +25,14 @@ import shutil
 import subprocess
 import tempfile
 
-# 星舵固定版本（2026-11-13 用户拍板：固定 0.6.2.10，升级需冷启动冒烟后再切）。
-EGO_EXE_PINNED = r"C:\Program Files\Citro Labs\ego lite\Application\0.6.2.10\ego-browser.exe"
+# 版本钉的语义现在落在两处（2026-11-14 更新）：
+# 1) exe 路径**动态解析**到本机已装的最高 ego 版本（ego_backend._resolve_ego_exe）——
+#    版本化安装目录（Application\<ver>\）写死必挂：用户升级（0.6.2.10→0.6.3.14）后
+#    旧目录即被移除，硬编码路径当场失效（实测撞到，全部 dispatch fail-closed）；
+# 2) Node 运行时**严格白名单**（ALLOWED_NODE_RUNTIMES）：白名单不变 = 钉住不变，
+#    升级 ego 后只有冷启动冒烟 + NR 矩阵重跑通过才允许扩充白名单——显式部署决策，
+#    不做隐式放行。
 EGO_EXE_ENV = "STARPILOT_EGO_EXE"
-# **严格白名单**（非「主版本下限」）：只有这里列出的运行时版本可用于验签。
-# 当前固定的 ego 0.6.2.10 内置 Node 为 24.22.1；升级 ego 必须同步更新本清单
-# 并重跑 NR 矩阵——这是显式的部署决策，不做隐式放行。
 ALLOWED_NODE_RUNTIMES = ("24.22.1",)
 MARKER = "SP_NODE_VERIFY_RESULT "
 BOOTSTRAP_NAME = "node_verify.mjs"
@@ -41,8 +43,12 @@ class NodeVerifyUnavailable(Exception):
 
 
 def ego_exe() -> str:
-    """返回 ego-browser 可执行文件路径（缺省为固定版本；可用环境变量覆盖）。"""
-    return os.environ.get(EGO_EXE_ENV) or EGO_EXE_PINNED
+    """返回 ego-browser 可执行文件路径（EGO_EXE_ENV > 本机最高版本动态解析）。"""
+    override = os.environ.get(EGO_EXE_ENV)
+    if override:
+        return override
+    import ego_paths
+    return ego_paths.resolve_ego_exe()
 
 
 def bootstrap_path() -> str:

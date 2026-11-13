@@ -24,17 +24,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
 
 import sp_errors as SP
 
-EGO_EXE = (r"C:\Program Files\Citro Labs\ego lite\Application\0.6.2.10"
-           r"\ego-browser.exe")
+import ego_paths as _ego_paths
+EGO_EXE = _ego_paths.resolve_ego_exe()
 BRIDGE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "ego", "ego_bridge.mjs")
-SDK_VERSION = "0.6.2.10"
+SDK_VERSION = "0.6.3.14"   # 实测锚点随 ego 升级回填（2026-11-14，§F 评估通过）
 
 # ------------------------------------------------------------- 能力表
 # （任务书 §3.1：每项 op 必须声明以下字段；SDK 有但这里没有的能力不暴露）
