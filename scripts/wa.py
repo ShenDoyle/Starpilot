@@ -117,15 +117,19 @@ def ensure_egolite_launch(root: str = "") -> str:
     root = root or os.getcwd()
     lp = egolite_launch_path(root)
     os.makedirs(os.path.dirname(lp), exist_ok=True)
-    # 始终重写：工作区可能移动，root 以当前调用为准
-    root_uri = pathlib.Path(os.path.abspath(root)).as_uri()
+    # 始终重写：工作区可能移动，root 以当前调用为准。
+    # import() 在 Windows 上必须用 file:// URL（裸 C:/... 会被当成 c: 协议而报
+    # ERR_UNSUPPORTED_ESM_URL_SCHEME）；root 仍传普通路径，worker 用它拼目录。
+    worker_uri = pathlib.Path(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "egolite-worker.mjs")
+    ).as_uri()
     body = (
         "// 由 wa.py 自动生成（幂等重写）——ego-browser nodejs 入口引导。\n"
         "// 不要手改；工作区移动后会被重写。\n"
         "const { run } = await import(%s);\n"
         "const r = await run(%s, { maxMs: 600000, idleMs: 5000 });\n"
         "console.log('[egolite-worker] done', JSON.stringify(r));\n"
-        % (json.dumps(os.path.join(os.path.dirname(os.path.abspath(__file__)), "egolite-worker.mjs").replace("\\", "/")),
+        % (json.dumps(worker_uri),
            json.dumps(os.path.abspath(root).replace("\\", "/")))
     )
     with open(lp, "w", encoding="utf-8") as f:
