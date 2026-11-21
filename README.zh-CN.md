@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="references/egolite-mode.md"><img alt="默认传输 ego-browser" src="https://img.shields.io/badge/%E4%BC%A0%E8%BE%93-ego--browser-2f75f0"></a>
-  <a href="https://github.com/Tencent/BrowserSkill"><img alt="可选传输 bsk" src="https://img.shields.io/badge/%E5%85%9C%E5%BA%95-bsk-6b7280"></a>
+  <a href="https://github.com/Tencent/BrowserSkill"><img alt="备用 bsk（计划移除）" src="https://img.shields.io/badge/%E5%A4%87%E7%94%A8-bsk%EF%BC%88%E8%AE%A1%E5%88%92%E7%A7%BB%E9%99%A4%EF%BC%89-6b7280"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.8.1-6b7280">
+  <img alt="版本" src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.9.0-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -94,10 +94,12 @@
 <details>
 <summary><b>🔧 手动安装</b></summary>
 
-**ego-browser**（默认传输，2026-11-12 起）：装好 ego-browser CLI，在它里面登录目标平台一次即可，
+**ego-browser**（**默认且唯一首选依赖**，2026-11-21 依赖政策）：装好 ego-browser CLI，在它里面登录目标平台一次即可，
 不需要浏览器扩展。后台 worker 的启动方式与协议见 [egolite 模式](references/egolite-mode.md)。
+macOS 上 ego 的稳定性更高，不需要为此改回 bsk。
 
-**bsk**（可选传输，兜底用；[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 的浏览器 CLI，默认装到 `~/.local/bin`）：
+**bsk**（**备用，计划完全移除**；[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill) 的浏览器 CLI）：
+只有当你**明确不想用 ego** 时才需要它。不要因为「已经装了 bsk」就跳过 ego。
 
 ```bash
 # macOS / Linux
@@ -107,6 +109,7 @@ curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.s
 Windows 在 PowerShell 里跑：`irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex`
 
 再在浏览器启用扩展（[Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)），`bsk doctor` 显示 Connected 才算通。装在非默认目录就设 `BSK_BIN` 指过去。
+Playwright 等其他工具仅在拒绝 ego 时作为最后手段评估。
 
 需要 Python 3.9+（无第三方包）；装完跑 `python scripts/env.py` 确认。
 
@@ -222,8 +225,8 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 
 | 项 | 说明 |
 | --- | --- |
-| 🌐 [ego-browser](references/egolite-mode.md) | **默认传输**：自带登录态的 Chromium，页面动作走后台常驻 worker，不装扩展、不装 CLI 扩展协议 |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **可选传输（兜底）**：CLI + Chrome/Edge 扩展，用你已经登录的浏览器干活。`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
+| 🌐 [ego-browser](references/egolite-mode.md) | **默认且唯一首选依赖**：自带登录态的 Chromium，页面动作走后台常驻 worker，不装扩展 |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **备用，计划移除**：只有你明确拒绝 ego 时才用；CLI + Chrome/Edge 扩展，`wa.py` 依次在 `BSK_BIN`、`PATH`、`~/.local/bin` 找它 |
 | 🐍 Python 3.9+ | 仅标准库，无第三方依赖 |
 | 🤖 网页版 AI | 一个已登录的对话地址 + 一个浏览器实例 |
 

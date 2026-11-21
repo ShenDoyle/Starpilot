@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""环境自检与自举：Python 版本、浏览器后端（bsk 或 agent 内置浏览器）。
+"""环境自检与自举：Python 版本、浏览器通路（ego-browser 默认 / bsk 备用 / 内置浏览器）。
 
 给 agent 用的入口——**别猜、别让用户先去装**，跑一遍这个脚本看现状：
-  python scripts/env.py --json      # 机器读：ok / python / bsk / backend / needs_decision / actions
+  python scripts/env.py --json      # 机器读：ok / python / backend / transport / actions
   python scripts/env.py             # 人读报告
-  python scripts/env.py --install   # 缺 bsk 时自动安装（官方脚本，用户级，不要 root）
-  python scripts/env.py --no-doctor # 不探测浏览器扩展（更快，但不知道扩展装没装）
+  python scripts/env.py --install   # 缺依赖时自动安装（egolite 走 GUI 引导；bsk 走官方脚本）
 
-浏览器后端（0.1.3 起）——很多宿主 agent 自带浏览器，bsk 不是唯一路径：
-  python scripts/env.py --set-backend bsk|builtin   # 首次激活时问过用户后记录（~/.starpilot/config.json）
-                                                    # 只记录，不安装；选 bsk 还要 --install
-  backend 取值顺序：--backend 参数 > config > 自动（找到 bsk 就算 bsk，都没有 = unconfigured）
-  needs_decision=true 表示「bsk 没有、用户也没选过」——这时按 SKILL §0.2 弹窗问用户，**只问一次**。
+浏览器通路（2026-11-21 依赖政策）：
+  ego-browser（egolite 传输）是**默认且首选**的依赖；bsk 已降级为备用、后续计划移除。
+  只有用户明确表示「不愿使用 ego」时才允许切 bsk；Playwright 等仅在同样前提下作最后手段。
+  内置浏览器（builtin）仍可作为「什么都不装」的兜底规程。
+  python scripts/env.py --set-transport egolite|bsk|iab   # 传输层（默认 egolite）
+  python scripts/env.py --set-backend bsk|builtin         # 旧后端选择，仅 bsk 备用/内置浏览器需要
+  取值顺序：--backend > config > 自动（egolite 传输默认；bsk 只在显式选择后生效）。
 
-退出码：0 = 就绪（bsk 可用，或后端=builtin）；4 = 缺东西但可按 actions 修；
+退出码：0 = 就绪；4 = 缺东西但可按 actions 修；
         5 = 尝试安装后仍不可用。
 """
 
@@ -154,16 +155,20 @@ def set_idle_close(seconds: int, env=None) -> str:
 
 
 def resolve_backend(flag=None, env=None, bsk_found=None) -> str:
-    """bsk 参数 > config > 自动（找到 bsk 就算 bsk，否则 unconfigured）。
+    """--backend > config > 传输层默认（egolite 传输 → egelite；显式 bsk 且已装 → bsk）。
 
-    返回值："bsk" / "builtin" / "unconfigured"。
-    "unconfigured" = bsk 没有、用户也没选过 → 按 SKILL §0.2 弹窗问一次。
+    返回值："egolite" / "bsk" / "builtin" / "iab" / "unconfigured"。
+    默认传输是 egolite（2026-11-21 依赖政策），因此 bsk「装着」也不会自动接管；
+    只有用户显式选 `--set-transport bsk` 或 `--set-backend bsk` 才走 bsk。
+    "unconfigured" 只在 bsk 传输下既没装 bsk、用户也没选过时出现。
     """
     if flag in BACKENDS:
         return flag
     v = load_config(env).get("browser_backend")
     if v in BACKENDS:
         return v
+    if transport() == "egolite":
+        return "egolite"
     if bsk_found:
         return "bsk"
     return "unconfigured"
@@ -229,16 +234,16 @@ def doctor(path, runner=None, timeout=25) -> dict:
 
 
 def transport() -> str:
-    """传输层（0.1.5 起）：env STARPILOT_TRANSPORT > config "transport" > bsk 兜底。
+    """传输层：env STARPILOT_TRANSPORT > config "transport" > egolite（默认）。
 
-    与 browser_backend 正交。本机改用 egolite 走配置（2026-11-12 裁定）：
-    config.json 写 "transport": "egolite"。
+    2026-11-21 依赖政策：ego 是唯一默认/首选依赖；bsk 仅备用、计划移除，
+    必须由用户显式选择（env 或 config）才启用。
     """
     try:
         import transport as _t
         return _t.current_transport()
     except Exception:
-        return (os.environ.get("STARPILOT_TRANSPORT") or "bsk").strip().lower()
+        return (os.environ.get("STARPILOT_TRANSPORT") or "egolite").strip().lower()
 
 
 def find_ego_browser(env=None) -> str:
@@ -369,8 +374,10 @@ def check(with_doctor=True, runner=None, timeout=25, backend=None, env=None) -> 
             "有破坏性变化→提示暂勿无人值守并记 lessons；无变化→无感使用并回填锚点"
             % (egoinfo["version"], egoinfo["anchor"]))
     if needs_decision:
-        acts.append("浏览器后端未定（SKILL §0.2）：用按钮弹窗问用户「安装 bsk（推荐）还是用 agent 内置浏览器」，"
-                    "然后 python scripts/env.py --set-backend bsk|builtin 记录；选 bsk 再跑 --install。只问一次。")
+        acts.append("浏览器通路未定（仅 bsk 传输会出现）：默认应改用 ego——"
+                    "`python scripts/env.py --set-transport egolite` 后按 actions 安装 ego-browser；"
+                    "只有用户明确不愿使用 ego 时，才问是否装 bsk（--set-backend bsk --install）"
+                    "或用内置浏览器（--set-backend builtin）。")
     elif backend == "bsk" and not bsk:
         acts.append("bsk 未安装：跑 python scripts/env.py --install（官方脚本，用户级）；"
                     "或改用内置浏览器：--set-backend builtin")
@@ -435,25 +442,33 @@ def install(timeout=300, runner=None, rep=None) -> dict:
 
 
 BACKEND_LABEL = {
-    "bsk": "bsk（外部浏览器 + BrowserSkill 扩展，全自动循环）",
+    "egolite": "egolite（ego-browser，默认/首选；op 队列 + 后台 worker）",
+    "bsk": "bsk（备用，计划移除；外部浏览器 + BrowserSkill 扩展）",
     "builtin": "builtin（agent 内置浏览器，手动规程：references/builtin-mode.md）",
     "iab": "iab（脚本侧 IAB 传输层，STARPILOT_TRANSPORT=iab，实验性）",
-    "unconfigured": "未定（SKILL §0.2：弹窗问用户，只问一次）",
+    "unconfigured": "未定（仅 bsk 传输且未安装时出现）",
 }
 
 
 def human(rep: dict) -> str:
     py, b = rep["python"], rep["bsk"]
+    ego = rep.get("ego_browser") or {}
     mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
     lines = [
         "%s Python %s（需 %s+）  %s" % (mark(py["ok"]), py["version"], py["required"], py["exe"]),
-        "  浏览器后端：%s" % BACKEND_LABEL.get(rep.get("backend"), "?"),
-        "%s bsk %s  %s" % (mark(b["ok"]), b["version"] or "-", b["path"] or "未找到"),
+        "  浏览器通路：%s" % BACKEND_LABEL.get(rep.get("backend"), "?"),
     ]
-    if b["doctor"] is not None:
-        c = b["doctor"].get("connected")
-        lines.append("%s 浏览器扩展  %s" % (mark(c is True),
-                                            {True: "已连接", False: "未连接", None: "未知"}[c]))
+    if rep.get("transport") == "egolite":
+        lines.append("%s ego-browser %s  %s" % (
+            mark(bool(ego.get("ok"))), ego.get("version") or "-", ego.get("path") or "未找到"))
+        if b["ok"]:
+            lines.append("  （bsk 也在装，但仅作备用，不参与当前传输）")
+    else:
+        lines.append("%s bsk %s  %s" % (mark(b["ok"]), b["version"] or "-", b["path"] or "未找到"))
+        if b["doctor"] is not None:
+            c = b["doctor"].get("connected")
+            lines.append("%s 浏览器扩展  %s" % (mark(c is True),
+                                                {True: "已连接", False: "未连接", None: "未知"}[c]))
     if py["others"]:
         lines.append("  其它解释器：%s" % "  ".join(py["others"]))
     if rep["actions"]:
@@ -467,18 +482,19 @@ def human(rep: dict) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="星舵环境自检 / bsk 自动安装 / 浏览器后端选择")
+    ap = argparse.ArgumentParser(description="星舵环境自检 / 依赖安装（ego 默认，bsk 备用）")
     ap.add_argument("--json", action="store_true", help="输出 JSON（agent 用）")
-    ap.add_argument("--install", action="store_true", help="缺 bsk 时自动安装")
+    ap.add_argument("--install", action="store_true",
+                    help="缺依赖时自动安装：egolite 输出 ego GUI 引导；bsk 走官方脚本（仅备用）")
     ap.add_argument("--no-doctor", action="store_true", help="跳过扩展连接探测")
     ap.add_argument("--backend", choices=BACKENDS,
                     help="本次按指定后端判定（不写配置；持久化用 --set-backend）")
     ap.add_argument("--set-backend", choices=BACKENDS, dest="set_backend",
-                    help="记录用户选择的浏览器后端到 ~/.starpilot/config.json（首次激活 §0.2，只问一次）")
+                    help="记录旧后端选择（bsk=备用/计划移除；builtin=内置浏览器）；默认 ego 不需要它")
     ap.add_argument("--set-unattended", choices=["on", "off"], dest="set_unattended",
                     help="无人值守硬开关：on=执行模式缺省 auto、不再每轮停（写闸门仍 fail-closed）")
     ap.add_argument("--set-transport", choices=["bsk", "iab", "egolite"], dest="set_transport",
-                    help="记录传输层到 ~/.starpilot/config.json（env STARPILOT_TRANSPORT 优先）")
+                    help="记录传输层到 ~/.starpilot/config.json（默认 egolite；bsk 仅备用）")
     ap.add_argument("--set-idle-close", type=int, default=0, dest="set_idle_close",
                     help="窗口闲置收割时限（秒，≥60）：agent 超时未续租，wa.py reap 关掉其窗口")
     ap.add_argument("--timeout", type=int, default=300, help="安装超时秒数")
@@ -507,8 +523,11 @@ def main(argv=None) -> int:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         print("已记录传输层：%s → %s" % (a.set_transport, p))
         if a.set_transport == "egolite":
-            print("效果：页面动作走 op 队列（不需要 bsk），worker 由 ego-browser 驱动，"
+            print("效果：页面动作走 op 队列（默认通路），worker 由 ego-browser 驱动，"
                   "规程见 references/egolite-mode.md；首次使用需在 ego-browser 里登录目标平台。")
+        elif a.set_transport == "bsk":
+            print("⚠ bsk 是备用通路，计划在后续版本移除；仅当用户明确不愿使用 ego 时才切。"
+                  "效果：页面动作直连 bsk CLI，需要 bsk + BrowserSkill 扩展。")
         elif a.set_transport == "iab":
             print("效果：页面动作走 op 队列（实验性），worker 由 ZCode IAB 驱动，见 SKILL §5.1。")
         return 0
@@ -517,6 +536,7 @@ def main(argv=None) -> int:
         p = set_backend(a.set_backend)
         print("已记录浏览器后端：%s → %s" % (a.set_backend, p))
         if a.set_backend == "bsk":
+            print("⚠ bsk 是备用通路（计划移除），仅在用户明确不愿使用 ego 时使用。")
             print("下一步：python scripts/env.py --install（装 bsk CLI），并让用户在浏览器启用扩展。")
         else:
             print("不装 bsk。浏览器操作由 agent 内置能力执行，规程见 references/builtin-mode.md。")

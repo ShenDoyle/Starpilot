@@ -193,12 +193,18 @@ class TestCheckBackend(unittest.TestCase):
         self.assertEqual(rep["backend"], "egolite")
         self.assertTrue(rep["ok"])
 
-    def test_default_transport_is_bsk_fallback(self):
+    def test_default_transport_is_egolite(self):
+        """2026-11-21 依赖政策：ego 是默认通路；bsk 必须显式选择。"""
         import tempfile
-        with mock.patch.dict(os.environ, {
-                "STARPILOT_CONFIG": os.path.join(tempfile.mkdtemp(), "nope.json")}, clear=False):
-            os.environ.pop("STARPILOT_TRANSPORT", None)
-            self.assertEqual(ev.transport(), "bsk")
+        try:
+            with mock.patch.dict(os.environ, {
+                    "STARPILOT_CONFIG": os.path.join(tempfile.mkdtemp(), "nope.json")}, clear=False):
+                os.environ.pop("STARPILOT_TRANSPORT", None)
+                self.assertEqual(ev.transport(), "egolite")
+            with mock.patch.dict(os.environ, {"STARPILOT_TRANSPORT": "bsk"}, clear=False):
+                self.assertEqual(ev.transport(), "bsk")
+        finally:
+            os.environ["STARPILOT_TRANSPORT"] = "bsk"  # 还原测试基线
 
     def test_extension_action_suppressed_for_builtin_backend(self):
         with _Cfg():

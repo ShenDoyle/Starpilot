@@ -1,8 +1,8 @@
-# egolite 传输模式（2026-11-12 起，本机默认）
+# egolite 传输模式（默认通路）
 
-> 传输取值：`STARPILOT_TRANSPORT` env > config 的 `"transport"` 键 > bsk 兜底。
-> 本机已经 `python scripts/env.py --set-transport egolite` 写入 config——页面动作走
-> op 队列，由 ego-browser（ego lite）驱动。不装 bsk、不装浏览器扩展。
+> 传输取值：`STARPILOT_TRANSPORT` env > config 的 `"transport"` 键 > **egolite 兜底**
+> （2026-11-21 依赖政策：ego 是唯一默认/首选依赖；bsk 仅备用、计划移除）。
+> 页面动作走 op 队列，由 ego-browser（ego lite）驱动。不装 bsk、不装浏览器扩展。
 > 协议与 iab 传输完全一致，只换 worker 与运行方式。
 
 ## A. 为什么有这条模式

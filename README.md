@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="references/egolite-mode.md"><img alt="Default transport: ego-browser" src="https://img.shields.io/badge/transport-ego--browser-2f75f0"></a>
-  <a href="https://github.com/Tencent/BrowserSkill"><img alt="Fallback transport: bsk" src="https://img.shields.io/badge/fallback-bsk-6b7280"></a>
+  <a href="https://github.com/Tencent/BrowserSkill"><img alt="Backup (deprecated): bsk" src="https://img.shields.io/badge/legacy-bsk%20%28deprecated%29-6b7280"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-2f75f0">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.8.1-6b7280">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.9.0-6b7280">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/github/license/ShenDoyle/Starpilot?color=2f75f0"></a>
   <a href="https://github.com/ShenDoyle/Starpilot/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ShenDoyle/Starpilot?style=social"></a>
 </p>
@@ -95,9 +95,10 @@ then run python scripts/env.py to confirm the environment and tell me what is st
 <details>
 <summary><b>🔧 Manual install</b></summary>
 
-**ego-browser** (default transport since 2026-11-12): install the ego-browser CLI and log the target platform in once — no browser extension. Background worker setup and the op protocol: [egolite mode](references/egolite-mode.md).
+**ego-browser** (**the default and only preferred dependency**, since 2026-11-21): install the ego-browser CLI and log the target platform in once — no browser extension. Background worker setup and the op protocol: [egolite mode](references/egolite-mode.md). ego is also stable on macOS — there is no reason to switch back to bsk there.
 
-**bsk** (optional transport, used as a fallback; the browser CLI from [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill), installed to `~/.local/bin` by default):
+**bsk** (**backup only; planned for removal**; the browser CLI from [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)):
+use it only if you explicitly do **not** want ego. Do not skip ego just because bsk is already installed.
 
 ```bash
 # macOS / Linux
@@ -107,6 +108,7 @@ curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.s
 On Windows, run this in PowerShell: `irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex`
 
 Then enable the browser extension ([Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) / [Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)); `bsk doctor` must show Connected. If it landed somewhere non-default, point `BSK_BIN` at it.
+Playwright or other tools are evaluated only as a last resort after you decline ego.
 
 Python 3.9+, no third-party packages; run `python scripts/env.py` afterwards to confirm.
 
@@ -219,8 +221,8 @@ python scripts/orchestrator.py close --stage O1 --require-lessons
 
 | Item | Notes |
 | --- | --- |
-| 🌐 [ego-browser](references/egolite-mode.md) | **Default transport**: a Chromium that keeps its own logins; page actions run through a background worker — no extension, no separate CLI protocol |
-| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **Optional transport (fallback)**: CLI + Chrome/Edge extension, driving the browser you are already logged into. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
+| 🌐 [ego-browser](references/egolite-mode.md) | **The default and only preferred dependency**: a Chromium that keeps its own logins; page actions run through a background worker — no extension |
+| 🌐 [bsk](https://github.com/Tencent/BrowserSkill) | **Backup only, planned for removal**: use it only if you explicitly decline ego; CLI + Chrome/Edge extension. `wa.py` looks it up via `BSK_BIN`, then `PATH`, then `~/.local/bin` |
 | 🐍 Python 3.9+ | Standard library only, no third-party dependencies |
 | 🤖 Web AI | One logged-in conversation URL + one browser instance |
 

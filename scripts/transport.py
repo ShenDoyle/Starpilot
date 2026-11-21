@@ -9,11 +9,15 @@
   `STARPILOT_TRANSPORT=egolite` 并设为**默认**。op 队列协议与 iab 完全一致，
   只是 worker 换成 `egolite-worker.mjs`（`ego-browser nodejs` 驱动，可后台常驻，
   修掉 IAB「agent 必须持续手动跑 worker」的限制）。
+- 2026-11-21：用户再次明确依赖政策——**ego 是唯一默认/首选依赖**；bsk 降级为
+  备用，后续版本计划完全移除。只有用户明确表示「不愿使用 ego」时才允许切 bsk；
+  Playwright 等其他工具仅在同样前提下作最后手段（见 references/browser-backends.md）。
+  macOS 上 ego 的稳定性更高，不能把「Mac 上想用 bsk」当成合理默认。
 
 取值：
-- `STARPILOT_TRANSPORT=egolite`：op 队列 + `ego-browser nodejs` worker（本机 config 已选）；
+- `STARPILOT_TRANSPORT=egolite`（默认）：op 队列 + `ego-browser nodejs` worker；
 - `STARPILOT_TRANSPORT=iab`：op 队列 + ZCode IAB worker（实验性）；
-- `STARPILOT_TRANSPORT=bsk`：直连 bsk CLI（兜底，保留可回退）。
+- `STARPILOT_TRANSPORT=bsk`：直连 bsk CLI（**仅备用/计划移除**，须用户显式选择）。
 
 ## op 队列协议
 
@@ -47,11 +51,11 @@ def ops_dir(root: str = "") -> str:
 # egolite（ego-browser，worker 可后台常驻）。
 OPQUEUE_TRANSPORTS = ("iab", "egolite")
 
-# 传输取值优先级：env STARPILOT_TRANSPORT > config 的 "transport" 键 > "bsk"（兜底）。
-# 为什么默认兜底是 bsk 而不是 egolite：单测套件是传输无关的，运行时默认若随代码
-# 翻转会漏进几百条未显式选传输的用例（实测掉进 op 队列 60s 轮询，表现为挂死）。
-# 「本机改用 egolite」由配置表达（~/.starpilot/config.json 的 "transport": "egolite"，
-# 2026-11-12 用户裁定），与 browser_backend 同一机制。
+# 传输取值优先级：env STARPILOT_TRANSPORT > config 的 "transport" 键 > "egolite"（默认）。
+# 2026-11-21 裁定：ego 是唯一默认/首选依赖；bsk 仅备用、计划移除，必须由用户显式选择
+# （env 或 config）才会启用。单测不受影响：tests/__init__.py 把测试基线钉在 bsk。
+# 之前把兜底留在 bsk 是为了避免未显式选传输的用例掉进 op 队列轮询；现在用测试基线
+# 隔离，运行时可以安全地把默认翻到 egolite。
 
 
 def _config_transport() -> str:
@@ -67,7 +71,7 @@ def _config_transport() -> str:
 
 def current_transport() -> str:
     return (os.environ.get("STARPILOT_TRANSPORT")
-            or _config_transport() or "bsk").strip().lower()
+            or _config_transport() or "egolite").strip().lower()
 
 
 def is_opqueue(t: str = "") -> bool:

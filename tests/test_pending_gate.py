@@ -291,27 +291,28 @@ class TestTransport(unittest.TestCase):
         finally:
             os.environ["STARPILOT_TRANSPORT"] = "bsk"  # 还原基线（默认已是 egolite）
 
-    def test_default_transport_is_bsk_and_config_can_pick_egolite(self):
-        """传输优先级：env > config "transport" > bsk 兜底。
+    def test_default_transport_is_egolite_and_config_can_pick_bsk(self):
+        """传输优先级：env > config "transport" > egolite 默认。
 
-        2026-11-12 用户裁定「不用 bsk，改用 egolite」由**配置**表达，
-        代码兜底保持 bsk——否则几百合未显式选传输的用例会掉进 op 队列轮询。
+        2026-11-21 依赖政策：ego 是唯一默认/首选依赖；bsk 仅备用、计划移除，
+        必须显式选择。单测基线仍由 tests/__init__.py 钉在 bsk，所以这里可以
+        安全地把运行时兜底翻到 egolite。
         """
         import transport
         os.environ.pop("STARPILOT_TRANSPORT", None)
         cfg = os.path.join(self.tmp, "config.json")
         os.environ["STARPILOT_CONFIG"] = cfg
         try:
-            self.assertEqual(transport.current_transport(), "bsk")  # 无 config 兜底
+            self.assertEqual(transport.current_transport(), "egolite")  # 无 config 兜底
             with io.open(cfg, "w", encoding="utf-8") as f:
-                f.write('{"transport": "egolite"}')
-            self.assertEqual(transport.current_transport(), "egolite")
-            self.assertTrue(transport.is_opqueue())
-            self.assertTrue(transport.is_opqueue("iab"))
-            self.assertFalse(transport.is_opqueue("bsk"))
-            # env 优先于 config
-            os.environ["STARPILOT_TRANSPORT"] = "bsk"
+                f.write('{"transport": "bsk"}')
             self.assertEqual(transport.current_transport(), "bsk")
+            self.assertFalse(transport.is_opqueue())
+            self.assertTrue(transport.is_opqueue("iab"))
+            self.assertTrue(transport.is_opqueue("egolite"))
+            # env 优先于 config
+            os.environ["STARPILOT_TRANSPORT"] = "egolite"
+            self.assertEqual(transport.current_transport(), "egolite")
         finally:
             os.environ.pop("STARPILOT_CONFIG", None)
             os.environ["STARPILOT_TRANSPORT"] = "bsk"

@@ -1,26 +1,27 @@
 # 内置浏览器模式（builtin 后端）
 
 > 0.1.6 起支持。很多宿主 agent 自带浏览器能力（WorkBuddy browser-use、playwright-cli、
-> 宿主内置 Chrome 控制等），bsk 不再是唯一路径。选了 builtin：**不装 bsk、不装扩展，
-> 脚本完全不碰浏览器**；发送、读取、等待、分诊由 agent 用自己的浏览器工具按本规程执行。
+> 宿主内置 Chrome 控制等），bsk 不再是唯一路径。选了 builtin：**不装任何依赖，脚本完全不碰浏览器**；
+> 发送、读取、等待、分诊由 agent 用自己的浏览器工具按本规程执行。
 
 ---
 
 ## A. 什么时候选 builtin
 
-> **先分清三条路**：bsk（全自动，要装依赖）· IAB 传输层（`STARPILOT_TRANSPORT=iab`，
-> 脚本侧 op 队列，SKILL §5.1，实验性）· **builtin（本文，agent 手动执行）**。
-> 宿主支持 IAB 就优先 IAB（保住自动化）；IAB 不稳（见 SKILL §5.1 已知失效）再回退 builtin。
+> **先分清四条路**：ego-browser（默认，全自动）· bsk（备用，计划移除）·
+> IAB 传输层（`STARPILOT_TRANSPORT=iab`，脚本侧 op 队列，实验性）·
+> **builtin（本文，agent 手动执行）**。
+> builtin 是「什么都不装」的兜底；只有用户拒绝 ego、且宿主也跑不了 IAB 时才回退到这里。
 
-| | bsk（默认推荐） | builtin |
-|---|---|---|
-| 自动化程度 | 全自动：orchestrator loop、写闸门、自动续窗、三时钟 | 手动：agent 按本规程逐步执行，判据照用 |
-| 依赖 | bsk CLI + 浏览器扩展 | 无（用宿主自带的浏览器能力） |
-| 状态机 / 写闸门 / 平台占用锁 | 有 | **没有**（见 §E 边界） |
-| 适合 | 长跑项目、auto 模式、多任务 | 快速试跑、宿主不许装后台进程、临时环境 |
+| | ego-browser（默认） | bsk（备用） | builtin |
+|---|---|---|---|
+| 自动化程度 | 全自动：orchestrator loop、写闸门、三时钟、平台锁 | 全自动（历史实现） | 手动：agent 按本规程逐步执行，判据照用 |
+| 依赖 | ego lite（无扩展） | bsk CLI + 浏览器扩展 | 无（用宿主自带的浏览器能力） |
+| 状态机 / 写闸门 / 平台占用锁 | 有 | 有 | **没有**（见 §E 边界） |
+| 适合 | 长跑项目、auto 模式、多任务（默认） | 仅在用户拒绝 ego 时兼容 | 快速试跑、宿主不许装后台进程、临时环境 |
 
-选择入口：SKILL §0.2 的首次激活弹窗。记录后可随时切换：
-`python scripts/env.py --set-backend bsk|builtin`。
+选择入口：默认即 ego（无需设置）；只有用户拒绝 ego 时才走
+`python scripts/env.py --set-transport bsk` 或 `--set-backend builtin`。
 
 ## B. 绑定（对应 SKILL §3，等价 `wa.py bind`）
 

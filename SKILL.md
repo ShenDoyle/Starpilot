@@ -1,7 +1,7 @@
 ---
 name: starpilot
 description: "星舵 · 网页版 AI 驱动的项目开发循环：需求建立 → 网页版 AI 规划完整方案 → 拆成可验收的阶段步骤 → 本地 Agent 取指令逐步执行 → 如实回报 → 阶段收口。网页版 AI 当架构师，本地 Agent 当执行者，形成「规划→执行→反馈→再规划」的闭环。仓库 https://github.com/ShenDoyle/Starpilot 。触发：网页版AI、挂chatgpt、按chatgpt指示、AI循环开发、外脑开发、星舵、跟着网页AI做项目、让AI规划项目、本地agent自动执行、升级星舵、星舵升到最新版、检查星舵更新；EN triggers: starpilot, web-ai-loop, web AI loop, AI loop development, outer-brain development, follow web AI instructions, plan with web AI, browser AI driven development, upgrade starpilot, update starpilot to latest。"
-version: "1.8.1"
+version: "1.9.0"
 ---
 
 # 星舵 Starpilot
@@ -17,7 +17,7 @@ version: "1.8.1"
 **正路五步**
 
 ```bash
-python scripts/env.py                                  # ① 环境（Python / bsk / 扩展）
+python scripts/env.py                                  # ① 环境（Python / ego-browser 默认，bsk 备用）
 python scripts/wa.py bind "<对话地址>" --platform <key>  # ② 绑定一条对话（全程只这一条）
 python scripts/wa.py read --out runtime/wa/turn-1.md    # ③ 读网页 AI 的原文
 python scripts/orchestrator.py loop --once --file <反馈.md>  # ④ 走闸门：演练→批准→真发→核验
@@ -34,7 +34,8 @@ python scripts/wa.py doctor --explain
 有 ⬆ 就**口头提示用户**，用户拍板后才升级——Starpilot 走 `python scripts/upgrade.py --to-latest`；
 bsk 走 `python scripts/env.py --install`（活跃 bsk session 存在时禁升级）。只提示不擅自动。
 
-**bsk 版本钉（vendor 随仓分发）**：固定 **0.4.1**（0.4.2 起有已知劣化：浏览器执行任务被频繁打断）。
+**bsk 版本钉（vendor 随仓分发，仅备用通路使用）**：固定 **0.4.1**（0.4.2 起有已知劣化：浏览器执行任务被频繁打断）。
+默认通路是 ego，不走下面这套；只有用户明确拒绝 ego、切到 `STARPILOT_TRANSPORT=bsk` 时才生效。
 星舵调用走仓库自带的钉住版二进制 `vendor/bsk/0.4.1/<triple>/`（五平台产物，
 `scripts/bsk_vendor.py` 解析 + sha256 校验，解析顺序 vendor 优先），机器级 bsk
 装什么版本都影响不到星舵。PATH 上的 L2 shim 闸门照旧拦截裸调 `bsk session start`，
@@ -140,50 +141,57 @@ python scripts/upgrade.py --to-latest    # 真升：选源 → 下载 → 备份
 
 ---
 
-## 0.2 首次激活：装不装 bsk，弹窗问一次（浏览器后端选择）
+## 0.2 首次激活：默认用 ego，bsk 仅备用（2026-11-21 依赖政策）
 
-**背景**：很多宿主 agent 自带浏览器能力，bsk 不是唯一路径。星舵有两种浏览器后端：
+**依赖政策（优先级从高到低）**：
 
-| 后端 | 是什么 | 得到什么 | 失去什么 |
+1. **ego-browser（egolite 传输）——唯一默认/首选依赖**。新环境一律先装它，不再先问 bsk。
+2. **bsk——备用，计划完全移除**。只有用户**明确表示不愿使用 ego** 时才允许启用；
+   不得以「已经装了 bsk」「Mac 上想用 bsk」为理由绕开 ego。macOS 上 ego 的稳定性更高。
+3. **Playwright 等其他工具——最后手段**。同样只在用户拒绝 ego 时评估，且需单独说明代价。
+4. **agent 内置浏览器（builtin）——零安装兜底**，按手动规程执行。
+
+| 通路 | 是什么 | 得到什么 | 失去什么 |
 |---|---|---|---|
-| `egolite`（2026-11-12 起本机默认） | 装 ego-browser（ego lite）CLI | 全自动：orchestrator loop、写闸门、三时钟、平台占用锁（经 op 队列，worker 后台常驻） | 无 bsk 窗口生命周期（TaskSpace 托管） |
-| `bsk` | 装 bsk CLI + 浏览器扩展 | 全自动：orchestrator loop、写闸门、自动续窗、三时钟、平台占用锁 | 要装两个依赖 |
+| `egolite`（默认） | 装 ego-browser（ego lite）CLI | 全自动：orchestrator loop、写闸门、三时钟、平台占用锁（经 op 队列，worker 后台常驻） | 无 bsk 窗口生命周期（TaskSpace 托管） |
+| `bsk`（备用/计划移除） | 装 bsk CLI + 浏览器扩展 | 全自动，行为与历史版本一致 | 要装两个依赖；后续版本将不再维护 |
 | `builtin` | 用 agent **内置浏览器**，不装任何东西 | 手动规程（`references/builtin-mode.md`），判据照用 | 无状态机、无写闸门、无平台锁（边界见该文 §E） |
 
-> **与传输层的关系（0.1.5 起 / 2026-11-12 更新）**：op 队列是**脚本侧**的传输层，
-> 有两个变体——`STARPILOT_TRANSPORT=egolite`（本机经 config 已启用，worker 驱动
-> ego-browser，可后台常驻）与 `STARPILOT_TRANSPORT=iab`（实验性，worker 驱动
-> ZCode IAB，agent 手动跑）；`builtin` 是 **agent 侧**手动规程。三者都不装 bsk。
+> **与传输层的关系**：op 队列是**脚本侧**的传输层，有两个变体——
+> `STARPILOT_TRANSPORT=egolite`（默认，worker 驱动 ego-browser，可后台常驻）与
+> `STARPILOT_TRANSPORT=iab`（实验性）；`builtin` 是 **agent 侧**手动规程。
+> 三者都不需要 bsk。
 
-**流程（只在「bsk 没有 + 用户没选过」时走，config 记过就永远不再问）**：
+**流程（默认不问 bsk）**：
 
-1. `python scripts/env.py --json` → 看 `backend` 与 `needs_decision`。
-2. `needs_decision: true` → 用宿主的**按钮弹窗**（WorkBuddy 是 AskUserQuestion；其他宿主用等效交互）问**一次**：
+1. `python scripts/env.py --json` → 看 `backend`、`transport`、`ego_browser`、`actions`。
+2. `transport=egolite` 且 `ego_browser.ok=false` → **直接按 actions 引导安装 ego**（GUI 安装包，需用户亲手 onboarding），不弹「装不装 bsk」。
+3. 只有用户**明确说不愿使用 ego** 时，才用宿主按钮弹窗问一次：
 
-   > 星舵需要一个浏览器来跟网页版 AI 对话。装 bsk 依赖，还是直接用你的内置浏览器？
-   > - **安装 bsk（推荐）**——全自动循环，需在浏览器启用 BrowserSkill 扩展
-   > - **用我的内置浏览器**——不装任何依赖，按手动规程执行（`references/builtin-mode.md`）
+   > 你不想用 ego-browser。要不要改用 bsk（备用，后续会移除）或你的内置浏览器？
 
-3. 用户选完**立即记录**（不重复问）：
+   - **bsk（备用）**——全自动循环，需 bsk CLI + BrowserSkill 扩展
+   - **内置浏览器**——不装依赖，按手动规程执行（`references/builtin-mode.md`）
+
+4. 用户选完**立即记录**（不重复问），记录动作写一行进 journal：
 
    ```bash
-   python scripts/env.py --set-backend bsk       # 或 builtin
+   python scripts/env.py --set-transport bsk     # 仅在用户拒绝 ego 后
+   python scripts/env.py --set-backend builtin   # 或内置浏览器
    ```
 
-   记录动作写一行进 journal（谁选的、什么时候、选了什么）。
-4. 选 `bsk` → 接着 `python scripts/env.py --install`（§5.1），扩展开关仍要用户点一次；
-   选 `builtin` → 什么都不装，BIND 与 LOOP 按 `references/builtin-mode.md` 的规程走，
+5. 选 `bsk` → `python scripts/env.py --install`（§5.1），扩展开关仍要用户点一次；
+   选 `builtin` → 什么都不装，BIND 与 LOOP 按 `references/builtin-mode.md` 走，
    选择器与三时钟参数用 `python scripts/platforms.py spec <平台>` 取。
-5. `backend` 已经是 `bsk` 或 `builtin` → 直接按对应模式开工，**不再弹窗**。
 
-用户明确说「别问我 / 直接用 X」时，跳过弹窗直接 `--set-backend X`，同样留痕。
+用户明确说「别问我 / 直接用 X」时，跳过弹窗直接记录，同样留痕。
 
-> 为什么只问一次：这是环境配置不是业务决策，反复问只会训练用户无脑点确认。
-> 之后想换后端，用户明说即可（`--set-backend` 随时可改）。
+> 为什么默认不问：ego 是既定默认依赖，反复问「要不要 bsk」等于把备用方案正常化。
+> 只有用户主动拒绝 ego 时才进入备用路径。
 >
-> 想知道三个后端（bsk / builtin / Playwright）的详细对比（登录态、风控、安装成本），
-> 看 `references/browser-backends.md`——结论：星舵主场景 bsk 最合适，Playwright
-> 需要另装 Python 包 + 约 150–300MB 浏览器内核且不复用登录态，仅适合无登录的抓取/测试场景。
+> 想看各通路在登录态、风控、安装成本上的对比，看 `references/browser-backends.md`——结论：
+> 星舵主场景默认 ego；bsk 仅作历史兼容；Playwright 需要另装内核且不复用登录态，只适合
+> 无登录的抓取/测试。
 
 ---
 
@@ -392,8 +400,8 @@ agent 不得再以「缺省就是 step」为由每轮停下来要确认——那
 ## 3. BIND：接入网页版 AI
 
 > **先自检环境，缺什么自己装**（细则见 §5.1）：
-> `python scripts/env.py --json` → rc=0 才往下走；rc=4 照 `actions` 修（后端未定先走 §0.2 弹窗，
-> 缺 bsk 就 `--install`）；rc=5 说明自动安装失败，把输出贴给用户，别带着坏环境硬跑。
+> `python scripts/env.py --json` → rc=0 才往下走；rc=4 照 `actions` 修（默认缺 ego 就按引导装；
+> 只有用户明确拒绝 ego 才切 bsk/内置浏览器）；rc=5 说明自动安装失败，把输出贴给用户，别带着坏环境硬跑。
 >
 > **backend = builtin 的从这里分流**：脚本不碰浏览器，绑定 / 发送 / 等待 / 分诊全部按
 > `references/builtin-mode.md` 的规程由 agent 用内置浏览器执行；本章其余小节以 bsk 为准
@@ -690,7 +698,7 @@ agent 只负责执行、留证据、报回执。原因很实在——agent 自�
 | **对话真没了 / 被换掉** | `conv_id` 变了、地址变首页、提示对话不存在 | 走 4.9.1 `rebind`（开新对话 + 上下文摘要） |
 | **发出去了但没回复** | 消息数涨了、页面也变了，就是没有正文；或干脆什么都没动 | 先 `wa.py triage` 分诊（4.9.4），**不是等满 15 分钟** |
 
-bsk 默认空闲 5 分钟就回收 Agent Window，所以「窗口没了」是常态、不是故障。
+bsk 传输默认空闲 5 分钟就回收 Agent Window，所以「窗口没了」是常态、不是故障（egolite 由 TaskSpace 托管，无此行为）。
 **别把续窗写成 rebind**：新对话没有上文，拿它接着干等于让 AI 失忆重来。
 
 #### 4.9.1 对话漂移 / 对话消失 → `rebind`
@@ -836,16 +844,15 @@ python scripts/decisions.py check  --ledger state/decisions.json \
 
 ### 5.1 依赖：缺什么自己装，别让用户先装
 
-前置只有两个：**Python 3.9+** 和**一条浏览器通路**。通路四条（§0.2 弹窗定，只问一次）：
-**egolite**（2026-11-12 起默认，`STARPILOT_TRANSPORT=egolite`，用 ego-browser，见下）、
-**bsk**（全自动，`STARPILOT_TRANSPORT=bsk`）、**agent 内置浏览器**（`references/builtin-mode.md`，不装依赖）、
-**IAB 传输层**（`STARPILOT_TRANSPORT=iab`，见下方 0.1.5 小节，实验性）。
-后端选定后 bsk 相关步骤只在 `bsk` 模式适用；`builtin` 模式下 wa.py 的浏览器类命令会以
-rc=6 拒绝并提示规程位置——这是设计行为，不是故障。
+前置只有两个：**Python 3.9+** 和**一条浏览器通路**。通路的默认与优先级（§0.2）：
+**egolite**（默认/首选，`STARPILOT_TRANSPORT=egolite`，用 ego-browser，见下）、
+**agent 内置浏览器**（`references/builtin-mode.md`，不装依赖的兜底）、
+**IAB 传输层**（`STARPILOT_TRANSPORT=iab`，实验性）、
+**bsk**（**仅备用、计划移除**，`STARPILOT_TRANSPORT=bsk`，只在用户明确拒绝 ego 时使用）。
+`builtin` 模式下 wa.py 的浏览器类命令会以 rc=6 拒绝并提示规程位置——这是设计行为，不是故障。
 
-**egolite 传输（2026-11-12 起本机默认）**：取值优先级
-`STARPILOT_TRANSPORT` env > config 的 `"transport"` 键 > bsk 兜底。本机已用
-`python scripts/env.py --set-transport egolite` 写入 config（~/.starpilot/config.json）。
+**egolite 传输（默认，2026-11-21 依赖政策）**：取值优先级
+`STARPILOT_TRANSPORT` env > config 的 `"transport"` 键 > **egolite 兜底**。
 页面动作（navigate/evaluate/fill/press）走 op 队列（`scripts/transport.py`），由
 `scripts/egolite-worker.mjs` 驱动 **ego-browser**（ego lite）消费。要点：
 
@@ -903,7 +910,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
   · 窗口纪律（单窗口/开窗限速）在 iab 传输下由宿主托管语义替代，不适用。
   · **IAB 传输为实验性**：op 队列/路由/导航/写入/发送链路已实测跑通，但
     「goto 对话 URL 后内容区挂载」在 2026-10-31 晚间实测中失效（msgs=0、
-    侧栏点击不导航；bsk 传输同样命中 → 判定平台侧行为）。默认传输仍是 bsk；
+    侧栏点击不导航；bsk 传输同样命中 → 判定平台侧行为）。默认传输是 egolite；
     切 iab 前先跑一轮只读验证（navigate + evaluate probe msgs>0）。
 - **bsk ≥ 0.4.0 的 cooperate 语义已由兼容层处理，不要绕过**（bsk 传输下）：0.4.0 起所有触页面动作
   （evaluate/navigate/fill/press/click）要求 `--context`（来自 `cooperate sync`），
@@ -968,7 +975,7 @@ python scripts/env.py --install    # 官方 install.sh / install.ps1，装到 ~/
 | `orchestrator.py stage add\|start\|accept\|list` | 阶段状态机 pending→executing→submitted→accepted；未 accepted 不许开下一阶段 |
 | `decisions.py record\|check\|list` | 裁定台账：倾向≠批准、裁定绑定动作与事实指纹、事实变即失效 |
 | `lessons_audit.py [--strict]` | 知识库体检：格式/重复/超期 open/blocking open |
-| `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、浏览器后端（bsk / builtin）、bsk 定位与版本、扩展是否连上；`--install` 用官方脚本装 bsk；`--set-backend` 记录 §0.2 的用户选择 |
+| `env.py [--json\|--install]` | 环境自检 / 自举：Python 版本、浏览器通路（默认 ego / 备用 bsk / builtin）、ego-browser 与 bsk 定位和版本、扩展连接；`--install` 默认给 ego 安装引导（bsk 仅备用）；`--set-transport` 记录传输层 |
 | `upgrade.py [--check\|--to-latest]` | 从 GitHub 拉最新版覆盖安装（自动切公益加速镜像、备份、装后自检），见 §0.1 |
 
 ### 5.3 会话纪律
@@ -1203,7 +1210,8 @@ python scripts/contract_lint.py        # 文档/代码/rc 表三方对账，非 
 | `stage start` 被拒（blocked_by） | 上一阶段还停在 submitted，没收 accepted | 让 web_ai 或用户 `stage accept <id> --by web_ai --evidence '<依据>'` 后再 start；收口 ≠ 验收通过 |
 | `decisions.py check` 返回 6 | 无记录 / 只是倾向（tentative）/ 事实已变 | 重新发裁定申请（`templates/web-ai-decision.md`），拿到明确「批准 A」再动手；软话不算授权 |
 | `msg_count=0` 但页面正常 | 手工 bsk session 顶掉了 state 里的 session | 重新 `wa.py bind <url>` 恢复 |
-| 找不到 bsk | 没装 / 不在 PATH / 扩展没开 / **后端是 builtin（设计如此）** | 先看 `env.py --json` 的 `backend`：`builtin` 下 wa.py 浏览器命令 rc=6 属正常，按 `references/builtin-mode.md` 手动执行；`bsk` 后端才自己装：`--install`（官方脚本，用户级）；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
+| 找不到 ego-browser | 没装 / 不在 PATH / 未完成 onboarding | 默认通路就是 ego：按 `env.py` 的 actions 引导用户装 ego-browser（GUI 安装包），装完开新终端复检 `ego-browser --version` 与 `env.py --json` 的 `ego_browser.ok` |
+| 找不到 bsk | 没装 / 不在 PATH / 扩展没开 / **后端是 builtin（设计如此）** | **先确认用户是否真的拒绝 ego**；只有拒绝 ego 后才走 bsk：`--set-transport bsk` + `--install`；`builtin` 下 wa.py 浏览器命令 rc=6 属正常，按 `references/builtin-mode.md` 手动执行；仍找不到就设 `BSK_BIN` 指全路径；`doctor.connected=false` 才是让用户点扩展开关的时机 |
 | 发送后输入框空了、页面却没有新会话 | 平台侧限流/拒绝（Kimi 会弹「和Kimi聊天的人太多了」弹窗） | 先关弹窗、确认模型档位，再按 §4.1 的三重判据重发；仍不行按硬规则 4 停下转交 |
 | 输入框内容删不掉、重写变追加 | 受控编辑器忽略 `execCommand('delete')`／`paste` 是追加 | 用 Range 圈定内容 + `execCommand('insertText')` 覆盖；Kimi 已按此配置 |
 | 输入框里留着上次的草稿 | 平台把草稿持久化了（刷新也还在） | 原生按键清空：focus → `Ctrl+A` → `Backspace`，再探字数 |
@@ -1321,7 +1329,7 @@ bsk（仅 bsk 传输）、**ego**。ego 无远端 API，比对的是本机版本
 - `references/lessons.md` — 实战踩坑沉淀（跨项目复用）
 - `templates/` — 需求卡片 / **首次确认单（人话版）** / 反馈 / **裁定申请单（先裁后动）** / 阶段报告 / 完成判定 / 平台记忆自测
 - `scripts/wa.py` — bind / send / wait / read / state / plock 命令实现
-- `scripts/env.py` — 环境自检 / 自举：Python 版本、bsk 定位与版本、扩展连接；`--install` 自动装 bsk
+- `scripts/env.py` — 环境自检 / 自举：Python 版本、浏览器通路（默认 ego，bsk 备用）、ego-browser 定位与版本、扩展连接；`--install` 默认给 ego 引导
 - `scripts/decisions.py` — 裁定台账：倾向≠批准、动作绑定、事实指纹失效
 - `scripts/platforms.py` — 平台适配层：选择器与绑定形态的唯一来源
 - `scripts/write_gate.py` — 写闸门：dry-run → 授权单（scope/expire_time）→ 真实写 → 核验

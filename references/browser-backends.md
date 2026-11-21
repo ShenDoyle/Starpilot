@@ -1,45 +1,64 @@
-# 浏览器通路对比：bsk vs Playwright vs agent 内置浏览器
+# 浏览器通路对比：ego-browser（默认）vs bsk（备用）vs Playwright vs 内置浏览器
 
-> 结论先行：**星舵的主场景（驱动网页版 AI 平台干活）选 bsk**。Playwright 不是不行，
-> 是它的强项不在星舵要解决的问题上，而且要多装一套不轻的依赖。
+> 结论先行（2026-11-21 依赖政策）：**ego-browser 是唯一默认/首选依赖**。
+> bsk 降级为**备用，计划完全移除**；只有用户明确表示「不愿使用 ego」时才允许启用。
+> Playwright 等其他工具也只在同样前提下作最后手段。macOS 上 ego 的稳定性更高，
+> 不能把「Mac 上想用 bsk」当成合理默认。
+>
+> 内置浏览器（builtin）仍可作为「什么都不装」的零依赖兜底。
 
 ## 1. 一张表看懂
 
-| | bsk（默认） | Playwright | agent 内置浏览器（builtin） |
-|---|---|---|---|
-| 是什么 | 本地 CLI + 浏览器扩展，通过 CDP 驱动**用户真实的 Chrome** | 微软出的自动化库，自己**另起一个浏览器内核**（默认 Chromium） | 宿主 agent 自带的浏览器工具，agent 手动按规程操作 |
-| **登录态** | ✅ 直接复用你浏览器里的已有登录（平台早登过就用） | ❌ 全新空白环境，每个平台的登录/Cookie 都要单独维护或注入 | ⚠️ 看宿主：多数自带 profile 能保登录，但不受星舵管理 |
-| **风控友好度** | ✅ 真实浏览器指纹 + 真实用户环境，网页 AI 平台认它 | ❌ 自动化特征明显（`navigator.webdriver`、CDP 痕迹、headless 特征），Cloudflare/Turnstile 类风控更容易拦 | ⚠️ 介于两者之间 |
-| **自动化能力** | 够用：点击/输入/读 DOM/管 tab/Agent Window | ✅ 最强：网络拦截、多上下文、截图、trace、并发实例 | ❌ 最弱：全靠 agent 手动，无状态机 |
-| **要装什么** | bsk CLI（单文件，用户级）+ 扩展（Chrome 商店） | **要装**：① `pip install playwright`（或 `npm i playwright`）② `playwright install chromium` 再下约 150–300MB 浏览器内核；换内核（firefox/webkit）还要再下 | 什么都不装 |
-| **独立 Agent Window / 不打扰用户** | ✅ 0.4.0 起 | ❌ 它开的是自己的窗口，但要小心别抢焦点 | ⚠️ 视宿主 |
-| **星舵配套（状态机/租约收割/平台锁/归属校验）** | ✅ 全接 | ❌ 都没有，得自己造 | ⚠️ 部分设计上兼容（builtin-mode.md） |
+| | ego-browser（默认） | bsk（备用/计划移除） | Playwright | agent 内置浏览器（builtin） |
+|---|---|---|---|---|
+| 是什么 | ego lite 自带浏览器 + `ego-browser` CLI；星舵经 op 队列 + 后台 worker 驱动 | 本地 CLI + 浏览器扩展，通过 CDP 驱动**用户真实的 Chrome/Edge** | 微软自动化库，自己**另起浏览器内核** | 宿主 agent 自带的浏览器工具，agent 手动按规程操作 |
+| **登录态** | ✅ ego 自持登录态（首次在 ego 内登录一次） | ✅ 复用用户浏览器已有登录 | ❌ 全新空白环境，需要单独维护 storage_state | ⚠️ 看宿主：多数能保登录，但不受星舵管理 |
+| **风控友好度** | ✅ 真实浏览器环境，实测稳定 | ✅ 真实浏览器指纹 + 用户环境 | ❌ 自动化特征明显，Cloudflare/Turnstile 更易拦 | ⚠️ 介于两者之间 |
+| **自动化能力** | ✅ 够用：点击/输入/读 DOM/管标签页，op 队列协议 | ✅ 够用 | ✅ 最强：网络拦截、多上下文、trace、并发 | ❌ 最弱：全靠 agent 手动，无状态机 |
+| **要装什么** | ego lite GUI（含 CLI），无扩展 | bsk CLI + 扩展 | ① `pip/npm install playwright` ② `playwright install chromium`（约 150–300MB 内核） | 什么都不装 |
+| **窗口/并发** | TaskSpace 托管，无 bsk 式空闲回收 | Agent Window，空闲 5 分钟回收 | 自管窗口/上下文 | 视宿主 |
+| **星舵配套** | ✅ 状态机/写闸门/租约收割/平台锁全接 | ✅ 全接（历史实现） | ❌ 需要另写执行层 | ⚠️ 仅手动规程 |
 
-## 2. 为什么星舵不把 Playwright 当主通路
+## 2. 依赖政策（为什么这样排）
 
-1. **登录态是死穴**：星舵驱动的是 ChatGPT / DeepSeek / Kimi / 豆包这类**要登录**的平台。
-   bsk 直接用你已登录的真实 Chrome；Playwright 每个平台都要单独搞 storage_state，
-   会话一过期就得人工重新注入——自动化收益被登录维护吃掉大半。
-2. **风控更凶**：网页 AI 平台普遍挂着 Cloudflare/Turnstile 类防护，对 Playwright 的
-   自动化指纹更敏感；bsk 走的是人眼看起来一模一样的真实浏览器。
-3. **配套全断**：窗口租约、自动收割、平台占用锁、归属校验、实例唯一性……这些机制
-   全部长在 bsk 的 CLI/扩展之上，换 Playwright 等于重写一遍执行层。
+1. **ego 是既定默认**：2026-11-12 起即为主通路，2026-11-21 再次确认。新环境先装 ego，不再先问 bsk。
+2. **bsk 只做兼容**：历史上大量判据、探针、lessons 都基于 bsk 沉淀，保留一段时间便于回退；
+   但它不再是推荐项，后续版本计划完全移除。
+3. **只有用户拒绝 ego 才降级**：用户明确说「不用 ego」时，才可以在 bsk / 内置浏览器 / Playwright
+   之间选择，并把选择写进 config（`--set-transport bsk` / `--set-backend builtin`）留痕。
+4. **不要用「已经装了」当理由**：本机同时存在 bsk 和 ego 时，默认仍走 ego。
 
-## 3. 什么时候 Playwright 是对的选择
+## 3. 什么时候 bsk 仍可能被用到
 
-- **不需要登录态**的活：公开页面抓取、批量截图、E2E 测试、静态站点验证；
-- 需要**网络层控制**：拦截请求、mock 接口、统计页面资源；
-- 需要**多实例并发**跑隔离任务（每个 context 独立 Cookie）。
+- 用户明确拒绝安装/使用 ego；
+- 需要复现历史 bsk 专属问题（扩展归属、Agent Window、cooperate 语义）做对照；
+- ego 出现阻断性故障且用户接受临时回退（回退后应记录 lessons，并尽快回到 ego）。
 
-这些场景星舵现在不做；若未来要做，Playwright 可以作为第三后端接入
-（env.py 加 `playwright` backend，判断标准与 §0.2 弹窗一致），当前版本未实现。
+## 4. 什么时候 Playwright 是对的选择
 
-## 4. 安装成本明细（如果哪天要装 Playwright）
+- 用户拒绝 ego，且任务**不需要登录态**：公开页面抓取、批量截图、E2E、静态站验证；
+- 需要**网络层控制**：拦截请求、mock 接口、统计资源；
+- 需要**多实例并发**跑隔离任务。
+
+这些不是星舵默认场景；接入前必须单独说明「另装内核、登录态要自行维护、风控更敏感」的代价。
+
+## 5. 安装成本明细
+
+ego-browser：GUI 安装包 + 应用内 onboarding（导入日常浏览器的登录态），CLI 随安装注册进 PATH。
+
+bsk（仅备用）：
 
 ```bash
-pip install playwright        # Python 包本体，几 MB
-playwright install chromium   # 浏览器内核，约 150–300MB 下载，解压后更大
-# 系统依赖缺失时（Linux）还要：playwright install-deps chromium
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
 ```
 
-对比 bsk：CLI 单文件 + 扩展商店点一下，无内核下载。
+Windows：`irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex`，再启用扩展。
+
+Playwright（仅最后手段）：
+
+```bash
+pip install playwright        # 或 npm i playwright
+playwright install chromium   # 约 150–300MB
+# Linux 缺系统依赖时：playwright install-deps chromium
+```

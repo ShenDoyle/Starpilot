@@ -2,6 +2,27 @@
 
 版本号只从 `SKILL.md` front-matter 读。对外版本从 `0.1.0` 起算；开发期的内部编号（→ 2.3.4）是当时的迭代序号，不对外。
 
+## 1.9.0（2026-11-21，依赖政策：ego 成为唯一默认/首选，bsk 降级为备用并计划移除）
+
+用户明确裁定后的依赖收敛：**ego-browser（egolite 传输）是默认且首选通路**；bsk 退居备用、
+后续版本计划完全移除；只有用户明确表示「不愿使用 ego」时才允许启用 bsk，Playwright 等其他
+工具仅在同样前提下作最后手段。macOS 上 ego 更稳定，不能作为回退 bsk 的理由。
+
+### 行为变更
+- `scripts/transport.py`：传输兜底从 `bsk` 改为 `egolite`；bsk 必须由 env/config 显式选择。
+  单测基线仍由 `tests/__init__.py` 钉在 bsk，避免套件掉进 op 队列轮询。
+- `scripts/env.py`：`resolve_backend` 在 egolite 传输下直接返回 egelite，不再「找到 bsk 就算 bsk」；
+  `--install` 默认给 ego 安装引导；`--set-backend bsk` / `--set-transport bsk` 增加备用/移除警告；
+  人读报告优先显示 ego-browser，bsk 仅作「也在装但不参与」提示。
+- `env.py` 的未定后端提示改为「默认先装 ego；只有拒绝 ego 才问 bsk/内置浏览器」。
+
+### 文档
+- `SKILL.md` §0.2 重写为依赖政策（ego 默认、bsk 备用、Playwright 最后手段），首次激活不再问
+  「装不装 bsk」；§5.1、故障表、命令表同步更新。
+- `README.md` / `README.zh-CN.md`、`references/browser-backends.md`、`references/builtin-mode.md`
+  统一口径：ego 首选，bsk 备用/计划移除，macOS ego 更稳。
+- 版本号 1.8.1 → 1.9.0。
+
 ## 1.8.1（2026-11-13，执行安全层落地：动作账本 + 执行闸门 + 裁决协议；README 对齐当前形态）
 
 本版把「一个动作到底发没发出去」从口头约定变成可判定、可追溯的机制，落成**纯标准库独立模块**；
